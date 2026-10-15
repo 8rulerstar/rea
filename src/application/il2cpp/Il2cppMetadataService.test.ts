@@ -40,6 +40,11 @@ const report: Il2cppMetadata = {
   images: [],
   types: [],
   methods: [],
+  fields: [],
+  properties: [],
+  events: [],
+  parameters: [],
+  string_literals: [],
   limitations: [],
 };
 

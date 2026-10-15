@@ -112,6 +112,11 @@ try {
       methods: report.methods.length,
       nested_types: report.types.filter((type) => type.declaring_type !== -1)
         .length,
+      fields: report.fields.length,
+      properties: report.properties.length,
+      events: report.events.length,
+      parameters: report.parameters.length,
+      string_literals: report.string_literals.length,
     });
     const page = analysisViewResultSchema.parse(
       (

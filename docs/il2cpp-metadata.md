@@ -48,7 +48,8 @@ the original rows without reopening or decoding the file:
 }
 ```
 
-Collections are `images`, `types` and `methods`. `limit` defaults to 64. The page
+Collections are `images`, `types`, `methods`, `fields`, `properties`, `events`,
+`parameters` and `string_literals`. `limit` defaults to 64. The page
 offset is the metadata index of the first returned row. `limit` has no cap of
 its own beyond the MCP response budget. Select `detail: "complete"` to return
 every row inline when the result fits that budget, as a small game's often does.
@@ -79,6 +80,11 @@ The result contains:
 - `types`: `name`, `namespace`, `method_start`, `method_count`,
   `nested_type_start`, `nested_type_count` and `declaring_type`;
 - `methods`: `name` and `declaring_type`;
+- `fields`, `properties` and `events`: `name` and `declaring_type`, the type
+  whose member range holds the row (`-1` when none does);
+- `parameters`: `name` and `method`, the method whose parameter range holds it;
+- `string_literals`: managed string literals as `value`, or `value_base64` with
+  the exact bytes when they are not valid UTF-8;
 - `limitations`.
 
 A row's position in its collection is its metadata index, so `type_start`,

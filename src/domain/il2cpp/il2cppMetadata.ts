@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { digestSchema } from "../digests.js";
 import { localPathStringSchema } from "../localPath.js";
+import { CANONICAL_BASE64_PATTERN } from "../stringPatterns.js";
 
 /** Header section order shared by global-metadata.dat versions 29, 31 and 39. */
 export const IL2CPP_METADATA_SECTION_NAMES = [
@@ -44,6 +45,11 @@ export const IL2CPP_METADATA_COLLECTIONS = [
   "images",
   "types",
   "methods",
+  "fields",
+  "properties",
+  "events",
+  "parameters",
+  "string_literals",
 ] as const;
 
 const count = z.number().int().nonnegative();
@@ -97,6 +103,26 @@ export const il2cppMetadataMethodSchema = z.strictObject({
   declaring_type: optionalIndex,
 });
 
+/** Field, property or event name and the type whose member range holds it. */
+export const il2cppMetadataMemberSchema = z.strictObject({
+  name: z.string(),
+  /** -1 when no type range claims the row. */
+  declaring_type: optionalIndex,
+});
+
+/** Parameter name and the method whose parameter range holds it. */
+export const il2cppMetadataParameterSchema = z.strictObject({
+  name: z.string(),
+  /** -1 when no method range claims the row. */
+  method: optionalIndex,
+});
+
+/** Managed string literal; undecodable UTF-8 keeps its exact bytes instead. */
+export const il2cppMetadataStringLiteralSchema = z.strictObject({
+  value: z.string().nullable(),
+  value_base64: z.string().regex(CANONICAL_BASE64_PATTERN).nullable(),
+});
+
 /** Unrefined report fields, shared with projections that omit row collections. */
 export const il2cppMetadataObjectSchema = z.strictObject({
   artifact: z.strictObject({
@@ -124,6 +150,11 @@ export const il2cppMetadataObjectSchema = z.strictObject({
   images: z.array(il2cppMetadataImageSchema),
   types: z.array(il2cppMetadataTypeSchema),
   methods: z.array(il2cppMetadataMethodSchema),
+  fields: z.array(il2cppMetadataMemberSchema),
+  properties: z.array(il2cppMetadataMemberSchema),
+  events: z.array(il2cppMetadataMemberSchema),
+  parameters: z.array(il2cppMetadataParameterSchema),
+  string_literals: z.array(il2cppMetadataStringLiteralSchema),
   limitations: z.array(z.string()),
 });
 

@@ -27,32 +27,6 @@ export interface Il2cppMetadataFixtureOptions {
   };
 }
 
-const widthFor = (entries: number): Width =>
-  entries <= 0xff ? 1 : entries <= 0xffff ? 2 : 4;
-
-/** Type and method rows a fixture holds, including any wide-index filler. */
-export const fixtureRows = (options: Il2cppMetadataFixtureOptions = {}) => {
-  const fillers = options.wide?.fillerTypes ?? 0;
-  const last = FIXTURE_TYPES.length + fillers - 1;
-  const types = [
-    ...FIXTURE_TYPES,
-    ...Array.from({ length: fillers }, (_, index) => ({
-      name: "Filler",
-      namespace: "",
-      method_start: index === fillers - 1 ? FIXTURE_METHODS.length : -1,
-      method_count: index === fillers - 1 ? 1 : 0,
-      nested_type_start: -1,
-      nested_type_count: 0,
-      declaring_type: -1,
-    })),
-  ];
-  const methods = [
-    ...FIXTURE_METHODS,
-    ...(fillers === 0 ? [] : [{ name: "Fill", declaring_type: last }]),
-  ];
-  return { types, methods };
-};
-
 export const FIXTURE_IMAGES = [
   { name: "Assembly-CSharp.dll", type_start: 0, type_count: 3 },
   { name: "mscorlib.dll", type_start: 3, type_count: 1 },
@@ -103,6 +77,21 @@ export const FIXTURE_METHODS = [
   { name: "Add", declaring_type: 1 },
   { name: ".ctor", declaring_type: 3 },
   { name: "ToString", declaring_type: 3 },
+] as const;
+
+/** Members of types 0 and 1; row position is the FieldIndex. */
+export const FIXTURE_FIELDS = [
+  { name: "slot", declaring_type: 0 },
+  { name: "Count", declaring_type: 1 },
+] as const;
+
+/** The one parameter, owned by method 2 (`Add`). */
+export const FIXTURE_PARAMETERS = [{ name: "amount", method: 2 }] as const;
+
+const INVALID_UTF8_LITERAL = Buffer.from([0xff, 0xfe]);
+export const FIXTURE_STRING_LITERALS = [
+  { value: "Hello", value_base64: null },
+  { value: null, value_base64: INVALID_UTF8_LITERAL.toString("base64") },
 ] as const;
 
 const writeIndex = (
@@ -185,6 +174,138 @@ const assembleFile = (
   return { bytes, headerField, section };
 };
 
+/** Method records with parameter ranges for the fixture parameters. */
+const encodeMethods = (
+  rows: readonly { readonly name: string; readonly declaring_type: number }[],
+  methodBytes: number,
+  { D, T, P, G }: Readonly<Record<"D" | "T" | "P" | "G", Width>>,
+  returnToken: number,
+  intern: (value: string) => number,
+) => {
+  const recordBytes = { methods: methodBytes };
+  const methods = Buffer.alloc(rows.length * recordBytes.methods);
+  rows.forEach((method, index) => {
+    const at = index * recordBytes.methods;
+    methods.writeInt32LE(intern(method.name), at);
+    writeIndex(methods, at + 4, D, method.declaring_type);
+    writeIndex(methods, at + 4 + D, T, 0);
+    const parameterStart = at + 4 + D + T + returnToken;
+    const parameters = FIXTURE_PARAMETERS.filter(
+      (parameter) => parameter.method === index,
+    ).length;
+    writeIndex(
+      methods,
+      parameterStart,
+      P,
+      parameters === 0
+        ? -1
+        : FIXTURE_PARAMETERS.findIndex(
+            (parameter) => parameter.method === index,
+          ),
+    );
+    writeIndex(methods, parameterStart + P, G, -1);
+    methods.writeUInt32LE(0x06000001 + index, parameterStart + P + G);
+    methods.writeUInt16LE(parameters, at + recordBytes.methods - 2);
+  });
+
+  return methods;
+};
+
+/** Field, parameter and string literal sections for the fixture rows. */
+const encodeMembers = (
+  T: Width,
+  fixed: boolean,
+  intern: (value: string) => number,
+) => {
+  // Field records: name, type index, token. Parameters: name, token, type.
+  const fields = Buffer.alloc(FIXTURE_FIELDS.length * (8 + T));
+  FIXTURE_FIELDS.forEach((field, index) => {
+    fields.writeInt32LE(intern(field.name), index * (8 + T));
+    writeIndex(fields, index * (8 + T) + 4, T, 0);
+  });
+  const parameterRows = Buffer.alloc(FIXTURE_PARAMETERS.length * (8 + T));
+  FIXTURE_PARAMETERS.forEach((parameter, index) => {
+    parameterRows.writeInt32LE(intern(parameter.name), index * (8 + T));
+    writeIndex(parameterRows, index * (8 + T) + 8, T, 0);
+  });
+  // Version 39 stores start offsets plus a sentinel; earlier versions store
+  // (length, offset) pairs.
+  const literalData = Buffer.concat([
+    Buffer.from("Hello", "utf8"),
+    INVALID_UTF8_LITERAL,
+  ]);
+  const literalStarts = [0, 5, literalData.length];
+  const literals = fixed
+    ? Buffer.alloc(16)
+    : Buffer.alloc(literalStarts.length * 4);
+  if (fixed)
+    [
+      [5, 0],
+      [INVALID_UTF8_LITERAL.length, 5],
+    ].forEach(([length, start], index) => {
+      literals.writeUInt32LE(length!, index * 8);
+      literals.writeInt32LE(start!, index * 8 + 4);
+    });
+  else
+    literalStarts.forEach((start, index) =>
+      literals.writeInt32LE(start, index * 4),
+    );
+
+  return {
+    fields,
+    parameterRows,
+    literals,
+    literalData,
+    literalRecords: fixed ? 2 : literalStarts.length,
+  };
+};
+
+const widthFor = (entries: number): Width =>
+  entries <= 0xff ? 1 : entries <= 0xffff ? 2 : 4;
+
+/** Type and method rows a fixture holds, including any wide-index filler. */
+export const fixtureRows = (options: Il2cppMetadataFixtureOptions = {}) => {
+  const fillers = options.wide?.fillerTypes ?? 0;
+  const last = FIXTURE_TYPES.length + fillers - 1;
+  const types = [
+    ...FIXTURE_TYPES,
+    ...Array.from({ length: fillers }, (_, index) => ({
+      name: "Filler",
+      namespace: "",
+      method_start: index === fillers - 1 ? FIXTURE_METHODS.length : -1,
+      method_count: index === fillers - 1 ? 1 : 0,
+      nested_type_start: -1,
+      nested_type_count: 0,
+      declaring_type: -1,
+    })),
+  ];
+  const methods = [
+    ...FIXTURE_METHODS,
+    ...(fillers === 0 ? [] : [{ name: "Fill", declaring_type: last }]),
+  ];
+  return { types, methods };
+};
+
+/** A zero-filled section of `count` records, or none when `count` is 0. */
+const zeroFilledSection = (
+  name: SectionName,
+  count: number,
+  recordBytes: number,
+): [SectionName, SectionContent][] =>
+  count === 0
+    ? []
+    : [[name, { bytes: Buffer.alloc(count * recordBytes), count }]];
+
+/** Real rows followed by zero-filled rows that no owner claims. */
+const paddedRows = (
+  rows: Buffer,
+  count: number,
+  recordBytes: number,
+): SectionContent => ({
+  bytes: Buffer.concat([rows, Buffer.alloc(count * recordBytes - rows.length)]),
+  count,
+});
+
 /** Lay sections out in header order; empty sections share the next offset. */
 export const createIl2cppMetadataFixture = (
   options: Il2cppMetadataFixtureOptions = {},
@@ -194,7 +315,10 @@ export const createIl2cppMetadataFixture = (
   const T: Width = fixed ? 4 : (options.typeIndexWidth ?? 1);
   const rows = fixtureRows(options);
   const genericContainers = options.wide?.genericContainers ?? 0;
-  const parameterCount = options.wide?.parameters ?? 0;
+  const parameterCount = Math.max(
+    options.wide?.parameters ?? 0,
+    FIXTURE_PARAMETERS.length,
+  );
   const D: Width = fixed ? 4 : widthFor(rows.types.length);
   const G: Width = fixed ? 4 : widthFor(genericContainers);
   const P: Width = fixed ? 4 : widthFor(parameterCount);
@@ -232,7 +356,8 @@ export const createIl2cppMetadataFixture = (
     intern(type.namespace);
   }
   for (const row of [...rows.types, ...rows.methods]) intern(row.name);
-  const strings = Buffer.concat(stringParts);
+  for (const row of [...FIXTURE_FIELDS, ...FIXTURE_PARAMETERS])
+    intern(row.name);
 
   const types = Buffer.alloc(typeRows.length * recordBytes.typeDefinitions);
   typeRows.forEach((type, index) => {
@@ -246,13 +371,26 @@ export const createIl2cppMetadataFixture = (
       writeIndex(types, at, T, 0x2a);
     writeIndex(types, at, G, -1);
     at += G + 4;
-    const starts = [-1, type.method_start, -1, -1, type.nested_type_start];
+    const fieldStart = FIXTURE_FIELDS.findIndex(
+      (field) => field.declaring_type === index,
+    );
+    const fieldCount = FIXTURE_FIELDS.filter(
+      (field) => field.declaring_type === index,
+    ).length;
+    const starts = [
+      fieldStart,
+      type.method_start,
+      -1,
+      -1,
+      type.nested_type_start,
+    ];
     starts.forEach((value, field) => types.writeInt32LE(value, at + field * 4));
     types.writeInt32LE(-1, at + 20);
     types.writeInt32LE(-1, at + 24);
     types.writeInt32LE(-1, at + 28);
     at += 32;
     types.writeUInt16LE(type.method_count, at);
+    types.writeUInt16LE(fieldCount, at + 4);
     types.writeUInt16LE(type.nested_type_count, at + 8);
     at += 16;
     types.writeUInt32LE(0, at);
@@ -271,17 +409,16 @@ export const createIl2cppMetadataFixture = (
     images.writeInt32LE(-1, at + 16 + 2 * D);
   });
 
-  const methods = Buffer.alloc(rows.methods.length * recordBytes.methods);
-  rows.methods.forEach((method, index) => {
-    const at = index * recordBytes.methods;
-    methods.writeInt32LE(intern(method.name), at);
-    writeIndex(methods, at + 4, D, method.declaring_type);
-    writeIndex(methods, at + 4 + D, T, 0);
-    const parameterStart = at + 4 + D + T + returnToken;
-    writeIndex(methods, parameterStart, P, -1);
-    writeIndex(methods, parameterStart + P, G, -1);
-    methods.writeUInt32LE(0x06000001 + index, parameterStart + P + G);
-  });
+  const methods = encodeMethods(
+    rows.methods,
+    recordBytes.methods,
+    { D, T, P, G },
+    returnToken,
+    intern,
+  );
+
+  const { fields, parameterRows, literals, literalData, literalRecords } =
+    encodeMembers(T, fixed, intern);
 
   const nested = Buffer.alloc(nestedTypeEntries.length * 4);
   nestedTypeEntries.forEach((value, index) =>
@@ -295,30 +432,14 @@ export const createIl2cppMetadataFixture = (
       : Buffer.alloc(interfaceOffsetBytes);
 
   const contents = new Map<SectionName, SectionContent>([
-    ["strings", { bytes: strings, count: stringIndex.size }],
+    ["stringLiterals", { bytes: literals, count: literalRecords }],
+    ["stringLiteralData", { bytes: literalData, count: 2 }],
+    ["strings", { bytes: Buffer.concat(stringParts), count: stringIndex.size }],
+    // Wide-index padding rows are zero-filled and owned by no method.
+    ["parameters", paddedRows(parameterRows, parameterCount, 8 + T)],
+    ["fields", { bytes: fields, count: FIXTURE_FIELDS.length }],
     ["methods", { bytes: methods, count: rows.methods.length }],
-    ...(genericContainers === 0
-      ? []
-      : [
-          [
-            "genericContainers",
-            {
-              bytes: Buffer.alloc(genericContainers * 16),
-              count: genericContainers,
-            },
-          ] as [SectionName, SectionContent],
-        ]),
-    ...(parameterCount === 0
-      ? []
-      : [
-          [
-            "parameters",
-            {
-              bytes: Buffer.alloc(parameterCount * (8 + T)),
-              count: parameterCount,
-            },
-          ] as [SectionName, SectionContent],
-        ]),
+    ...zeroFilledSection("genericContainers", genericContainers, 16),
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
     ["typeDefinitions", { bytes: types, count: typeRows.length }],
     ["images", { bytes: images, count: FIXTURE_IMAGES.length }],

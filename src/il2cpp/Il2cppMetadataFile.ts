@@ -4,6 +4,7 @@ import {
   type Il2cppMetadata,
   type Il2cppMetadataSection,
 } from "../domain/il2cpp/il2cppMetadata.js";
+import { readIl2cppMembers } from "./Il2cppMetadataMembers.js";
 
 export const IL2CPP_METADATA_MAGIC = 0xfab11baf;
 const NESTED_TYPE_ENTRY_BYTES = 4;
@@ -142,7 +143,7 @@ const isIndexWidth = (value: number): value is IndexWidth =>
   value === 1 || value === 2 || value === 4;
 
 /** Read a serialized index; the all-ones value of narrow widths means -1. */
-const readIndex = (bytes: Buffer, offset: number, width: IndexWidth) => {
+export const readIndex = (bytes: Buffer, offset: number, width: IndexWidth) => {
   if (width === 1) {
     const value = bytes.readUInt8(offset);
     return value === 0xff ? -1 : value;
@@ -350,7 +351,7 @@ const recordCounts = (
   };
 };
 
-const checkRange = (
+export const checkRange = (
   label: string,
   start: number,
   length: number,
@@ -405,13 +406,15 @@ const createStringReader = (bytes: Buffer, strings: Il2cppMetadataSection) => {
 };
 
 /** Checked header facts shared by the record readers. */
-interface MetadataTables {
+export interface MetadataTables {
   readonly bytes: Buffer;
   readonly section: (name: SectionName) => Il2cppMetadataSection;
   readonly widths: Il2cppMetadataDecoded["index_widths"];
   readonly recordBytes: ReturnType<typeof il2cppMetadataRecordBytes>;
   readonly counts: ReturnType<typeof recordCounts>;
   readonly typeDefinitionTypeIndices: number;
+  readonly indexing: "fixed" | "counted";
+  readonly methodReturnParameterToken: boolean;
   readonly readString: ReturnType<typeof createStringReader>;
 }
 
@@ -617,7 +620,6 @@ const checkImageRanges = (images: Il2cppMetadataDecoded["images"]) => {
   }
 };
 
-/** Decode image, type and method names without native binaries or decryption. */
 /** Row counts known from the header and record sizes, before rows are built. */
 export interface Il2cppMetadataRowCounts {
   readonly images: number;
@@ -625,6 +627,7 @@ export interface Il2cppMetadataRowCounts {
   readonly methods: number;
 }
 
+/** Decode image, type, method and member names and string literals without native binaries or decryption. */
 export const readIl2cppMetadata = (
   bytes: Buffer,
   options: {
@@ -647,6 +650,8 @@ export const readIl2cppMetadata = (
     recordBytes: expected,
     counts: recordCounts(version, section, expected),
     typeDefinitionTypeIndices: layout.typeDefinitionTypeIndices,
+    indexing: layout.indexing,
+    methodReturnParameterToken: layout.methodReturnParameterToken,
     readString: createStringReader(bytes, section("strings")),
   };
   options.beforeRows?.({
@@ -666,5 +671,6 @@ export const readIl2cppMetadata = (
     images,
     types,
     methods,
+    ...readIl2cppMembers(tables, types.length, methods.length),
   };
 };

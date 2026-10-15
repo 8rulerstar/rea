@@ -10,6 +10,9 @@ import {
   createIl2cppMetadataFixture,
   FIXTURE_IMAGES,
   FIXTURE_METHODS,
+  FIXTURE_FIELDS,
+  FIXTURE_PARAMETERS,
+  FIXTURE_STRING_LITERALS,
   FIXTURE_TYPES,
   fixtureRows,
   type Il2cppMetadataFixture,
@@ -47,10 +50,10 @@ const mutated = (
 
 describe("IL2CPP global-metadata version 39", () => {
   it.each([1, 2, 4] as const)(
-    "decodes names, ranges and nesting with a %i-byte TypeIndex under 1 KiB",
+    "decodes names, ranges and nesting with a %i-byte TypeIndex in about 1 KiB",
     (typeIndexWidth) => {
       const fixture = createIl2cppMetadataFixture({ typeIndexWidth });
-      expect(fixture.bytes.length).toBeLessThan(1024);
+      expect(fixture.bytes.length).toBeLessThan(1100);
       const decoded = readIl2cppMetadata(fixture.bytes);
       expect(decoded.metadata_version).toBe(39);
       expect(decoded.index_widths).toEqual({
@@ -67,8 +70,8 @@ describe("IL2CPP global-metadata version 39", () => {
       expect(decoded.sections[0]).toEqual({
         name: "stringLiterals",
         offset: 380,
-        size: 0,
-        count: 0,
+        size: 12,
+        count: 3,
       });
     },
   );
@@ -268,9 +271,9 @@ describe("rejected IL2CPP metadata references", () => {
   });
 
   it("rejects a shifted string section and names that start inside another string", () => {
-    // Pulled back, the fixture's strings would start inside the header.
+    // Pulled back, the fixture's strings would overlap the literal data.
     for (const [delta, reason] of [
-      [-1, "section-out-of-bounds"],
+      [-1, "section-overlap"],
       [1, "invalid-string"],
     ] as const)
       rejects(
@@ -373,7 +376,7 @@ describe("IL2CPP global-metadata versions 29 and 31", () => {
       expect(decoded.sections[0]).toEqual({
         name: "stringLiterals",
         offset: 256,
-        size: 0,
+        size: 16,
         count: null,
       });
       expect(decoded.sections.every((section) => section.count === null)).toBe(
@@ -521,4 +524,47 @@ describe("IL2CPP version 39 wide indices", () => {
       expect(decoded.images).toEqual(FIXTURE_IMAGES);
     },
   );
+});
+
+describe("IL2CPP metadata members and string literals", () => {
+  it.each([29, 31, 39] as const)(
+    "pairs version %i members with their owners and keeps undecodable literals as bytes",
+    (version) => {
+      const decoded = readIl2cppMetadata(
+        createIl2cppMetadataFixture({ version }).bytes,
+      );
+      expect(decoded.fields).toEqual(FIXTURE_FIELDS);
+      expect(decoded.parameters).toEqual(FIXTURE_PARAMETERS);
+      expect(decoded.properties).toEqual([]);
+      expect(decoded.events).toEqual([]);
+      expect(decoded.string_literals).toEqual(FIXTURE_STRING_LITERALS);
+    },
+  );
+
+  it("rejects member ranges claimed twice or outside their table", () => {
+    // Type 1 claims field 0 as well, which type 0 already owns.
+    rejects(
+      mutated((fixture, bytes) => {
+        const starts = fixture.record("typeDefinitions", 1) + 8 + 3 + 1 + 4;
+        bytes.writeInt32LE(0, starts);
+      }),
+      "declaring-type-mismatch",
+    );
+    rejects(
+      mutated((fixture, bytes) => {
+        const starts = fixture.record("typeDefinitions", 1) + 8 + 3 + 1 + 4;
+        bytes.writeInt32LE(2, starts);
+      }),
+      "index-out-of-range",
+    );
+  });
+
+  it("rejects string literals outside the literal data", () => {
+    rejects(
+      mutated((fixture, bytes) =>
+        bytes.writeInt32LE(99, fixture.section("stringLiterals").offset + 4),
+      ),
+      "index-out-of-range",
+    );
+  });
 });

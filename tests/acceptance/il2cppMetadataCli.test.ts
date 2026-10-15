@@ -66,6 +66,11 @@ cliTest(
       types: 4,
       methods: 5,
       nested_types: 1,
+      fields: 2,
+      properties: 0,
+      events: 0,
+      parameters: 1,
+      string_literals: 2,
     });
     expect(view.summary.sections).toEqual(report.sections);
     expect(view.summary.index_widths).toEqual(report.index_widths);

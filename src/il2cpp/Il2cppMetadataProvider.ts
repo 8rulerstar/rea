@@ -57,6 +57,11 @@ const TYPE_ROW = rowOverhead({
   declaring_type: 0,
 });
 const METHOD_ROW = rowOverhead({ name: "", declaring_type: 0 });
+const MEMBER_ROW = METHOD_ROW;
+const PARAMETER_ROW = rowOverhead({ name: "", method: 0 });
+// Literals carry `null` for the unused form instead of a string.
+const LITERAL_ROW =
+  JSON.stringify({ value: null, value_base64: null }).length - 4;
 
 /**
  * A lower bound on the serialized rows. Rows share decoded names, so the
@@ -79,6 +84,12 @@ const serializedRowsLowerBound = (decoded: Il2cppMetadataDecoded) => {
   for (const type of decoded.types)
     total += TYPE_ROW + text(type.name) + text(type.namespace);
   for (const method of decoded.methods) total += METHOD_ROW + text(method.name);
+  for (const members of [decoded.fields, decoded.properties, decoded.events])
+    for (const member of members) total += MEMBER_ROW + text(member.name);
+  for (const parameter of decoded.parameters)
+    total += PARAMETER_ROW + text(parameter.name);
+  for (const literal of decoded.string_literals)
+    total += LITERAL_ROW + text(literal.value ?? literal.value_base64 ?? "");
   return total;
 };
 
@@ -228,9 +239,9 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           bytes: snapshot.bytes.length,
         },
         limitations: [
-          "Only unencrypted global-metadata.dat versions 29, 31 and 39 are decoded; image, type and method names and counts are observed file content, not runtime behavior.",
-          "Native code addresses, IL2CPP binary registration, fields, properties, signatures and generic instances are not recovered.",
-          "declaring_type for types is derived from the nestedTypes section; row positions are the metadata TypeDefinitionIndex and MethodIndex values.",
+          "Only unencrypted global-metadata.dat versions 29, 31 and 39 are decoded; names, counts and string literals are observed file content, not runtime behavior.",
+          "Native code addresses, IL2CPP binary registration, field and parameter types, method signatures and generic instances are not recovered; type indices refer to the native binary.",
+          "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
         ],
       };
       if (Buffer.byteLength(JSON.stringify(report), "utf8") > limit)
