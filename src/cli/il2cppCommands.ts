@@ -17,7 +17,9 @@ export const registerIl2cppCommands = (
     description:
       "Inventory IL2CPP global-metadata.dat images, types and methods without decryption or target execution",
     args: z.object({
-      path: z.string().describe("Local global-metadata.dat (version 39)"),
+      path: z
+        .string()
+        .describe("Local global-metadata.dat (version 29, 31 or 39)"),
     }),
     run: ({ args }) =>
       withCommandCancellation(async (signal) => {

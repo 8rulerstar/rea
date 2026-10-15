@@ -13,6 +13,8 @@ export interface Il2cppMetadataFixtureOptions {
   readonly interfaceOffsetRecordBytes?: number;
   /** Make type 1 also list type 0, so 0 and 1 nest in each other. */
   readonly nestingCycle?: boolean;
+  /** Metadata version; 29 and 31 use fixed 4-byte indices and no header counts. */
+  readonly version?: 29 | 31 | 39;
 }
 
 export const FIXTURE_IMAGES = [
@@ -88,23 +90,80 @@ export interface Il2cppMetadataFixture {
     readonly images: number;
     readonly methods: number;
   };
-  /** Byte offset of a header triple field. */
+  /** Byte offset of a header entry field; only version 39 records counts. */
   header(name: SectionName, field: "offset" | "size" | "count"): number;
-  section(name: SectionName): { offset: number; size: number; count: number };
+  section(name: SectionName): {
+    offset: number;
+    size: number;
+    count: number | null;
+  };
   record(name: "typeDefinitions" | "images" | "methods", index: number): number;
   /** Absolute offset of a string's first byte in the strings section. */
   stringOffset(value: string): number;
 }
 
+type SectionContent = { bytes: Buffer; count: number };
+
+/** Write the header and lay out non-empty sections in header order. */
+const assembleFile = (
+  version: 29 | 31 | 39,
+  contents: ReadonlyMap<SectionName, SectionContent>,
+) => {
+  const fixed = version !== 39;
+  const entryBytes = fixed ? 8 : 12;
+  const headerBytes = 8 + IL2CPP_METADATA_SECTION_NAMES.length * entryBytes;
+  const header = Buffer.alloc(headerBytes);
+  header.writeUInt32LE(0xfab11baf, 0);
+  header.writeInt32LE(version, 4);
+  const body: Buffer[] = [];
+  let cursor = headerBytes;
+  IL2CPP_METADATA_SECTION_NAMES.forEach((name, index) => {
+    const content = contents.get(name);
+    const at = 8 + index * entryBytes;
+    header.writeInt32LE(cursor, at);
+    header.writeInt32LE(content?.bytes.length ?? 0, at + 4);
+    if (!fixed) header.writeInt32LE(content?.count ?? 0, at + 8);
+    if (content !== undefined) {
+      body.push(content.bytes);
+      cursor += content.bytes.length;
+    }
+  });
+  const bytes = Buffer.concat([header, ...body]);
+  const headerField = (
+    name: SectionName,
+    field: "offset" | "size" | "count",
+  ) => {
+    if (fixed && field === "count")
+      throw new Error(`Version ${version} headers record no counts`);
+    return (
+      8 +
+      IL2CPP_METADATA_SECTION_NAMES.indexOf(name) * entryBytes +
+      { offset: 0, size: 4, count: 8 }[field]
+    );
+  };
+  const section = (name: SectionName) => ({
+    offset: bytes.readInt32LE(headerField(name, "offset")),
+    size: bytes.readInt32LE(headerField(name, "size")),
+    count: fixed ? null : bytes.readInt32LE(headerField(name, "count")),
+  });
+  return { bytes, headerField, section };
+};
+
 /** Lay sections out in header order; empty sections share the next offset. */
 export const createIl2cppMetadataFixture = (
   options: Il2cppMetadataFixtureOptions = {},
 ): Il2cppMetadataFixture => {
-  const T = options.typeIndexWidth ?? 1;
+  const version = options.version ?? 39;
+  const fixed = version !== 39;
+  const T: Width = fixed ? 4 : (options.typeIndexWidth ?? 1);
   // Fewer than 256 type definitions, generic containers and parameters.
-  const D = 1 as const;
-  const G = 1 as const;
-  const P = 1 as const;
+  const D: Width = fixed ? 4 : 1;
+  const G: Width = fixed ? 4 : 1;
+  const P: Width = fixed ? 4 : 1;
+  // Versions 29 and 31 also store elementTypeIndex in type records.
+  const typeIndexFields = fixed ? 4 : 3;
+  // Version 31 added returnParameterToken to method records.
+  const returnToken = version === 29 ? 0 : 4;
   const nestedTypeEntries = options.nestingCycle === true ? [1, 0] : [1];
   const typeRows = FIXTURE_TYPES.map((type, index) =>
     options.nestingCycle === true && index === 1
@@ -112,9 +171,9 @@ export const createIl2cppMetadataFixture = (
       : type,
   );
   const recordBytes = {
-    typeDefinitions: 68 + 3 * T + G,
+    typeDefinitions: 68 + typeIndexFields * T + G,
     images: 32 + 2 * D,
-    methods: 20 + D + T + P + G,
+    methods: 16 + returnToken + D + T + P + G,
   };
 
   const stringParts: Buffer[] = [];
@@ -147,7 +206,7 @@ export const createIl2cppMetadataFixture = (
     at += 8;
     // byval, native declaring and parent TypeIndex values are deliberately
     // unrelated to nesting; the reader must use nestedTypes instead.
-    for (let field = 0; field < 3; field += 1, at += T)
+    for (let field = 0; field < typeIndexFields; field += 1, at += T)
       writeIndex(types, at, T, 0x2a);
     writeIndex(types, at, G, -1);
     at += G + 4;
@@ -182,9 +241,10 @@ export const createIl2cppMetadataFixture = (
     methods.writeInt32LE(intern(method.name), at);
     writeIndex(methods, at + 4, D, method.declaring_type);
     writeIndex(methods, at + 4 + D, T, 0);
-    writeIndex(methods, at + 8 + D + T, P, -1);
-    writeIndex(methods, at + 8 + D + T + P, G, -1);
-    methods.writeUInt32LE(0x06000001 + index, at + 8 + D + T + P + G);
+    const parameterStart = at + 4 + D + T + returnToken;
+    writeIndex(methods, parameterStart, P, -1);
+    writeIndex(methods, parameterStart + P, G, -1);
+    methods.writeUInt32LE(0x06000001 + index, parameterStart + P + G);
   });
 
   const nested = Buffer.alloc(nestedTypeEntries.length * 4);
@@ -198,7 +258,7 @@ export const createIl2cppMetadataFixture = (
       ? null
       : Buffer.alloc(interfaceOffsetBytes);
 
-  const contents = new Map<SectionName, { bytes: Buffer; count: number }>([
+  const contents = new Map<SectionName, SectionContent>([
     ["strings", { bytes: strings, count: stringIndex.size }],
     ["methods", { bytes: methods, count: FIXTURE_METHODS.length }],
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
@@ -209,38 +269,12 @@ export const createIl2cppMetadataFixture = (
       : [
           ["interfaceOffsets", { bytes: interfaceOffsets, count: 1 }] as [
             SectionName,
-            { bytes: Buffer; count: number },
+            SectionContent,
           ],
         ]),
   ]);
 
-  const headerBytes = 8 + IL2CPP_METADATA_SECTION_NAMES.length * 12;
-  const header = Buffer.alloc(headerBytes);
-  header.writeUInt32LE(0xfab11baf, 0);
-  header.writeInt32LE(39, 4);
-  const body: Buffer[] = [];
-  let cursor = headerBytes;
-  IL2CPP_METADATA_SECTION_NAMES.forEach((name, index) => {
-    const content = contents.get(name);
-    const at = 8 + index * 12;
-    header.writeInt32LE(cursor, at);
-    header.writeInt32LE(content?.bytes.length ?? 0, at + 4);
-    header.writeInt32LE(content?.count ?? 0, at + 8);
-    if (content !== undefined) {
-      body.push(content.bytes);
-      cursor += content.bytes.length;
-    }
-  });
-  const bytes = Buffer.concat([header, ...body]);
-  const headerField = (name: SectionName, field: "offset" | "size" | "count") =>
-    8 +
-    IL2CPP_METADATA_SECTION_NAMES.indexOf(name) * 12 +
-    { offset: 0, size: 4, count: 8 }[field];
-  const section = (name: SectionName) => ({
-    offset: bytes.readInt32LE(headerField(name, "offset")),
-    size: bytes.readInt32LE(headerField(name, "size")),
-    count: bytes.readInt32LE(headerField(name, "count")),
-  });
+  const { bytes, headerField, section } = assembleFile(version, contents);
   return {
     bytes,
     typeIndexWidth: T,
