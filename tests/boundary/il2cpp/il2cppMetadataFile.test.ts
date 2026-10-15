@@ -11,6 +11,7 @@ import {
   FIXTURE_IMAGES,
   FIXTURE_METHODS,
   FIXTURE_TYPES,
+  fixtureRows,
   type Il2cppMetadataFixture,
 } from "../../fixtures/il2cpp/metadata.js";
 
@@ -493,4 +494,31 @@ describe("IL2CPP metadata coverage checks", () => {
     bytes.set([0xef, 0xbb, 0xbf], at);
     expect(readIl2cppMetadata(bytes).methods[2]?.name).toBe("\ufeff");
   });
+});
+
+describe("IL2CPP version 39 wide indices", () => {
+  it.each([
+    [2, { fillerTypes: 300, genericContainers: 300, parameters: 300 }],
+    [4, { fillerTypes: 65_540, genericContainers: 65_540, parameters: 65_540 }],
+  ] as const)(
+    "decodes %i-byte type-definition, generic-container and parameter indices",
+    (width, wide) => {
+      const decoded = readIl2cppMetadata(
+        createIl2cppMetadataFixture({ wide }).bytes,
+      );
+      expect(decoded.index_widths).toMatchObject({
+        type_definition: width,
+        generic_container: width,
+        parameter: width,
+      });
+      const rows = fixtureRows({ wide });
+      expect(decoded.types).toEqual(rows.types);
+      expect(decoded.methods).toEqual(rows.methods);
+      // The last method declares a type index beyond the narrower widths.
+      expect(decoded.methods.at(-1)?.declaring_type).toBe(
+        rows.types.length - 1,
+      );
+      expect(decoded.images).toEqual(FIXTURE_IMAGES);
+    },
+  );
 });

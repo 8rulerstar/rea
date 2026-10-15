@@ -26,6 +26,7 @@ import {
   Il2cppMetadataFormatFailure,
   readIl2cppMetadata,
   type Il2cppMetadataDecoded,
+  type Il2cppMetadataRowCounts,
 } from "./Il2cppMetadataFile.js";
 
 /** Bundled format reader identity; the metadata version is a separate observed fact. */
@@ -38,6 +39,8 @@ const OPERATION = "inspect_il2cpp_metadata";
 const INPUT_BYTES = 256 * 1024 * 1024;
 // A 12.9 MB Unity 6000.4 file with 112,232 methods serializes to 7.8 MB.
 const OUTPUT_BYTES = 64 * 1024 * 1024;
+// The smallest JSON a row can take: empty names and one-digit numbers.
+const EMPTY_NAME = JSON.stringify("").length;
 
 /** JSON characters of one row besides its strings, with one-digit numbers. */
 const rowOverhead = (row: Record<string, string | number>) =>
@@ -166,18 +169,27 @@ const failureFor = (
   return analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
 };
 
-const outputLimit = (path: string) =>
+const outputLimit = (path: string, maximumBytes: number) =>
   new AnalysisResourceConstraintError(
     OPERATION,
     "transport",
     `Complete IL2CPP metadata for ${path} exceeds the inline output budget; no partial success is returned.`,
-    { maximum_output_bytes: OUTPUT_BYTES },
+    { maximum_output_bytes: maximumBytes },
   );
+
+/** Lower bound from row counts alone, so oversized files fail before rows are allocated. */
+const countLowerBound = ({ images, types, methods }: Il2cppMetadataRowCounts) =>
+  images * (IMAGE_ROW + EMPTY_NAME) +
+  types * (TYPE_ROW + 2 * EMPTY_NAME) +
+  methods * (METHOD_ROW + EMPTY_NAME);
 
 /** Stable in-process decoding without subprocesses, temporary files, native binaries or decryption. */
 export class Il2cppMetadataProvider implements Il2cppMetadataPort {
   readonly identity = IL2CPP_METADATA_PROVIDER_IDENTITY;
   readonly #resources = new ArtifactResourceScope();
+
+  /** `outputBytes` exists so tests can reach the guard with small files. */
+  constructor(private readonly outputBytes: number = OUTPUT_BYTES) {}
 
   close(): Promise<void> {
     return this.#resources.close();
@@ -199,9 +211,15 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
         ),
       );
       options?.signal?.throwIfAborted();
-      const decoded = readIl2cppMetadata(snapshot.bytes);
-      if (serializedRowsLowerBound(decoded) > OUTPUT_BYTES)
-        throw outputLimit(input.path);
+      const limit = this.outputBytes;
+      const decoded = readIl2cppMetadata(snapshot.bytes, {
+        beforeRows: (counts) => {
+          if (countLowerBound(counts) > limit)
+            throw outputLimit(input.path, limit);
+        },
+      });
+      if (serializedRowsLowerBound(decoded) > limit)
+        throw outputLimit(input.path, limit);
       const report = {
         ...decoded,
         artifact: {
@@ -215,8 +233,8 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           "declaring_type for types is derived from the nestedTypes section; row positions are the metadata TypeDefinitionIndex and MethodIndex values.",
         ],
       };
-      if (Buffer.byteLength(JSON.stringify(report), "utf8") > OUTPUT_BYTES)
-        throw outputLimit(input.path);
+      if (Buffer.byteLength(JSON.stringify(report), "utf8") > limit)
+        throw outputLimit(input.path, limit);
       const parsed = il2cppMetadataSchema.safeParse(report);
       if (!parsed.success)
         throw new AnalysisOutputError(

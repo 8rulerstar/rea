@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { AnalysisResourceConstraintError } from "../../../src/domain/analysisErrorCore.js";
 import { Il2cppMetadataProvider } from "../../../src/il2cpp/Il2cppMetadataProvider.js";
+import { createIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 afterEach(() => {
@@ -48,6 +49,25 @@ it("refuses an oversized report from its row lower bound before serializing it",
           typeof value === "object" && value !== null && "methods" in value,
       ),
     ).toBe(false);
+  } finally {
+    await provider.close();
+  }
+});
+
+it("refuses from row counts before decoding any row", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-provider-counts-");
+  const path = join(root, "global-metadata.dat");
+  // A broken method name would fail as invalid-string if rows were decoded.
+  const fixture = createIl2cppMetadataFixture();
+  const bytes = Buffer.from(fixture.bytes);
+  bytes.writeInt32LE(0x7fff, fixture.record("methods", 0));
+  await writeFile(path, bytes);
+  const provider = new Il2cppMetadataProvider(256);
+  try {
+    const result = await provider.inspect({ path });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
   } finally {
     await provider.close();
   }
