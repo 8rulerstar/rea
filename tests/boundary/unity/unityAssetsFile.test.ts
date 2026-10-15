@@ -123,6 +123,19 @@ describe("SerializedFile", () => {
       ]);
     });
 
+  it("reads script IDs of script types whose class ID is not 114", () => {
+    const report = readUnityAssets(
+      createSerializedFileFixture({ scriptClassId: 0x7c90b5b3 }).bytes,
+    );
+    expect(report.types[1]).toMatchObject({
+      class_id: 0x7c90b5b3,
+      class_name: null,
+      script_type_index: 0,
+      script_id: FIXTURE_SCRIPT_ID,
+      type_tree_root: "MonoBehaviour",
+    });
+  });
+
   it("refuses versions outside 9 to 22 and unrecognized files", () => {
     for (const version of [8, 23]) {
       const bytes = createSerializedFileFixture().bytes;
@@ -130,6 +143,13 @@ describe("SerializedFile", () => {
       rejects(bytes, "unsupported-version", "unsupported");
     }
     rejects(Buffer.alloc(64, 0xff), "unrecognized-format", "unsupported");
+    // A PNG's third word (13) is in range, but its marker bytes are not.
+    const png = Buffer.alloc(64);
+    Buffer.from(
+      "89504e470d0a1a0a0000000d49484452000000200000002008060000",
+      "hex",
+    ).copy(png);
+    rejects(png, "unrecognized-format", "unsupported");
     rejects(
       Buffer.from("UnityWeb\0rest-of-a-legacy-bundle", "latin1"),
       "unsupported-container",

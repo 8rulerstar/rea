@@ -193,12 +193,14 @@ const readType = (
     version >= 17 ? cursor.i16("script type index") : null;
   let scriptId: string | null = null;
   if (version >= 13) {
-    if (
-      isRefType ||
-      (version < 16 && classId < 0) ||
-      (version >= 16 && classId === 114)
-    )
-      scriptId = cursor.hex(16, "script ID");
+    // A script type is signalled by its index from version 17, by class 114 in 16.
+    const isScript =
+      version >= 17
+        ? scriptTypeIndex! >= 0
+        : version === 16
+          ? classId === 114
+          : classId < 0;
+    if (isRefType || isScript) scriptId = cursor.hex(16, "script ID");
     cursor.need(16, "old type hash");
   }
   let tree: { nodes: number; root: string | null } | null = null;
@@ -217,12 +219,6 @@ const readType = (
     type_tree_nodes: tree?.nodes ?? null,
     type_tree_root: tree?.root ?? null,
   };
-};
-
-const isLittle = (marker: number) => {
-  if (marker > 1)
-    fail("truncated-header", `Endianness marker ${marker} is not 0 or 1.`);
-  return marker === 0;
 };
 
 /** Decode one SerializedFile's header and metadata tables from `bytes`. */
@@ -249,7 +245,15 @@ export const readUnitySerializedFile = (
   let metadataSize = view.getUint32(0, false);
   let fileSize = view.getUint32(4, false);
   let dataOffset = view.getUint32(12, false);
-  const little = isLittle(view.getUint8(16));
+  // Byte 16 is the endianness marker and 17-19 are reserved zeros; other
+  // formats that happen to carry a small third word fail here, not as corrupt.
+  const marker = view.getUint8(16);
+  if (marker > 1 || view.getUint8(17) | view.getUint8(18) | view.getUint8(19))
+    fail(
+      "unrecognized-format",
+      "The endianness marker and reserved header bytes do not match a SerializedFile.",
+    );
+  const little = marker === 0;
   let metadataStart = HEADER_BYTES;
   if (version >= 22) {
     if (bytes.length < HEADER_V22_BYTES)

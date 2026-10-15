@@ -8,8 +8,9 @@ it and requires no Unity installation, active target, Hopper, Ghidra or IDA.
 
 SerializedFile format versions 9 to 22 are decoded in either byte order,
 including the 64-bit offsets of version 22. Unity 2021.3.45f2, 2022.3.30f1,
-2022.3.62f3 and 6000.0.84f1 macOS players all wrote version 22; other releases
-have not been checked. UnityFS bundles of format 6 to 8 are decoded when their
+2022.3.62f3 and 6000.0.84f1 macOS players all wrote version 22. Editor
+`Library` files from 2019.4.41f2 were version 21 and from 2020.3.49f1 version 22. Other releases, and versions 9 to 20, were checked only with synthetic
+files. UnityFS bundles of format 6 to 8 are decoded when their
 blocks are uncompressed, LZ4 or LZ4HC. LZ4 is decoded in-process; LZMA is not.
 
 ## MCP

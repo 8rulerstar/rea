@@ -69,6 +69,8 @@ export interface SerializedFileFixtureOptions {
   readonly version?: number;
   readonly bigEndian?: boolean;
   readonly typeTree?: boolean;
+  /** Class ID of the script-backed second type; editor files use non-114 IDs. */
+  readonly scriptClassId?: number;
 }
 
 export const FIXTURE_UNITY_VERSION = "2022.3.30f1";
@@ -100,12 +102,17 @@ const writeType = (
   typeTree: boolean,
   classId: number,
   root: string,
+  script: boolean,
 ) => {
   w.i32(classId);
   if (version >= 16) w.u8(0);
-  if (version >= 17) w.i16(classId === 114 ? 0 : -1);
+  if (version >= 17) w.i16(script ? 0 : -1);
   if (version >= 13) {
-    if ((version >= 16 && classId === 114) || (version < 16 && classId < 0))
+    if (
+      (version >= 17 && script) ||
+      (version === 16 && classId === 114) ||
+      (version < 16 && classId < 0)
+    )
       w.bytes(Buffer.from(FIXTURE_SCRIPT_ID, "hex"));
     w.bytes(Buffer.alloc(16, 0xaa));
   }
@@ -124,16 +131,17 @@ export const createSerializedFileFixture = ({
   version = 22,
   bigEndian = false,
   typeTree = true,
+  scriptClassId = 114,
 }: SerializedFileFixtureOptions = {}) => {
   const little = !bigEndian;
   const headerBytes = version >= 22 ? 48 : 20;
   const w = new Writer(little, headerBytes);
   w.cstring(FIXTURE_UNITY_VERSION).i32(2);
   if (version >= 13) w.u8(typeTree ? 1 : 0);
-  const classIds = [1, 114];
+  const classIds = [1, scriptClassId];
   w.u32(2);
-  writeType(w, version, typeTree, 1, "GameObject");
-  writeType(w, version, typeTree, 114, "MonoBehaviour");
+  writeType(w, version, typeTree, 1, "GameObject", false);
+  writeType(w, version, typeTree, scriptClassId, "MonoBehaviour", true);
   if (version >= 7 && version < 14) w.i32(0);
   // Object starts are relative to the data offset.
   const starts = [0, 16];
