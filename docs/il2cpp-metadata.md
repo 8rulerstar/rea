@@ -68,7 +68,7 @@ The CLI returns the complete result. It has no detail option.
 The result contains:
 
 - `artifact`: path, SHA-256 and byte length;
-- `metadata_version`: `29`, `31` or `39`;
+- `metadata_version`: `24`, `27`, `29`, `31` or `39`;
 - `index_widths`: the serialized widths (1, 2 or 4 bytes) of
   `type_definition`, `generic_container`, `parameter` and `type` indices, and
   `type_width_source`. Version 39 derives the type index width from the
