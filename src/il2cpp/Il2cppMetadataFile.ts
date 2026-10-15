@@ -1,8 +1,9 @@
 import {
-  IL2CPP_METADATA_SECTION_NAMES,
   IL2CPP_METADATA_VERSIONS,
+  il2cppMetadataSectionNames,
   type Il2cppMetadata,
   type Il2cppMetadataSection,
+  type IL2cppMetadataSectionName,
 } from "../domain/il2cpp/il2cppMetadata.js";
 import { readIl2cppMembers } from "./Il2cppMetadataMembers.js";
 
@@ -49,7 +50,7 @@ export class Il2cppMetadataFormatFailure extends Error {
   }
 }
 
-type SectionName = (typeof IL2CPP_METADATA_SECTION_NAMES)[number];
+type SectionName = IL2cppMetadataSectionName;
 type IndexWidth = 1 | 2 | 4;
 export type Il2cppMetadataVersion = (typeof IL2CPP_METADATA_VERSIONS)[number];
 type RecordSection = "typeDefinitions" | "images" | "methods";
@@ -65,14 +66,24 @@ export type Il2cppMetadataDecoded = Omit<
  */
 interface VersionLayout {
   readonly indexing: "fixed" | "counted";
-  /** Version 29 and 31 type records also carry elementTypeIndex. */
-  readonly typeDefinitionTypeIndices: 3 | 4;
+  /** Type index fields: version 24 adds byref, 24 to 31 add elementTypeIndex. */
+  readonly typeDefinitionTypeIndices: 3 | 4 | 5;
   /** Version 31 added returnParameterToken to method records. */
   readonly methodReturnParameterToken: boolean;
 }
 
 const VERSION_LAYOUTS: Readonly<Record<Il2cppMetadataVersion, VersionLayout>> =
   {
+    27: {
+      indexing: "fixed",
+      typeDefinitionTypeIndices: 4,
+      methodReturnParameterToken: false,
+    },
+    24: {
+      indexing: "fixed",
+      typeDefinitionTypeIndices: 5,
+      methodReturnParameterToken: false,
+    },
     29: {
       indexing: "fixed",
       typeDefinitionTypeIndices: 4,
@@ -96,7 +107,7 @@ const sectionEntryBytes = (layout: VersionLayout) =>
 /** Magic, version and one entry per section. */
 export const il2cppMetadataHeaderBytes = (version: Il2cppMetadataVersion) =>
   8 +
-  IL2CPP_METADATA_SECTION_NAMES.length *
+  il2cppMetadataSectionNames(version).length *
     sectionEntryBytes(VERSION_LAYOUTS[version]);
 
 const isSupportedVersion = (value: number): value is Il2cppMetadataVersion =>
@@ -174,17 +185,17 @@ const readHeader = (bytes: Buffer) => {
       `the file has ${bytes.length} bytes, fewer than the ${headerBytes}-byte version ${version} header`,
     );
   const entryBytes = sectionEntryBytes(VERSION_LAYOUTS[version]);
-  const sections: Il2cppMetadataSection[] = IL2CPP_METADATA_SECTION_NAMES.map(
-    (name, index) => {
-      const at = 8 + index * entryBytes;
-      return {
-        name,
-        offset: bytes.readInt32LE(at),
-        size: bytes.readInt32LE(at + 4),
-        count: entryBytes === 12 ? bytes.readInt32LE(at + 8) : null,
-      };
-    },
-  );
+  const sections: Il2cppMetadataSection[] = il2cppMetadataSectionNames(
+    version,
+  ).map((name, index) => {
+    const at = 8 + index * entryBytes;
+    return {
+      name,
+      offset: bytes.readInt32LE(at),
+      size: bytes.readInt32LE(at + 4),
+      count: entryBytes === 12 ? bytes.readInt32LE(at + 8) : null,
+    };
+  });
   return { version, headerBytes, sections };
 };
 

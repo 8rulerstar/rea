@@ -112,7 +112,7 @@ cliTest(
     const { client, call } = await connectLocalToolsMcp();
     const fixture = createIl2cppMetadataFixture();
     const unsupported = Buffer.from(fixture.bytes);
-    unsupported.writeInt32LE(27, 4);
+    unsupported.writeInt32LE(26, 4);
     const corrupt = Buffer.from(fixture.bytes);
     corrupt.writeInt32LE(
       fixture.section("typeDefinitions").offset + 4,
@@ -120,7 +120,7 @@ cliTest(
     );
     for (const [name, bytes, expected] of [
       [
-        "v27.dat",
+        "v26.dat",
         unsupported,
         {
           code: "unsupported_target",

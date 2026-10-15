@@ -239,7 +239,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           bytes: snapshot.bytes.length,
         },
         limitations: [
-          "Only unencrypted global-metadata.dat versions 29, 31 and 39 are decoded; names, counts and string literals are observed file content, not runtime behavior.",
+          "Only unencrypted global-metadata.dat versions 24, 27, 29, 31 and 39 are decoded; names, counts and string literals are observed file content, not runtime behavior.",
           "Native code addresses, IL2CPP binary registration, field and parameter types, method signatures and generic instances are not recovered; type indices refer to the native binary.",
           "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
         ],

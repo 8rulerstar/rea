@@ -19,7 +19,7 @@ export const registerIl2cppCommands = (
     args: z.object({
       path: z
         .string()
-        .describe("Local global-metadata.dat (version 29, 31 or 39)"),
+        .describe("Local global-metadata.dat (version 24, 27, 29, 31 or 39)"),
     }),
     run: ({ args }) =>
       withCommandCancellation(async (signal) => {

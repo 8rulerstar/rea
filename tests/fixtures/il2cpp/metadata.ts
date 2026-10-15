@@ -1,6 +1,9 @@
-import { IL2CPP_METADATA_SECTION_NAMES } from "../../../src/domain/il2cpp/il2cppMetadata.js";
+import {
+  il2cppMetadataSectionNames,
+  type IL2cppMetadataSectionName,
+} from "../../../src/domain/il2cpp/il2cppMetadata.js";
 
-type SectionName = (typeof IL2CPP_METADATA_SECTION_NAMES)[number];
+type SectionName = IL2cppMetadataSectionName;
 type Width = 1 | 2 | 4;
 
 /** Synthetic version 39 metadata small enough to read in a hex dump. */
@@ -14,11 +17,11 @@ export interface Il2cppMetadataFixtureOptions {
   /** Make type 1 also list type 0, so 0 and 1 nest in each other. */
   readonly nestingCycle?: boolean;
   /** Metadata version; 29 and 31 use fixed 4-byte indices and no header counts. */
-  readonly version?: 29 | 31 | 39;
+  readonly version?: 24 | 27 | 29 | 31 | 39;
   /**
    * Version 39 entry counts that widen the serialized indices: filler type
-   * definitions (the last owns one extra method), and generic container and
-   * parameter sections whose records are zero-filled and never decoded.
+   * definitions (the last owns one extra method), zero-filled generic
+   * containers, and zero-filled parameter rows that no method owns.
    */
   readonly wide?: {
     readonly fillerTypes: number;
@@ -131,18 +134,19 @@ type SectionContent = { bytes: Buffer; count: number };
 
 /** Write the header and lay out non-empty sections in header order. */
 const assembleFile = (
-  version: 29 | 31 | 39,
+  version: 24 | 27 | 29 | 31 | 39,
   contents: ReadonlyMap<SectionName, SectionContent>,
 ) => {
   const fixed = version !== 39;
   const entryBytes = fixed ? 8 : 12;
-  const headerBytes = 8 + IL2CPP_METADATA_SECTION_NAMES.length * entryBytes;
+  const names = il2cppMetadataSectionNames(version);
+  const headerBytes = 8 + names.length * entryBytes;
   const header = Buffer.alloc(headerBytes);
   header.writeUInt32LE(0xfab11baf, 0);
   header.writeInt32LE(version, 4);
   const body: Buffer[] = [];
   let cursor = headerBytes;
-  IL2CPP_METADATA_SECTION_NAMES.forEach((name, index) => {
+  names.forEach((name, index) => {
     const content = contents.get(name);
     const at = 8 + index * entryBytes;
     header.writeInt32LE(cursor, at);
@@ -162,7 +166,7 @@ const assembleFile = (
       throw new Error(`Version ${version} headers record no counts`);
     return (
       8 +
-      IL2CPP_METADATA_SECTION_NAMES.indexOf(name) * entryBytes +
+      names.indexOf(name) * entryBytes +
       { offset: 0, size: 4, count: 8 }[field]
     );
   };
@@ -323,9 +327,9 @@ export const createIl2cppMetadataFixture = (
   const G: Width = fixed ? 4 : widthFor(genericContainers);
   const P: Width = fixed ? 4 : widthFor(parameterCount);
   // Versions 29 and 31 also store elementTypeIndex in type records.
-  const typeIndexFields = fixed ? 4 : 3;
+  const typeIndexFields = version === 24 ? 5 : fixed ? 4 : 3;
   // Version 31 added returnParameterToken to method records.
-  const returnToken = version === 29 ? 0 : 4;
+  const returnToken = version === 31 || version === 39 ? 4 : 0;
   const nestedTypeEntries = options.nestingCycle === true ? [1, 0] : [1];
   const typeRows = rows.types.map((type, index) =>
     options.nestingCycle === true && index === 1

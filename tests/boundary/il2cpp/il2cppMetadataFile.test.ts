@@ -568,3 +568,46 @@ describe("IL2CPP metadata members and string literals", () => {
     );
   });
 });
+
+describe("IL2CPP global-metadata version 27", () => {
+  it("decodes the version 29 record layout with version 27 section names", () => {
+    const decoded = readIl2cppMetadata(
+      createIl2cppMetadataFixture({ version: 27 }).bytes,
+    );
+    expect(decoded.metadata_version).toBe(27);
+    expect(decoded.index_widths.type_width_source).toBe("fixed-width-version");
+    expect(decoded.sections.slice(24, 28).map(({ name }) => name)).toEqual([
+      "attributesInfo",
+      "attributeTypes",
+      "unresolvedVirtualCallParameterTypes",
+      "unresolvedVirtualCallParameterRanges",
+    ]);
+    expect(decoded.images).toEqual(FIXTURE_IMAGES);
+    expect(decoded.types).toEqual(FIXTURE_TYPES);
+    expect(decoded.methods).toEqual(FIXTURE_METHODS);
+  });
+});
+
+describe("IL2CPP global-metadata version 24", () => {
+  it("decodes the 32-section header and five-type-index records", () => {
+    const fixture = createIl2cppMetadataFixture({ version: 24 });
+    const decoded = readIl2cppMetadata(fixture.bytes);
+    expect(decoded.metadata_version).toBe(24);
+    expect(decoded.sections).toHaveLength(32);
+    expect(decoded.sections[0]?.offset).toBe(264);
+    expect(decoded.sections[22]?.name).toBe("metadataUsageLists");
+    expect(decoded.images).toEqual(FIXTURE_IMAGES);
+    expect(decoded.types).toEqual(FIXTURE_TYPES);
+    expect(decoded.methods).toEqual(FIXTURE_METHODS);
+  });
+
+  it("rejects version 24 records labeled as version 27", () => {
+    rejects(
+      mutated(
+        (_, bytes) => bytes.writeInt32LE(27, 4),
+        createIl2cppMetadataFixture({ version: 24 }),
+      ),
+      "unexpected-header-size",
+    );
+  });
+});
