@@ -59,6 +59,23 @@ describe("directory inspection probes", () => {
     ]);
   });
 
+  it("proposes IL2CPP metadata inspection first for a Unity IL2CPP bundle", async () => {
+    const root = await createTestTempDirectory("rea-artifact-il2cpp-");
+    const bundle = join(root, "Fixture.app");
+    await writeTree(bundle, {
+      "Contents/MacOS/Fixture": MACH_O_64,
+      "Contents/Info.plist": INFO_PLIST,
+      "Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat":
+        Buffer.from([0xaf, 0x1b, 0xb1, 0xfa, 39, 0, 0, 0]),
+    });
+
+    expect(await probeOperations(bundle)).toEqual([
+      "inspect_il2cpp_metadata",
+      "open_binary",
+      "inspect_plist",
+    ]);
+  });
+
   it("keeps JavaScript analysis first for an Electron-style bundle", async () => {
     const root = await createTestTempDirectory("rea-artifact-electron-");
     const source = join(root, "source");

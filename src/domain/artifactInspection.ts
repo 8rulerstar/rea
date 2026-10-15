@@ -318,7 +318,26 @@ const directoryProbes = (
   const members = DIRECTORY_MEMBER_FORMATS.filter((memberFormat) =>
     present.has(memberFormat),
   );
-  const probes = members.flatMap(probesForFormat);
+  // Unity IL2CPP keeps managed names beside the native code in this file;
+  // the metadata reader checks its magic, so the name only selects a probe.
+  const il2cppMetadata = inventory.occurrences.some(
+    ({ entry_kind, logical_path }) =>
+      entry_kind === "file" &&
+      logical_path.split("/").at(-1) === "global-metadata.dat",
+  );
+  const probes = [
+    ...(il2cppMetadata
+      ? [
+          {
+            operation: "inspect_il2cpp_metadata",
+            rationale:
+              "List IL2CPP assembly, type and method names from global-metadata.dat before opening the native code.",
+            authority: "artifact-bytes" as const,
+          },
+        ]
+      : []),
+    ...members.flatMap(probesForFormat),
+  ];
   return probes.filter(
     (probe, index) =>
       probes.findIndex(({ operation }) => operation === probe.operation) ===
