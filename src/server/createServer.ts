@@ -21,10 +21,13 @@ import { registerSqliteTools } from "./registerSqliteTools.js";
 import { registerRecordedCrashTools } from "./registerRecordedCrashTools.js";
 import { createRecordedCrashService } from "../composition/binaryDiagnostics.js";
 import { createGoBinaryService } from "../composition/go.js";
+import { createIl2cppMetadataService } from "../composition/il2cpp.js";
+import type { Il2cppMetadataService } from "../application/il2cpp/Il2cppMetadataService.js";
 import type { GoBinaryService } from "../application/go/GoBinaryService.js";
 import { createElectronFuseService } from "../composition/electronFuses.js";
 import type { ElectronFuseService } from "../application/electron/ElectronFuseService.js";
 import { registerGoTools } from "./registerGoTools.js";
+import { registerIl2cppTools } from "./registerIl2cppTools.js";
 import { createRustBinaryService } from "../composition/rust.js";
 import type { RustBinaryService } from "../application/rust/RustBinaryService.js";
 import { registerRustTools } from "./registerRustTools.js";
@@ -158,6 +161,7 @@ export interface CreateServerOptions {
   readonly logger?: Logger;
   readonly binaryLayout?: BinaryLayoutService;
   readonly goBinary?: GoBinaryService;
+  readonly il2cppMetadata?: Il2cppMetadataService;
   readonly rustBinary?: RustBinaryService;
   readonly electronFuses?: ElectronFuseService;
   readonly recordedCrash?: RecordedCrashService;
@@ -311,6 +315,8 @@ export const createServer = (
     options.webModuleTrace ?? createWebModuleTraceService(environment);
   const goBinary = options.goBinary ?? createGoBinaryService();
   const rustBinary = options.rustBinary ?? createRustBinaryService();
+  const il2cppMetadata =
+    options.il2cppMetadata ?? createIl2cppMetadataService();
   const peResources = createPeResourcesService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const webNetworkCapture =
@@ -394,6 +400,7 @@ export const createServer = (
       webModuleTrace.close(),
       goBinary.close(),
       rustBinary.close(),
+      il2cppMetadata.close(),
       peResources.close(),
       electronFuses.close(),
       webNetworkCapture.close(),
@@ -454,6 +461,7 @@ export const createServer = (
     artifactResources,
     goBinary,
     rustBinary,
+    il2cppMetadata,
     peResources,
     electronFuses,
     webNetworkCapture,
@@ -654,6 +662,7 @@ const registerConfiguredAnalysisTools = (
     withAdmittedAnalysis,
     goBinary,
     rustBinary,
+    il2cppMetadata,
     peResources,
     webNetworkCapture,
   }: ServerToolContext,
@@ -707,6 +716,14 @@ const registerConfiguredAnalysisTools = (
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
+  );
+  registerIl2cppTools(
+    server,
+    il2cppMetadata,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+    evidenceById,
   );
   registerRustTools(
     server,
@@ -822,6 +839,7 @@ const createSessionRecorders = (
 interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly goBinary: GoBinaryService;
   readonly rustBinary: RustBinaryService;
+  readonly il2cppMetadata: Il2cppMetadataService;
   readonly peResources: PeResourcesService;
   readonly electronFuses: ElectronFuseService;
   readonly webNetworkCapture: WebNetworkCaptureService;
