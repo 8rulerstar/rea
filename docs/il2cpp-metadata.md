@@ -1,0 +1,137 @@
+# IL2CPP metadata
+
+`inspect_il2cpp_metadata` / `inspect-il2cpp-metadata` decodes one selected local
+Unity IL2CPP `global-metadata.dat` file and returns its assembly images, type
+definitions and method definitions by name, namespace, index range and count,
+with the header sections and serialized index widths. It reads the file without
+running it and requires no Unity installation, IL2CPP binary, active target,
+Hopper, Ghidra or IDA.
+
+Metadata version 39 is supported. Other versions are rejected as unsupported.
+
+## MCP
+
+A large game produces megabytes of rows. Select `detail: "summary"` on the first
+call; MCP requires an absolute filesystem path:
+
+```json
+{
+  "name": "inspect_il2cpp_metadata",
+  "arguments": {
+    "path": "/artifacts/Data/Managed/Metadata/global-metadata.dat",
+    "detail": "summary"
+  }
+}
+```
+
+The summary retains the complete decoded Evidence in the session and returns a
+linked `inspect_analysis_view` overview: artifact identity, metadata version,
+index widths, sections and `counts` (`images`, `types`, `methods` and
+`nested_types`) without rows. Use `normalized_result.parent_evidence_id` to page
+the original rows without reopening or decoding the file:
+
+```json
+{
+  "source": {
+    "kind": "retained-evidence",
+    "evidence_id": "<parent_evidence_id>"
+  },
+  "view": {
+    "kind": "il2cpp-metadata",
+    "collection": "types",
+    "offset": 0,
+    "limit": 64
+  }
+}
+```
+
+Collections are `images`, `types` and `methods`. `limit` defaults to 64. The page
+offset is the metadata index of the first returned row. Omitted or `complete`
+detail returns every row inline.
+
+## CLI
+
+```bash
+rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
+```
+
+The CLI returns the complete result. It has no detail option.
+
+## Observations
+
+The result contains:
+
+- `artifact`: path, SHA-256 and byte length;
+- `metadata_version`: `39`;
+- `index_widths`: the serialized widths (1, 2 or 4 bytes) of
+  `type_definition`, `generic_container`, `parameter` and `type` indices, and
+  `type_width_source`, which records whether the type index width was derived
+  from the `interface-offsets-record` or the `type-definition-record`;
+- `sections`: all 31 header sections in header order, each with `offset`, `size`
+  and `count`;
+- `images`: `name`, `type_start` and `type_count`;
+- `types`: `name`, `namespace`, `method_start`, `method_count`,
+  `nested_type_start`, `nested_type_count` and `declaring_type`;
+- `methods`: `name` and `declaring_type`;
+- `limitations`.
+
+A row's position in its collection is its metadata index, so `type_start`,
+`method_start` and `declaring_type` refer to positions in `types` or `methods`.
+A type's `declaring_type` is derived from the `nestedTypes` section and is `-1`
+for top-level types. The start of an empty range can retain the original value
+`-1`.
+
+On a 12.9 MB file from a Unity 6000.4.2f1 iOS build, the tool reported 96 images,
+14,739 types (5,318 nested) and 112,232 methods. Decoding took about 30 ms and the
+complete CLI Evidence was about 7.8 MB. Over stdio MCP, complete delivery
+(10.5 MB response) exceeded the 10 MiB response budget and was refused with a
+retained Evidence reference, while the summary was about 4.3 KB. Every name and index matched the reading
+of LibCpp2IL 2022.1.0-pre-release.21. That file is not published.
+
+## Failures
+
+A file whose magic is not `0xFAB11BAF` fails as an unsupported target with
+`unrecognized-magic`. The file may be encrypted or may not be IL2CPP metadata.
+A version other than 39 fails as an unsupported target with
+`unsupported-version`.
+
+Damaged version 39 metadata returns an input error (`invalid_format`) whose
+message names one reason:
+
+| Reason                   | Meaning                                                                                                          |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `truncated-header`       | The file is shorter than the header.                                                                             |
+| `unexpected-header-size` | `stringLiterals.offset` is not 380, the version 39 header size.                                                  |
+| `section-out-of-bounds`  | A section extends beyond the file.                                                                               |
+| `section-overlap`        | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
+| `record-size-mismatch`   | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
+| `type-index-width`       | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
+| `index-out-of-range`     | A serialized index or range points outside its target collection.                                                |
+| `nested-type-conflict`   | A type is listed as nested in two types, or in itself.                                                           |
+| `invalid-string`         | A name in the string section is unterminated or not valid UTF-8.                                                 |
+
+There is no partial success. A file that changes during reading and a cancelled
+request keep their own distinct errors. Resource guards bound the selected file
+to 256 MiB and the complete report to 64 MiB. MCP also applies its
+[response transport budget](mcp-contracts.md); a complete report within the
+report limit can still require the summary and paging path.
+
+## Outside this tool
+
+- Decrypting or deobfuscating protected metadata.
+- Linking metadata to the native binary (`GameAssembly`, `UnityFramework`),
+  including method RVAs and code addresses.
+- Fields, properties, signatures, parameters and generic instances.
+- Ghidra or other disassembler integration. Use the
+  [native workflow](native-investigation.md) for native code.
+- Metadata versions other than 39. Versions 29 and 31 are planned follow-ups.
+
+Names come from the metadata file only. They do not establish which methods
+were compiled into the native binary or how they behave at runtime.
+
+## Real producer verification
+
+`npm run verify:il2cpp:metadata -- --metadata PATH` exercises a caller-supplied
+`global-metadata.dat` through the public CLI and MCP. It is opt-in, like
+`verify:pcap`, because no real game metadata ships with the repository. Normal
+inspection does not need it.

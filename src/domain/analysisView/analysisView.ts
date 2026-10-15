@@ -114,6 +114,13 @@ import {
   dartAotViewRequestSchema,
   dartAotViewContextSchema,
 } from "./dartAotView.js";
+import {
+  projectIl2cppMetadataView,
+  il2cppMetadataSummarySchema,
+  il2cppMetadataViewRequestSchema,
+  il2cppMetadataViewContextSchema,
+  il2cppMetadataViewItemsSchema,
+} from "./il2cppMetadataView.js";
 
 const summaryViewSchema = z.strictObject({ kind: z.literal("summary") });
 const facetViewSchema = z.strictObject({
@@ -236,6 +243,7 @@ export const analysisViewRequestSchema = z.discriminatedUnion("kind", [
   qlogViewRequestSchema,
   pcapViewRequestSchema,
   dartAotViewRequestSchema,
+  il2cppMetadataViewRequestSchema,
 ]);
 
 // The application owns admission and authenticated Evidence parsing. SDK and
@@ -356,6 +364,7 @@ const viewResultBase = {
     "inspect_android_package",
     "inspect_pcap_capture",
     "inspect_dart_aot",
+    "inspect_il2cpp_metadata",
   ]),
   parent_digest: digestSchema,
   view_digest: digestSchema,
@@ -471,6 +480,13 @@ export const dartAotSummaryViewResultSchema = z.strictObject({
   summary: dartAotSummarySchema,
 });
 
+/** Metadata identity and row counts for selected IL2CPP delivery. */
+export const il2cppMetadataSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultBase,
+  parent_operation: z.literal("inspect_il2cpp_metadata"),
+  summary: il2cppMetadataSummarySchema,
+});
+
 /** Projected facts for one selected view of retained analysis Evidence. */
 export const analysisViewResultSchema = z.discriminatedUnion("kind", [
   z.strictObject({
@@ -500,6 +516,7 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
       androidPackageSummarySchema,
       pcapSummarySchema,
       dartAotSummarySchema,
+      il2cppMetadataSummarySchema,
     ]),
   }),
   z.strictObject({
@@ -612,6 +629,14 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     parent_operation: z.literal("inspect_dart_aot"),
   }),
   z.strictObject({
+    kind: z.literal("il2cpp-metadata"),
+    view: il2cppMetadataViewRequestSchema,
+    items: il2cppMetadataViewItemsSchema,
+    ...viewResultBase,
+    ...il2cppMetadataViewContextSchema.shape,
+    parent_operation: z.literal("inspect_il2cpp_metadata"),
+  }),
+  z.strictObject({
     kind: z.literal("inventory"),
     view: inventoryViewSchema,
     manifest: artifactGraphManifestSchema,
@@ -704,6 +729,10 @@ export type UnsignedAnalysisView =
   | Omit<
       Extract<AnalysisViewResult, { readonly kind: "dart-aot" }>,
       "view_digest"
+    >
+  | Omit<
+      Extract<AnalysisViewResult, { readonly kind: "il2cpp-metadata" }>,
+      "view_digest"
     >;
 
 /** Attach the content digest that must change when projected bytes change. */
@@ -749,7 +778,7 @@ const unsupportedParent = (
   new AnalysisUnsupportedTargetError(
     INSPECT_ANALYSIS_VIEW_OPERATION,
     parentArtifactPath(parent),
-    `Parent Evidence operation ${JSON.stringify(parent.operation)} does not support analysis views. Use completed binary layout, JavaScript application, native function, artifact inventory/inspection, WASM, Mach-O, Interface Builder, EVM, managed artifact or member, Android package, Dart AOT, or web network capture Evidence.`,
+    `Parent Evidence operation ${JSON.stringify(parent.operation)} does not support analysis views. Use completed binary layout, JavaScript application, native function, artifact inventory/inspection, WASM, Mach-O, Interface Builder, EVM, managed artifact or member, Android package, Dart AOT, IL2CPP metadata, or web network capture Evidence.`,
   );
 
 const parentArtifactPath = (parent: AnalysisViewParent): string => {
@@ -783,6 +812,7 @@ const retainedViewProjectors = new Map<string, typeof projectWasmArtifactView>([
   ["inspect_managed_members", projectManagedMemberView],
   ["inspect_android_package", projectAndroidPackageView],
   ["inspect_dart_aot", projectDartAotView],
+  ["inspect_il2cpp_metadata", projectIl2cppMetadataView],
   ["inspect_artifact", projectArtifactInventoryView],
   ["inventory_artifact", projectArtifactInventoryView],
 ]);
