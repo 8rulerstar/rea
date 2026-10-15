@@ -9,6 +9,7 @@ import {
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
   il2cppMethodAddressSchema,
+  il2cppTypeReferenceSchema,
   il2cppMetadataObjectSchema,
   il2cppMetadataSchema,
   il2cppMetadataTypeSchema,
@@ -36,6 +37,9 @@ const countsSchema = z.strictObject({
   parameters: z.number().int().nonnegative(),
   string_literals: z.number().int().nonnegative(),
   method_addresses: z.number().int().nonnegative(),
+  return_types: z.number().int().nonnegative(),
+  field_types: z.number().int().nonnegative(),
+  parameter_types: z.number().int().nonnegative(),
 });
 
 /** Metadata identity, index widths and sections with row counts instead of rows. */
@@ -50,6 +54,9 @@ export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
     parameters: true,
     string_literals: true,
     method_addresses: true,
+    return_types: true,
+    field_types: true,
+    parameter_types: true,
   })
   .extend({ counts: countsSchema });
 
@@ -69,6 +76,7 @@ export const il2cppMetadataViewItemsSchema = z.union([
   z.array(il2cppMetadataParameterSchema),
   z.array(il2cppMetadataStringLiteralSchema),
   z.array(il2cppMethodAddressSchema),
+  z.array(il2cppTypeReferenceSchema),
 ]);
 
 export const il2cppMetadataViewContextSchema = z.strictObject({
@@ -117,6 +125,9 @@ const parseMetadataReport = (
       parameters: report.parameters.length,
       string_literals: report.string_literals.length,
       method_addresses: report.method_addresses.length,
+      return_types: report.return_types.length,
+      field_types: report.field_types.length,
+      parameter_types: report.parameter_types.length,
     },
   };
   if (sealed) checkedReports.set(normalizedResult, new WeakRef(checked));
@@ -152,6 +163,9 @@ export const projectIl2cppMetadataView = (
     parameters,
     string_literals,
     method_addresses,
+    return_types,
+    field_types,
+    parameter_types,
     ...identity
   } = report;
   const rows = {
@@ -164,6 +178,9 @@ export const projectIl2cppMetadataView = (
     parameters,
     string_literals,
     method_addresses,
+    return_types,
+    field_types,
+    parameter_types,
   };
   const shared = {
     parent_evidence_id: parent.evidenceId,

@@ -20,6 +20,7 @@ import {
   createUniversalFixture,
   FIXTURE_BINARY_BASE,
   FIXTURE_METHOD_ADDRESSES,
+  FIXTURE_RETURN_TYPE_NAME,
 } from "../fixtures/il2cpp/binary.js";
 import { connectLocalToolsMcp } from "../fixtures/localToolsMcp.js";
 import { parseMcpToolError } from "../fixtures/mcpToolError.js";
@@ -78,6 +79,9 @@ cliTest(
       parameters: 1,
       string_literals: 2,
       method_addresses: 0,
+      return_types: 0,
+      field_types: 0,
+      parameter_types: 0,
     });
     expect(view.summary.binary).toBeNull();
     expect(view.summary.sections).toEqual(report.sections);
@@ -207,6 +211,9 @@ cliTest(
         .normalized_result,
     );
     expect(report.method_addresses).toEqual(expected);
+    expect(report.return_types.map((row) => row.name)).toEqual(
+      Array.from({ length: 5 }, () => FIXTURE_RETURN_TYPE_NAME),
+    );
     expect(report.binary).toMatchObject({
       format: "macho",
       architecture: "arm64",

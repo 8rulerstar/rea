@@ -23,9 +23,20 @@ export interface Il2cppBinaryFixtureOptions {
   readonly chainedFixups?: boolean;
   /** Omit the CodeRegistration module count and array pointer. */
   readonly codeRegistration?: boolean;
+  /** Omit the MetadataRegistration type table. */
+  readonly metadataRegistration?: boolean;
 }
 
-const SIZE = 0x800;
+/** Every fixture method returns type 0, an array of a generic instance. */
+export const FIXTURE_RETURN_TYPE_NAME = "System.Größe<int>[]";
+
+const SIZE = 0x1000;
+const METADATA_REGISTRATION = 0x800;
+const TYPE_POINTERS = 0x900;
+const TYPE_RECORDS = 0x980;
+const GENERIC_CLASS = 0xa00;
+const GENERIC_INSTANCE = 0xa40;
+const GENERIC_ARGUMENTS = 0xa60;
 const STRINGS = 0x100;
 const POINTERS = 0x300;
 const MODULES = 0x400;
@@ -97,6 +108,37 @@ export const createIl2cppBinaryFixture = (
   if (options.codeRegistration !== false) {
     bytes.writeBigUInt64LE(2n, REGISTRATION);
     bytes.writeBigUInt64LE(address(MODULE_ARRAY), REGISTRATION + 8);
+  }
+  // Il2CppType records: 8-byte data, then attrs:16 and type:8 bits.
+  const types: readonly [kind: number, data: bigint][] = [
+    [0x1d, address(TYPE_RECORDS + 16)],
+    [0x15, address(GENERIC_CLASS)],
+    [0x12, 3n],
+    [0x08, 0n],
+  ];
+  types.forEach(([kind, data], index) => {
+    const at = TYPE_RECORDS + index * 16;
+    bytes.writeBigUInt64LE(data, at);
+    bytes.writeUInt32LE(kind << 16, at + 8);
+    bytes.writeBigUInt64LE(address(at), TYPE_POINTERS + index * 8);
+  });
+  // Version 29+ Il2CppGenericClass: definition type, then class_inst.
+  bytes.writeBigUInt64LE(address(TYPE_RECORDS + 32), GENERIC_CLASS);
+  bytes.writeBigUInt64LE(address(GENERIC_INSTANCE), GENERIC_CLASS + 8);
+  bytes.writeUInt32LE(1, GENERIC_INSTANCE);
+  bytes.writeBigUInt64LE(address(GENERIC_ARGUMENTS), GENERIC_INSTANCE + 8);
+  bytes.writeBigUInt64LE(address(TYPE_RECORDS + 48), GENERIC_ARGUMENTS);
+  if (options.metadataRegistration !== false) {
+    // typesCount and types, then fieldOffsets and typeDefinitionsSizes,
+    // whose counts equal the 4 metadata type definitions.
+    const word = (slot: number, value: bigint) =>
+      bytes.writeBigUInt64LE(value, METADATA_REGISTRATION + slot * 8);
+    word(6, BigInt(types.length));
+    word(7, address(TYPE_POINTERS));
+    word(10, 4n);
+    word(11, address(TYPE_POINTERS));
+    word(12, 4n);
+    word(13, address(TYPE_POINTERS));
   }
   return bytes;
 };

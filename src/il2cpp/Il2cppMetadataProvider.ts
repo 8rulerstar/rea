@@ -24,7 +24,7 @@ import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   Il2cppMetadataFormatFailure,
-  readIl2cppMetadataWithTokens,
+  readIl2cppMetadataForLinking,
   type Il2cppMetadataDecoded,
   type Il2cppMetadataRowCounts,
 } from "./Il2cppMetadataFile.js";
@@ -71,6 +71,8 @@ const LITERAL_ROW =
   JSON.stringify({ value: null, value_base64: null }).length - 4;
 // A method without code serializes both fields as null.
 const ADDRESS_ROW = JSON.stringify({ address: null, rva: null }).length;
+// Each method, field and parameter gains a type reference row.
+const TYPE_ROW_BOUND = JSON.stringify({ type: 0, name: null }).length;
 
 /**
  * A lower bound on the serialized rows. Rows share decoded names, so the
@@ -102,7 +104,10 @@ const serializedRowsLowerBound = (
     total += PARAMETER_ROW + text(parameter.name);
   for (const literal of decoded.string_literals)
     total += LITERAL_ROW + text(literal.value ?? literal.value_base64 ?? "");
-  if (linked) total += decoded.methods.length * ADDRESS_ROW;
+  if (linked)
+    total +=
+      decoded.methods.length * (ADDRESS_ROW + TYPE_ROW_BOUND) +
+      (decoded.fields.length + decoded.parameters.length) * TYPE_ROW_BOUND;
   return total;
 };
 
@@ -227,7 +232,12 @@ const binaryReport = (
       address: hex(module.address),
       method_pointer_count: module.method_pointer_count,
     })),
+    types_field: hex(link.types_field),
+    types_count: link.types_count,
   },
+  return_types: [...link.return_types],
+  field_types: [...link.field_types],
+  parameter_types: [...link.parameter_types],
   method_addresses: link.method_addresses.map((address) =>
     address === null
       ? { address: null, rva: null }
@@ -278,7 +288,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
       );
       options?.signal?.throwIfAborted();
       const limit = this.outputBytes;
-      const { metadata: decoded, methodTokens } = readIl2cppMetadataWithTokens(
+      const { metadata: decoded, link } = readIl2cppMetadataForLinking(
         snapshot.bytes,
         {
           beforeRows: (counts) => {
@@ -290,9 +300,19 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
       const binaryPath = input.binary_path;
       if (serializedRowsLowerBound(decoded, binaryPath !== undefined) > limit)
         throw outputLimit(input.path, limit);
-      let linked: Pick<Il2cppMetadata, "binary" | "method_addresses"> = {
+      let linked: Pick<
+        Il2cppMetadata,
+        | "binary"
+        | "method_addresses"
+        | "return_types"
+        | "field_types"
+        | "parameter_types"
+      > = {
         binary: null,
         method_addresses: [],
+        return_types: [],
+        field_types: [],
+        parameter_types: [],
       };
       if (binaryPath !== undefined) {
         try {
@@ -310,7 +330,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             linkIl2cppBinary(
               binary.bytes,
               decoded,
-              methodTokens,
+              link,
               input.binary_architecture,
             ),
             {
@@ -344,7 +364,9 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           binaryPath === undefined
             ? "Native code addresses and IL2CPP binary registration are not recovered without binary_path."
             : "Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; generic method instances, adjustor thunks and invokers are not linked, and a null address means the module records no body.",
-          "Field and parameter types, method signatures and generic instances are not recovered; type indices refer to the native binary.",
+          binaryPath === undefined
+            ? "Field, parameter and return types are not recovered without binary_path; type indices refer to the native binary."
+            : "Field, parameter and return type names are rendered from the binary's Il2CppType table in a C#-like form (keywords for primitives, Namespace.Outer+Inner, generic parameters by metadata name); custom modifiers, array bounds and attributes are not reported.",
           "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
         ],
       };

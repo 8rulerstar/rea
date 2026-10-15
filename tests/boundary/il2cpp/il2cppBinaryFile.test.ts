@@ -3,21 +3,22 @@ import {
   Il2cppBinaryFormatFailure,
   linkIl2cppBinary,
 } from "../../../src/il2cpp/Il2cppBinaryFile.js";
-import { readIl2cppMetadataWithTokens } from "../../../src/il2cpp/Il2cppMetadataFile.js";
+import { readIl2cppMetadataForLinking } from "../../../src/il2cpp/Il2cppMetadataFile.js";
 import {
   createIl2cppBinaryFixture,
   createUniversalFixture,
   FIXTURE_BINARY_BASE,
   FIXTURE_METHOD_ADDRESSES,
+  FIXTURE_RETURN_TYPE_NAME,
   type Il2cppBinaryFixtureOptions,
 } from "../../fixtures/il2cpp/binary.js";
 import { createIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
 
-const { metadata, methodTokens } = readIl2cppMetadataWithTokens(
+const { metadata, link: facts } = readIl2cppMetadataForLinking(
   createIl2cppMetadataFixture().bytes,
 );
 const link = (bytes: Buffer, architecture?: string) =>
-  linkIl2cppBinary(bytes, metadata, methodTokens, architecture);
+  linkIl2cppBinary(bytes, metadata, facts, architecture);
 const failure = (bytes: Buffer, architecture?: string) => {
   try {
     link(bytes, architecture);
@@ -50,6 +51,16 @@ it("links methods to code through module tokens, not metadata order", () => {
     ],
   });
   expect(linked.method_addresses).toEqual(FIXTURE_METHOD_ADDRESSES);
+  expect(linked).toMatchObject({
+    types_field: FIXTURE_BINARY_BASE + 0x830n,
+    types_count: 4,
+  });
+  expect(linked.return_types).toEqual(
+    Array.from({ length: 5 }, () => ({
+      type: 0,
+      name: FIXTURE_RETURN_TYPE_NAME,
+    })),
+  );
 });
 
 it("requires an explicit slice of a universal Mach-O and reads only that slice", () => {
@@ -88,6 +99,12 @@ it.each<
     "no CodeRegistration module table",
     { codeRegistration: false },
     "code-registration-not-found",
+    "malformed",
+  ],
+  [
+    "no MetadataRegistration type table",
+    { metadataRegistration: false },
+    "metadata-registration-not-found",
     "malformed",
   ],
   [

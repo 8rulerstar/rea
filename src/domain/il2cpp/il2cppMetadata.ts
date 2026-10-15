@@ -86,6 +86,9 @@ export const IL2CPP_METADATA_COLLECTIONS = [
   "parameters",
   "string_literals",
   "method_addresses",
+  "return_types",
+  "field_types",
+  "parameter_types",
 ] as const;
 
 const count = z.number().int().nonnegative();
@@ -192,6 +195,13 @@ export const il2cppMethodAddressSchema = z.strictObject({
   rva: hexAddress.nullable(),
 });
 
+/** Index into the binary Il2CppType table and its C#-like display name. */
+export const il2cppTypeReferenceSchema = z.strictObject({
+  type: optionalIndex,
+  /** Null only for type index -1. */
+  name: z.string().nullable(),
+});
+
 /** Code-generation module record located for one metadata image. */
 export const il2cppCodeGenModuleSchema = z.strictObject({
   image: count,
@@ -212,6 +222,9 @@ export const il2cppBinaryLinkSchema = z.strictObject({
   /** CodeRegistration's codeGenModulesCount field, followed by the module array pointer. */
   code_gen_modules_field: hexAddress,
   code_gen_modules: z.array(il2cppCodeGenModuleSchema),
+  /** MetadataRegistration's typesCount field, followed by the types pointer. */
+  types_field: hexAddress,
+  types_count: count,
 });
 
 /** Unrefined report fields, shared with projections that omit row collections. */
@@ -248,6 +261,10 @@ export const il2cppMetadataObjectSchema = z.strictObject({
   binary: il2cppBinaryLinkSchema.nullable(),
   /** One row per method index when binary is linked, otherwise empty. */
   method_addresses: z.array(il2cppMethodAddressSchema),
+  /** Per method, field and parameter index when binary is linked, otherwise empty. */
+  return_types: z.array(il2cppTypeReferenceSchema),
+  field_types: z.array(il2cppTypeReferenceSchema),
+  parameter_types: z.array(il2cppTypeReferenceSchema),
   limitations: z.array(z.string()),
 });
 
@@ -261,21 +278,20 @@ export const il2cppMetadataSchema = il2cppMetadataObjectSchema.superRefine(
         path: ["sections"],
         message: `Version ${report.metadata_version} headers have ${names.length} sections.`,
       });
-    if (
-      report.binary !== null &&
-      report.method_addresses.length !== report.methods.length
-    )
-      context.addIssue({
-        code: "custom",
-        path: ["method_addresses"],
-        message: "A linked binary needs one address row per method.",
-      });
-    if (report.binary === null && report.method_addresses.length > 0)
-      context.addIssue({
-        code: "custom",
-        path: ["method_addresses"],
-        message: "Method addresses require a linked binary.",
-      });
+    for (const [collection, rows] of [
+      ["method_addresses", report.methods],
+      ["return_types", report.methods],
+      ["field_types", report.fields],
+      ["parameter_types", report.parameters],
+    ] as const) {
+      const expected = report.binary === null ? 0 : rows.length;
+      if (report[collection].length !== expected)
+        context.addIssue({
+          code: "custom",
+          path: [collection],
+          message: `A linked binary needs one ${collection} row per metadata row; none without one.`,
+        });
+    }
     report.sections.forEach((section, index) => {
       if (section.name !== names[index])
         context.addIssue({

@@ -53,7 +53,8 @@ the original rows without reopening or decoding the file:
 ```
 
 Collections are `images`, `types`, `methods`, `fields`, `properties`, `events`,
-`parameters`, `string_literals` and `method_addresses`. `limit` defaults to 64. The page
+`parameters`, `string_literals`, `method_addresses`, `return_types`,
+`field_types` and `parameter_types`. `limit` defaults to 64. The page
 offset is the metadata index of the first returned row. `limit` has no cap of
 its own beyond the MCP response budget. Select `detail: "complete"` to return
 every row inline when the result fits that budget, as a small game's often does.
@@ -131,24 +132,41 @@ The result adds:
   (address minus `image_base`), both hexadecimal strings. Both are `null` when
   the module records no body, as for abstract, extern and most generic methods.
 
-Without `binary_path`, `binary` is `null` and `method_addresses` is empty.
+- `return_types`, `field_types` and `parameter_types`: one row per method,
+  field and parameter index with `type`, the index into the binary's
+  `Il2CppType` table, and `name`, rendered from that table: C# keywords for
+  primitives (`int`, `string`, `object`), `Namespace.Outer+Inner` for type
+  definitions, `T[]`, `T[,]` and `T*`, generic instances as
+  `System.Collections.Generic.List<string>` and generic parameters by their
+  metadata name (`TKey`). A trailing `&` marks a by-reference type. `name` is
+  `null` only for type index `-1`.
+
+`binary` also records `types_field` and `types_count`: the address of
+`Il2CppMetadataRegistration.typesCount` and its value. That record is found as
+the single place whose `fieldOffsetsCount` and `typeDefinitionsSizesCount` both
+equal the metadata type-definition count and whose type table is file mapped.
+
+Without `binary_path`, `binary` is `null` and the four binary collections are
+empty.
 
 Checked against Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and 6000.0.84f1
 macOS builds, both arm64 and x86_64 slices. PE linking follows the same rules
 but has not been checked against a real Windows build.
 
-| Reason                         | Category    | Meaning                                                                         |
-| ------------------------------ | ----------- | ------------------------------------------------------------------------------- |
-| `unsupported-container`        | unsupported | Not a 64-bit little-endian Mach-O or PE image.                                  |
-| `slice-selection-required`     | unsupported | A universal Mach-O was given without `binary_architecture`.                     |
-| `slice-not-found`              | unsupported | The requested slice is absent, or a thin binary was given an architecture.      |
-| `unsupported-pointer-encoding` | unsupported | ELF (relocation addends) or Mach-O chained fixups; stored pointers not decoded. |
-| `malformed-container`          | input error | The container headers are damaged.                                              |
-| `code-gen-modules-not-found`   | input error | An image has no module record; often a binary from a different build.           |
-| `ambiguous-code-gen-module`    | input error | More than one record matches an image.                                          |
-| `code-registration-not-found`  | input error | No single module table lists exactly the located records.                       |
-| `invalid-method-token`         | input error | A method token is not a method row inside its module's pointer count.           |
-| `invalid-method-pointer`       | input error | A pointer slot or a method address is not file mapped.                          |
+| Reason                            | Category    | Meaning                                                                                 |
+| --------------------------------- | ----------- | --------------------------------------------------------------------------------------- |
+| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O or PE image.                                          |
+| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                             |
+| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.              |
+| `unsupported-pointer-encoding`    | unsupported | ELF (relocation addends) or Mach-O chained fixups; stored pointers not decoded.         |
+| `malformed-container`             | input error | The container headers are damaged.                                                      |
+| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                   |
+| `ambiguous-code-gen-module`       | input error | More than one record matches an image.                                                  |
+| `code-registration-not-found`     | input error | No single module table lists exactly the located records.                               |
+| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                   |
+| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                  |
+| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                       |
+| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind. |
 
 Binary failures report `binary_path` as the input field. There is no partial
 linking: any failure returns no addresses. The binary is bounded to 1 GiB.

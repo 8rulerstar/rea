@@ -8,7 +8,10 @@ import {
   type GoBinaryContainer,
 } from "../go/GoBinaryContainer.js";
 import { readGoBinaryContainer } from "../go/GoBinaryImage.js";
-import type { Il2cppMetadataDecoded } from "./Il2cppMetadataFile.js";
+import type {
+  Il2cppMetadataDecoded,
+  Il2cppMetadataLinkFacts,
+} from "./Il2cppMetadataFile.js";
 
 export const IL2CPP_BINARY_FAILURE_REASONS = {
   unsupported: [
@@ -24,6 +27,8 @@ export const IL2CPP_BINARY_FAILURE_REASONS = {
     "code-registration-not-found",
     "invalid-method-pointer",
     "invalid-method-token",
+    "metadata-registration-not-found",
+    "invalid-type",
   ],
 } as const;
 
@@ -64,6 +69,18 @@ export interface Il2cppBinaryLink {
   readonly code_gen_modules: readonly Il2cppCodeGenModule[];
   /** Native code address per metadata method index; null when the module has no body. */
   readonly method_addresses: readonly (bigint | null)[];
+  /** Address of MetadataRegistration's typesCount field. */
+  readonly types_field: bigint;
+  readonly types_count: number;
+  /** Il2CppType table index and display name per method return, field and parameter. */
+  readonly return_types: readonly Il2cppTypeReference[];
+  readonly field_types: readonly Il2cppTypeReference[];
+  readonly parameter_types: readonly Il2cppTypeReference[];
+}
+
+export interface Il2cppTypeReference {
+  readonly type: number;
+  readonly name: string | null;
 }
 
 const MACHO_CPU = new Map([
@@ -329,15 +346,162 @@ const findCodeRegistration = (
 };
 
 /**
+ * Find MetadataRegistration by its two TypeDefinitionIndex-sized counts:
+ * fieldOffsetsCount and typeDefinitionsSizesCount (words 10 and 12) both equal
+ * the metadata type-definition count and are followed by mapped pointers.
+ * typesCount and types are words 6 and 7. Counts are int32 in 8-byte slots.
+ */
+const findMetadataRegistration = (
+  image: NativeImage,
+  typeDefinitions: number,
+): {
+  readonly field: bigint;
+  readonly count: number;
+  readonly types: bigint;
+} => {
+  const matches: { field: bigint; count: number; types: bigint }[] = [];
+  const low = (offset: number) => image.bytes.readUInt32LE(offset);
+  const word = (offset: number) => image.bytes.readBigUInt64LE(offset);
+  for (const mapping of image.container.mappings) {
+    const start = Number((8n - (mapping.address % 8n)) % 8n);
+    for (let at = start; at + 128 <= mapping.size; at += 8) {
+      const base = mapping.offset + at;
+      if (low(base + 80) !== typeDefinitions) continue;
+      if (low(base + 96) !== typeDefinitions) continue;
+      const count = low(base + 48);
+      const types = word(base + 56);
+      if (
+        count === 0 ||
+        count > 0x7fffffff ||
+        !isMapped(image, word(base + 88), 8) ||
+        !isMapped(image, word(base + 104), 8) ||
+        !isMapped(image, types, count * 8)
+      )
+        continue;
+      matches.push({
+        field: mapping.address + BigInt(at + 48),
+        count,
+        types,
+      });
+    }
+  }
+  if (matches.length !== 1)
+    throw new Il2cppBinaryFormatFailure(
+      "metadata-registration-not-found",
+      `${matches.length} MetadataRegistration candidates count ${typeDefinitions} type definitions`,
+    );
+  return matches[0]!;
+};
+
+const PRIMITIVES = new Map([
+  [0x01, "void"],
+  [0x02, "bool"],
+  [0x03, "char"],
+  [0x04, "sbyte"],
+  [0x05, "byte"],
+  [0x06, "short"],
+  [0x07, "ushort"],
+  [0x08, "int"],
+  [0x09, "uint"],
+  [0x0a, "long"],
+  [0x0b, "ulong"],
+  [0x0c, "float"],
+  [0x0d, "double"],
+  [0x0e, "string"],
+  [0x16, "System.TypedReference"],
+  [0x18, "nint"],
+  [0x19, "nuint"],
+  [0x1c, "object"],
+]);
+
+/**
+ * Render Il2CppType records as C#-like names: keywords for primitives,
+ * Namespace.Outer+Inner for definitions, T[] and T[,] for arrays, generic
+ * arguments in angle brackets and metadata names for generic parameters.
+ */
+const createTypeNamer = (
+  image: NativeImage,
+  metadata: Il2cppMetadataDecoded,
+  facts: Il2cppMetadataLinkFacts,
+  version: number,
+) => {
+  const fail = (message: string): never => {
+    throw new Il2cppBinaryFormatFailure("invalid-type", message);
+  };
+  const pointer = (address: bigint, label: string): bigint =>
+    readPointer(image, address) ??
+    fail(`${label} at 0x${address.toString(16)} is not file mapped`);
+  const u32 = (address: bigint, label: string): number => {
+    const value = pointer(address, label);
+    return Number(value & 0xffffffffn);
+  };
+  // num_mods grew from 5 to 6 bits before version 29, moving byref.
+  const byrefBit = version >= 29 ? 29 : 30;
+  const definitionName = (index: number): string => {
+    const type =
+      metadata.types[index] ?? fail(`type definition ${index} is out of range`);
+    if (type.declaring_type !== -1)
+      return `${definitionName(type.declaring_type)}+${type.name}`;
+    return type.namespace === "" ? type.name : `${type.namespace}.${type.name}`;
+  };
+  const withoutArity = (name: string) => name.replace(/`\d+$/u, "");
+  const byAddress = new Map<bigint, string>();
+  const name = (address: bigint, depth: number): string => {
+    const cached = byAddress.get(address);
+    if (cached !== undefined) return cached;
+    if (depth > 64) fail("type nesting exceeds 64 levels");
+    const data = pointer(address, "Il2CppType data");
+    const bits = u32(address + 8n, "Il2CppType attributes");
+    const kind = (bits >>> 16) & 0xff;
+    const index = Number(BigInt.asIntN(32, data & 0xffffffffn));
+    let result: string;
+    const primitive = PRIMITIVES.get(kind);
+    if (primitive !== undefined) result = primitive;
+    else if (kind === 0x11 || kind === 0x12) result = definitionName(index);
+    else if (kind === 0x0f) result = `${name(data, depth + 1)}*`;
+    else if (kind === 0x1d) result = `${name(data, depth + 1)}[]`;
+    else if (kind === 0x14) {
+      const rank = u32(data + 8n, "Il2CppArrayType rank") & 0xff;
+      result = `${name(pointer(data, "array element"), depth + 1)}[${",".repeat(Math.max(rank - 1, 0))}]`;
+    } else if (kind === 0x13 || kind === 0x1e)
+      result =
+        facts.genericParameterNames[index] ??
+        fail(`generic parameter ${index} is out of range`);
+    else if (kind === 0x15) {
+      const definition =
+        version >= 27
+          ? name(pointer(data, "generic class type"), depth + 1)
+          : definitionName(u32(data, "generic class definition"));
+      const instance = pointer(data + 8n, "generic class instance");
+      const count = u32(instance, "generic argument count");
+      if (count > 64)
+        fail(
+          `generic instance at 0x${instance.toString(16)} has ${count} arguments`,
+        );
+      const argv = pointer(instance + 8n, "generic arguments");
+      const args = Array.from({ length: count }, (_, slot) =>
+        name(pointer(argv + BigInt(slot * 8), "generic argument"), depth + 1),
+      );
+      result = `${withoutArity(definition)}<${args.join(", ")}>`;
+    } else result = fail(`type kind 0x${kind.toString(16)} is not rendered`);
+    if (((bits >>> byrefBit) & 1) === 1) result = `${result}&`;
+    byAddress.set(address, result);
+    return result;
+  };
+  return name;
+};
+
+/**
  * Link metadata methods to native code addresses without executing the image.
  * A method token's row id selects its module's methodPointers slot.
  */
 export const linkIl2cppBinary = (
   bytes: Buffer,
   metadata: Il2cppMetadataDecoded,
-  methodTokens: Uint32Array,
+  facts: Il2cppMetadataLinkFacts,
   architecture?: string,
 ): Il2cppBinaryLink => {
+  const version = metadata.metadata_version;
   const image = openImage(bytes, architecture);
   const modules = findModules(image, metadata);
   const codeGenModulesField = findCodeRegistration(image, modules);
@@ -353,7 +517,7 @@ export const linkIl2cppBinary = (
     const owner = methodImage[index]!;
     if (owner === -1) return null;
     const module = modules[owner]!;
-    const token = methodTokens[index]!;
+    const token = facts.methodTokens[index]!;
     const row = token & 0xffffff;
     if (token >>> 24 !== 0x06 || row === 0 || row > module.method_pointer_count)
       throw new Il2cppBinaryFormatFailure(
@@ -381,6 +545,25 @@ export const linkIl2cppBinary = (
       );
     return address;
   });
+  const registration = findMetadataRegistration(image, metadata.types.length);
+  const typeName = createTypeNamer(image, metadata, facts, version);
+  const reference = (type: number): Il2cppTypeReference => {
+    if (type === -1) return { type, name: null };
+    if (type < 0 || type >= registration.count)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-type",
+        `type index ${type} is outside the ${registration.count} binary types`,
+      );
+    const address =
+      readPointer(image, registration.types + BigInt(type * 8)) ?? 0n;
+    if (address === 0n)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-type",
+        `type ${type} has no Il2CppType record`,
+      );
+    return { type, name: typeName(address, 0) };
+  };
+  const column = (types: Int32Array) => Array.from(types, reference);
   return {
     format: image.container.format === "pe" ? "pe" : "macho",
     architecture: image.container.architecture,
@@ -388,5 +571,10 @@ export const linkIl2cppBinary = (
     code_gen_modules_field: codeGenModulesField,
     code_gen_modules: modules,
     method_addresses,
+    types_field: registration.field,
+    types_count: registration.count,
+    return_types: column(facts.returnTypes),
+    field_types: column(facts.fieldTypes),
+    parameter_types: column(facts.parameterTypes),
   };
 };
