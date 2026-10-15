@@ -34,6 +34,7 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.evmContracts.EVM_TOOL_CONTRACTS,
         ...sources.goContracts.GO_TOOL_CONTRACTS,
         ...sources.il2cppContracts.IL2CPP_TOOL_CONTRACTS,
+        ...sources.unityContracts.UNITY_TOOL_CONTRACTS,
         ...sources.rustContracts.RUST_TOOL_CONTRACTS,
         ...sources.wasmContracts.WASM_TOOL_CONTRACTS,
         ...sources.sqliteContracts.SQLITE_TOOL_CONTRACTS,
@@ -269,6 +270,10 @@ export const providerCatalog = (sources) => {
     {
       identity: sources.il2cppProvider.IL2CPP_METADATA_PROVIDER_IDENTITY,
       contracts: sources.il2cppContracts.IL2CPP_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.unityProvider.UNITY_ASSETS_PROVIDER_IDENTITY,
+      contracts: sources.unityContracts.UNITY_TOOL_CONTRACTS,
     },
     {
       identity: sources.rustProvider.RUST_BINARY_PROVIDER_IDENTITY,

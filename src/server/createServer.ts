@@ -22,12 +22,15 @@ import { registerRecordedCrashTools } from "./registerRecordedCrashTools.js";
 import { createRecordedCrashService } from "../composition/binaryDiagnostics.js";
 import { createGoBinaryService } from "../composition/go.js";
 import { createIl2cppMetadataService } from "../composition/il2cpp.js";
+import { createUnityAssetsService } from "../composition/unityAssets.js";
+import type { UnityAssetsService } from "../application/unity/UnityAssetsService.js";
 import type { Il2cppMetadataService } from "../application/il2cpp/Il2cppMetadataService.js";
 import type { GoBinaryService } from "../application/go/GoBinaryService.js";
 import { createElectronFuseService } from "../composition/electronFuses.js";
 import type { ElectronFuseService } from "../application/electron/ElectronFuseService.js";
 import { registerGoTools } from "./registerGoTools.js";
 import { registerIl2cppTools } from "./registerIl2cppTools.js";
+import { registerUnityTools } from "./registerUnityTools.js";
 import { createRustBinaryService } from "../composition/rust.js";
 import type { RustBinaryService } from "../application/rust/RustBinaryService.js";
 import { registerRustTools } from "./registerRustTools.js";
@@ -162,6 +165,7 @@ export interface CreateServerOptions {
   readonly binaryLayout?: BinaryLayoutService;
   readonly goBinary?: GoBinaryService;
   readonly il2cppMetadata?: Il2cppMetadataService;
+  readonly unityAssets?: UnityAssetsService;
   readonly rustBinary?: RustBinaryService;
   readonly electronFuses?: ElectronFuseService;
   readonly recordedCrash?: RecordedCrashService;
@@ -314,6 +318,7 @@ export const createServer = (
   const goBinary = options.goBinary ?? createGoBinaryService();
   const il2cppMetadata =
     options.il2cppMetadata ?? createIl2cppMetadataService();
+  const unityAssets = options.unityAssets ?? createUnityAssetsService();
   const peResources = createPeResourcesService();
   const webNetworkCapture =
     options.webNetworkCapture ?? createWebNetworkCaptureService(environment);
@@ -392,6 +397,7 @@ export const createServer = (
       webModuleTrace.close(),
       goBinary.close(),
       il2cppMetadata.close(),
+      unityAssets.close(),
       peResources.close(),
       webNetworkCapture.close(),
       javascriptRecovery.close?.() ?? Promise.resolve(),
@@ -446,6 +452,7 @@ export const createServer = (
     artifactResources,
     goBinary,
     il2cppMetadata,
+    unityAssets,
     peResources,
     webNetworkCapture,
   };
@@ -645,6 +652,7 @@ const registerConfiguredAnalysisTools = (
     withAdmittedAnalysis,
     goBinary,
     il2cppMetadata,
+    unityAssets,
     peResources,
     webNetworkCapture,
   }: ServerToolContext,
@@ -702,6 +710,14 @@ const registerConfiguredAnalysisTools = (
   registerIl2cppTools(
     server,
     il2cppMetadata,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+    evidenceById,
+  );
+  registerUnityTools(
+    server,
+    unityAssets,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -821,6 +837,7 @@ const createSessionRecorders = (
 interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly goBinary: GoBinaryService;
   readonly il2cppMetadata: Il2cppMetadataService;
+  readonly unityAssets: UnityAssetsService;
   readonly peResources: PeResourcesService;
   readonly webNetworkCapture: WebNetworkCaptureService;
   readonly artifactResources: ArtifactResourceScope;

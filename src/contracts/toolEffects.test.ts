@@ -29,6 +29,7 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
   inspect_go_binary: "reads embedded metadata without executing the target",
   inspect_il2cpp_metadata:
     "reads metadata bytes without running Unity, IL2CPP binaries or the target",
+  inspect_unity_assets: "does not decode object bodies, run Unity, or decrypt",
   inspect_rust_binary:
     "reads an embedded dependency list without executing the target",
   inspect_sqlite_database:
