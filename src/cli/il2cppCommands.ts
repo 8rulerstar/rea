@@ -27,7 +27,12 @@ export const registerIl2cppCommands = (
           CLI_COMMANDS.inspectIl2cppMetadata,
           async () =>
             finishAnalysisCommand(
-              () => service.inspect({ path: resolve(args.path) }, { signal }),
+              () =>
+                service.inspect(
+                  // One-shot CLI runs retain no Evidence for later views.
+                  { path: resolve(args.path), detail: "complete" },
+                  { signal },
+                ),
               service,
               "il2cpp-metadata",
               "inspect_il2cpp_metadata",
