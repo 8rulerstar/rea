@@ -23,6 +23,7 @@ export const IL2CPP_METADATA_FAILURE_REASONS = {
     "type-index-width",
     "index-out-of-range",
     "nested-type-conflict",
+    "declaring-type-mismatch",
     "invalid-string",
   ],
 } as const;
@@ -206,7 +207,7 @@ const resolveWidths = (
   if (!isIndexWidth(type))
     throw new Il2cppMetadataFormatFailure(
       "type-index-width",
-      `the ${type_width_source} record does not imply a 1-, 2- or 4-byte TypeIndex`,
+      `the ${type_width_source} does not imply a 1-, 2- or 4-byte TypeIndex`,
     );
   return {
     type_definition,
@@ -231,24 +232,34 @@ const checkRange = (
     );
 };
 
-/** Decode NUL-terminated UTF-8 names once each from the strings section. */
+/**
+ * Decode NUL-terminated UTF-8 names once each from the strings section. An
+ * index must start a string, so a shifted section or a pointer into another
+ * name fails instead of returning a different name, and total decoding stays
+ * bounded by the section size.
+ */
 const createStringReader = (bytes: Buffer, strings: Il2cppMetadataSection) => {
   const stringEnd = strings.offset + strings.size;
+  const pool = bytes.subarray(strings.offset, stringEnd);
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const cache = new Map<number, string>();
   return (index: number, label: string) => {
     const cached = cache.get(index);
     if (cached !== undefined) return cached;
-    const start = strings.offset + index;
-    const end = index < 0 ? -1 : bytes.indexOf(0, start);
-    if (index < 0 || index >= strings.size || end === -1 || end >= stringEnd)
+    const end = index < 0 || index >= pool.length ? -1 : pool.indexOf(0, index);
+    if (end === -1)
       throw new Il2cppMetadataFormatFailure(
         "invalid-string",
         `${label} string index ${index} has no terminated entry inside the ${strings.size}-byte string section`,
       );
+    if (index > 0 && pool[index - 1] !== 0)
+      throw new Il2cppMetadataFormatFailure(
+        "invalid-string",
+        `${label} string index ${index} starts inside another string`,
+      );
     let value: string;
     try {
-      value = decoder.decode(bytes.subarray(start, end));
+      value = decoder.decode(pool.subarray(index, end));
     } catch (cause: unknown) {
       throw new Il2cppMetadataFormatFailure(
         "invalid-string",
@@ -326,13 +337,40 @@ const assignNesting = (
           "index-out-of-range",
           `type ${index} lists nested type ${nested} outside the ${types.length} type definitions`,
         );
-      if (target.declaring_type !== -1 || nested === index)
+      if (nested === index)
+        throw new Il2cppMetadataFormatFailure(
+          "nested-type-conflict",
+          `type ${index} lists itself as a nested type`,
+        );
+      if (target.declaring_type !== -1)
         throw new Il2cppMetadataFormatFailure(
           "nested-type-conflict",
           `type ${nested} is listed as nested in type ${index} and type ${target.declaring_type}`,
         );
       target.declaring_type = index;
     }
+  }
+  rejectNestingCycles(types);
+};
+
+/** Each enclosing chain must reach a top-level type. */
+const rejectNestingCycles = (types: Il2cppMetadataDecoded["types"]) => {
+  // 0 unvisited, 1 on the current chain, 2 reaches a top-level type.
+  const state = new Uint8Array(types.length);
+  for (let first = 0; first < types.length; first += 1) {
+    const chain: number[] = [];
+    let current = first;
+    while (current !== -1 && state[current] === 0) {
+      state[current] = 1;
+      chain.push(current);
+      current = types[current]!.declaring_type;
+    }
+    if (current !== -1 && state[current] === 1)
+      throw new Il2cppMetadataFormatFailure(
+        "nested-type-conflict",
+        `type ${current} is nested inside itself through its declaring types`,
+      );
+    for (const index of chain) state[index] = 2;
   }
 };
 
@@ -394,6 +432,23 @@ const readMethods = ({
   });
 };
 
+/** Methods inside a type's range must name that type as their declaring type. */
+const checkMethodOwners = (
+  types: Il2cppMetadataDecoded["types"],
+  methods: Il2cppMetadataDecoded["methods"],
+) => {
+  for (const [index, type] of types.entries())
+    for (let offset = 0; offset < type.method_count; offset += 1) {
+      const method = type.method_start + offset;
+      const declaring = methods[method]!.declaring_type;
+      if (declaring !== index)
+        throw new Il2cppMetadataFormatFailure(
+          "declaring-type-mismatch",
+          `method ${method} is in type ${index}'s range but declares type ${declaring}`,
+        );
+    }
+};
+
 /** Decode version 39 image, type and method names without native binaries or decryption. */
 export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
   const sections = readHeader(bytes);
@@ -417,12 +472,15 @@ export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
     recordBytes: expected,
     readString: createStringReader(bytes, section("strings")),
   };
+  const types = readTypes(tables);
+  const methods = readMethods(tables);
+  checkMethodOwners(types, methods);
   return {
     metadata_version: IL2CPP_METADATA_SUPPORTED_VERSION,
     index_widths: widths,
     sections,
     images: readImages(tables),
-    types: readTypes(tables),
-    methods: readMethods(tables),
+    types,
+    methods,
   };
 };
