@@ -14,7 +14,7 @@ source and type recovery remain a separate native-analysis question.
 ## IL2CPP metadata
 
 Use `inspect_il2cpp_metadata` for an explicit local Unity `global-metadata.dat`
-(version 39) when the question concerns assembly images, type or method names,
+(versions 29, 31 and 39) when the question concerns assembly images, type or method names,
 namespaces or index ranges. No `open_binary`, Unity installation or target
 execution is required. The CLI equivalent is `inspect-il2cpp-metadata PATH`.
 The default summary returns counts; page `images`, `types` or `methods`

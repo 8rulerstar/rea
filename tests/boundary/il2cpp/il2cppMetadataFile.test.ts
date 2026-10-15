@@ -111,7 +111,7 @@ describe("rejected IL2CPP global-metadata", () => {
     );
     rejects(Buffer.alloc(4), "unrecognized-magic", "unsupported");
     rejects(
-      mutated((_, bytes) => bytes.writeInt32LE(31, 4)),
+      mutated((_, bytes) => bytes.writeInt32LE(30, 4)),
       "unsupported-version",
       "unsupported",
     );
@@ -162,7 +162,7 @@ describe("rejected IL2CPP global-metadata", () => {
     rejects(
       mutated((fixture, bytes) =>
         bytes.writeInt32LE(
-          fixture.section("methods").count + 1,
+          fixture.section("methods").count! + 1,
           fixture.header("methods", "count"),
         ),
       ),
@@ -333,5 +333,115 @@ describe("IL2CPP index widths", () => {
         type: 2,
       }),
     ).toEqual({ typeDefinitions: 76, images: 36, methods: 30 });
+    const fixed = {
+      type_definition: 4,
+      generic_container: 4,
+      parameter: 4,
+      type: 4,
+    } as const;
+    expect(il2cppMetadataRecordBytes(fixed, 29)).toEqual({
+      typeDefinitions: 88,
+      images: 40,
+      methods: 32,
+    });
+    expect(il2cppMetadataRecordBytes(fixed, 31).methods).toBe(36);
+  });
+});
+
+describe("IL2CPP global-metadata versions 29 and 31", () => {
+  it.each([29, 31] as const)(
+    "decodes version %i with fixed 4-byte indices and size-only headers",
+    (version) => {
+      const fixture = createIl2cppMetadataFixture({ version });
+      const decoded = readIl2cppMetadata(fixture.bytes);
+      expect(decoded.metadata_version).toBe(version);
+      expect(decoded.index_widths).toEqual({
+        type_definition: 4,
+        generic_container: 4,
+        parameter: 4,
+        type: 4,
+        type_width_source: "fixed-width-version",
+      });
+      expect(decoded.sections[0]).toEqual({
+        name: "stringLiterals",
+        offset: 256,
+        size: 0,
+        count: null,
+      });
+      expect(decoded.sections.every((section) => section.count === null)).toBe(
+        true,
+      );
+      expect(decoded.images).toEqual(FIXTURE_IMAGES);
+      expect(decoded.types).toEqual(FIXTURE_TYPES);
+      expect(decoded.methods).toEqual(FIXTURE_METHODS);
+    },
+  );
+
+  it("rejects method records sized for the other version", () => {
+    for (const [built, labeled] of [
+      [29, 31],
+      [31, 29],
+    ] as const)
+      rejects(
+        mutated(
+          (_, bytes) => bytes.writeInt32LE(labeled, 4),
+          createIl2cppMetadataFixture({ version: built }),
+        ),
+        "record-size-mismatch",
+      );
+  });
+
+  it("rejects a version 29 header that does not end at the first section", () => {
+    rejects(
+      createIl2cppMetadataFixture({ version: 29 }).bytes.subarray(0, 200),
+      "truncated-header",
+    );
+    rejects(
+      mutated(
+        (fixture, bytes) =>
+          bytes.writeInt32LE(380, fixture.header("stringLiterals", "offset")),
+        createIl2cppMetadataFixture({ version: 29 }),
+      ),
+      "unexpected-header-size",
+    );
+  });
+
+  it("rejects size-only sections that do not hold whole records", () => {
+    rejects(
+      mutated(
+        (fixture, bytes) =>
+          bytes.writeInt32LE(
+            fixture.section("typeDefinitions").size - 1,
+            fixture.header("typeDefinitions", "size"),
+          ),
+        createIl2cppMetadataFixture({ version: 31 }),
+      ),
+      "record-size-mismatch",
+    );
+  });
+
+  it("applies the shared string and ownership checks", () => {
+    const fixture = createIl2cppMetadataFixture({ version: 31 });
+    rejects(
+      mutated(
+        (target, bytes) =>
+          bytes.writeInt32LE(
+            target.stringOffset("Update") +
+              1 -
+              target.section("strings").offset,
+            target.record("methods", 0),
+          ),
+        fixture,
+      ),
+      "invalid-string",
+    );
+    rejects(
+      mutated(
+        (target, bytes) =>
+          bytes.writeInt32LE(3, target.record("methods", 1) + 4),
+        fixture,
+      ),
+      "declaring-type-mismatch",
+    );
   });
 });

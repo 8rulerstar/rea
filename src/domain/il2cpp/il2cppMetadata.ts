@@ -2,7 +2,7 @@ import { z } from "zod";
 import { digestSchema } from "../digests.js";
 import { localPathStringSchema } from "../localPath.js";
 
-/** Header section order for global-metadata.dat version 39. */
+/** Header section order shared by global-metadata.dat versions 29, 31 and 39. */
 export const IL2CPP_METADATA_SECTION_NAMES = [
   "stringLiterals",
   "stringLiteralData",
@@ -37,6 +37,9 @@ export const IL2CPP_METADATA_SECTION_NAMES = [
   "exportedTypeDefinitions",
 ] as const;
 
+/** Decoded metadata versions; 29 and 31 use fixed 4-byte indices. */
+export const IL2CPP_METADATA_VERSIONS = [29, 31, 39] as const;
+
 export const IL2CPP_METADATA_COLLECTIONS = [
   "images",
   "types",
@@ -65,7 +68,8 @@ export const il2cppMetadataSectionSchema = z.strictObject({
   name: z.enum(IL2CPP_METADATA_SECTION_NAMES),
   offset: count,
   size: count,
-  count,
+  /** Header-recorded entry count; versions 29 and 31 record none. */
+  count: count.nullable(),
 });
 
 /** Assembly image and its contiguous type-definition range. */
@@ -100,7 +104,9 @@ export const il2cppMetadataObjectSchema = z.strictObject({
     sha256: digestSchema,
     bytes: count,
   }),
-  metadata_version: z.literal(39),
+  metadata_version: z.union(
+    IL2CPP_METADATA_VERSIONS.map((version) => z.literal(version)),
+  ),
   index_widths: z.strictObject({
     type_definition: indexWidth,
     generic_container: indexWidth,
@@ -109,6 +115,7 @@ export const il2cppMetadataObjectSchema = z.strictObject({
     type_width_source: z.enum([
       "interface-offsets-record",
       "type-definition-record",
+      "fixed-width-version",
     ]),
   }),
   sections: z

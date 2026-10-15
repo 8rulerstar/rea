@@ -7,7 +7,9 @@ with the header sections and serialized index widths. It reads the file without
 running it and requires no Unity installation, IL2CPP binary, active target,
 Hopper, Ghidra or IDA.
 
-Metadata version 39 is supported. Other versions are rejected as unsupported.
+Metadata versions 29, 31 and 39 are supported. For example, Unity 2022.3.30f1
+wrote version 29, 2022.3.62f3 wrote 31 and 6000.4.2f1 wrote 39. Other versions
+are rejected as unsupported.
 
 ## MCP
 
@@ -61,13 +63,15 @@ The CLI returns the complete result. It has no detail option.
 The result contains:
 
 - `artifact`: path, SHA-256 and byte length;
-- `metadata_version`: `39`;
+- `metadata_version`: `29`, `31` or `39`;
 - `index_widths`: the serialized widths (1, 2 or 4 bytes) of
   `type_definition`, `generic_container`, `parameter` and `type` indices, and
-  `type_width_source`, which records whether the type index width was derived
-  from the `interface-offsets-record` or the `type-definition-record`;
+  `type_width_source`. Version 39 derives the type index width from the
+  `interface-offsets-record` or the `type-definition-record`; versions 29 and
+  31 always use 4-byte indices (`fixed-width-version`);
 - `sections`: all 31 header sections in header order, each with `offset`, `size`
-  and `count`;
+  and `count`. Versions 29 and 31 record no counts, so `count` is `null` and
+  record counts come from the section sizes;
 - `images`: `name`, `type_start` and `type_count`;
 - `types`: `name`, `namespace`, `method_start`, `method_count`,
   `nested_type_start`, `nested_type_count` and `declaring_type`;
@@ -91,16 +95,16 @@ tool such as `jq`.
 
 A file whose magic is not `0xFAB11BAF` fails as an unsupported target with
 `unrecognized-magic`. The file may be encrypted or may not be IL2CPP metadata.
-A version other than 39 fails as an unsupported target with
+A version other than 29, 31 or 39 fails as an unsupported target with
 `unsupported-version`.
 
-Damaged version 39 metadata returns an input error (`invalid_format`) whose
+Damaged metadata returns an input error (`invalid_format`) whose
 message names one reason:
 
 | Reason                    | Meaning                                                                                                          |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `truncated-header`        | The file is shorter than the header.                                                                             |
-| `unexpected-header-size`  | `stringLiterals.offset` is not 380, the version 39 header size.                                                  |
+| `unexpected-header-size`  | `stringLiterals.offset` is not the header size: 256 bytes for versions 29 and 31, 380 for 39.                    |
 | `section-out-of-bounds`   | A section extends beyond the file.                                                                               |
 | `section-overlap`         | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
 | `record-size-mismatch`    | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
@@ -124,7 +128,7 @@ report limit can still require the summary and paging path.
 - Fields, properties, signatures, parameters and generic instances.
 - Ghidra or other disassembler integration. Use the
   [native workflow](native-investigation.md) for native code.
-- Metadata versions other than 39.
+- Metadata versions other than 29, 31 and 39.
 
 Names come from the metadata file only. They do not establish which methods
 were compiled into the native binary or how they behave at runtime.
