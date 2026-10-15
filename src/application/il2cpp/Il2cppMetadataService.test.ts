@@ -43,6 +43,8 @@ const report: Il2cppMetadata = {
   fields: [],
   properties: [],
   events: [],
+  binary: null,
+  method_addresses: [],
   parameters: [],
   string_literals: [],
   limitations: [],

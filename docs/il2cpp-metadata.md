@@ -14,6 +14,9 @@ releases that write these numbers have not been checked. Other versions are
 rejected as unsupported. The path must name a regular file; directories and
 symbolic links are rejected.
 
+With `binary_path`, the tool also reads the matching native binary and links
+each method to its code address. See [Native method addresses](#native-method-addresses).
+
 ## MCP
 
 A large game produces megabytes of rows, so MCP delivers a summary by default
@@ -50,7 +53,7 @@ the original rows without reopening or decoding the file:
 ```
 
 Collections are `images`, `types`, `methods`, `fields`, `properties`, `events`,
-`parameters` and `string_literals`. `limit` defaults to 64. The page
+`parameters`, `string_literals` and `method_addresses`. `limit` defaults to 64. The page
 offset is the metadata index of the first returned row. `limit` has no cap of
 its own beyond the MCP response budget. Select `detail: "complete"` to return
 every row inline when the result fits that budget, as a small game's often does.
@@ -61,7 +64,9 @@ every row inline when the result fits that budget, as a small game's often does.
 rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
 ```
 
-The CLI returns the complete result. It has no detail option.
+The CLI returns the complete result. It has no detail option. `--binary PATH`
+links method addresses and `--architecture arm64|amd64` selects the slice of a
+universal Mach-O.
 
 ## Observations
 
@@ -100,6 +105,53 @@ The complete inventory of a large game is several megabytes and can exceed
 the MCP response budget; the default summary and paging avoid that. The tool has
 no name search: page the collections, or filter the complete CLI JSON with a
 tool such as `jq`.
+
+## Native method addresses
+
+`binary_path` names the native binary built with the metadata: macOS
+`GameAssembly.dylib` (Mach-O) or Windows `GameAssembly.dll` (64-bit PE). A
+universal Mach-O needs `binary_architecture` (`arm64` or `amd64`); a thin binary
+rejects it. The file is read, never loaded or executed.
+
+The binary's `Il2CppCodeRegistration` points to one `Il2CppCodeGenModule` per
+assembly image. Each module record starts with its module name, its method
+pointer count and its method pointer array. The reader finds, for every metadata
+image, the single record whose name pointer reaches that image's name string and
+whose count equals the image's method count. It then requires exactly one
+`codeGenModulesCount`/`codeGenModules` pair that lists exactly those records. No
+symbols are needed, so stripped builds work. A method's token row id selects its
+slot in the module's method pointer array.
+
+The result adds:
+
+- `binary`: artifact identity, `format`, `architecture`, `image_base`,
+  `code_gen_modules_field` (the address of `codeGenModulesCount`) and
+  `code_gen_modules` (`image`, record `address`, `method_pointer_count`);
+- `method_addresses`: one row per method index with `address` and `rva`
+  (address minus `image_base`), both hexadecimal strings. Both are `null` when
+  the module records no body, as for abstract, extern and most generic methods.
+
+Without `binary_path`, `binary` is `null` and `method_addresses` is empty.
+
+Checked against Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and 6000.0.84f1
+macOS builds, both arm64 and x86_64 slices. PE linking follows the same rules
+but has not been checked against a real Windows build.
+
+| Reason                         | Category    | Meaning                                                                         |
+| ------------------------------ | ----------- | ------------------------------------------------------------------------------- |
+| `unsupported-container`        | unsupported | Not a 64-bit little-endian Mach-O or PE image.                                  |
+| `slice-selection-required`     | unsupported | A universal Mach-O was given without `binary_architecture`.                     |
+| `slice-not-found`              | unsupported | The requested slice is absent, or a thin binary was given an architecture.      |
+| `unsupported-pointer-encoding` | unsupported | ELF (relocation addends) or Mach-O chained fixups; stored pointers not decoded. |
+| `malformed-container`          | input error | The container headers are damaged.                                              |
+| `code-gen-modules-not-found`   | input error | An image has no module record; often a binary from a different build.           |
+| `ambiguous-code-gen-module`    | input error | More than one record matches an image.                                          |
+| `code-registration-not-found`  | input error | No single module table lists exactly the located records.                       |
+| `invalid-method-token`         | input error | A method token is not a method row inside its module's pointer count.           |
+| `invalid-method-pointer`       | input error | A pointer slot or a method address is not file mapped.                          |
+
+Binary failures report `binary_path` as the input field. There is no partial
+linking: any failure returns no addresses. The binary is bounded to 1 GiB.
 
 ## Failures
 
@@ -143,8 +195,8 @@ report limit can still require the summary and paging path.
 ## Outside this tool
 
 - Decrypting or deobfuscating protected metadata.
-- Linking metadata to the native binary (`GameAssembly`, `UnityFramework`),
-  including method RVAs and code addresses.
+- Linking ELF `libil2cpp.so` binaries and Mach-O binaries that use chained
+  fixups; generic method instances, adjustor thunks and invokers.
 - Fields, properties, signatures, parameters and generic instances.
 - Ghidra or other disassembler integration. Use the
   [native workflow](native-investigation.md) for native code.

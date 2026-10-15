@@ -85,6 +85,7 @@ export const IL2CPP_METADATA_COLLECTIONS = [
   "events",
   "parameters",
   "string_literals",
+  "method_addresses",
 ] as const;
 
 const count = z.number().int().nonnegative();
@@ -102,6 +103,17 @@ export const inspectIl2cppMetadataInputSchema = z.strictObject({
     .default("summary")
     .describe(
       "summary (default) retains every row and returns counts with a linked inspect_analysis_view summary; complete returns every image, type and method row inline",
+    ),
+  binary_path: localPathStringSchema
+    .optional()
+    .describe(
+      "Absolute path to the matching native IL2CPP binary (Mach-O GameAssembly.dylib or PE GameAssembly.dll) to link methods to code addresses; read only, never executed",
+    ),
+  binary_architecture: z
+    .enum(["arm64", "amd64"])
+    .optional()
+    .describe(
+      "Slice to read from a universal Mach-O binary_path; required for universal binaries and rejected otherwise",
     ),
 });
 
@@ -170,6 +182,38 @@ export const il2cppMetadataStringLiteralSchema = z.strictObject({
   value_base64: z.string().regex(CANONICAL_BASE64_PATTERN).nullable(),
 });
 
+/** Hexadecimal virtual address or offset, such as 0x153584. */
+const hexAddress = z.string().regex(/^0x[0-9a-f]+$/u);
+
+/** Native code of one method: virtual address and image-base-relative RVA. */
+export const il2cppMethodAddressSchema = z.strictObject({
+  /** Null when the binary records no body: abstract, extern or generic methods. */
+  address: hexAddress.nullable(),
+  rva: hexAddress.nullable(),
+});
+
+/** Code-generation module record located for one metadata image. */
+export const il2cppCodeGenModuleSchema = z.strictObject({
+  image: count,
+  address: hexAddress,
+  method_pointer_count: count,
+});
+
+/** Identity and registration facts of the linked native binary. */
+export const il2cppBinaryLinkSchema = z.strictObject({
+  artifact: z.strictObject({
+    path: localPathStringSchema,
+    sha256: digestSchema,
+    bytes: count,
+  }),
+  format: z.enum(["macho", "pe"]),
+  architecture: z.string(),
+  image_base: hexAddress,
+  /** CodeRegistration's codeGenModulesCount field, followed by the module array pointer. */
+  code_gen_modules_field: hexAddress,
+  code_gen_modules: z.array(il2cppCodeGenModuleSchema),
+});
+
 /** Unrefined report fields, shared with projections that omit row collections. */
 export const il2cppMetadataObjectSchema = z.strictObject({
   artifact: z.strictObject({
@@ -200,6 +244,10 @@ export const il2cppMetadataObjectSchema = z.strictObject({
   events: z.array(il2cppMetadataMemberSchema),
   parameters: z.array(il2cppMetadataParameterSchema),
   string_literals: z.array(il2cppMetadataStringLiteralSchema),
+  /** Null unless binary_path was selected. */
+  binary: il2cppBinaryLinkSchema.nullable(),
+  /** One row per method index when binary is linked, otherwise empty. */
+  method_addresses: z.array(il2cppMethodAddressSchema),
   limitations: z.array(z.string()),
 });
 
@@ -212,6 +260,21 @@ export const il2cppMetadataSchema = il2cppMetadataObjectSchema.superRefine(
         code: "custom",
         path: ["sections"],
         message: `Version ${report.metadata_version} headers have ${names.length} sections.`,
+      });
+    if (
+      report.binary !== null &&
+      report.method_addresses.length !== report.methods.length
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["method_addresses"],
+        message: "A linked binary needs one address row per method.",
+      });
+    if (report.binary === null && report.method_addresses.length > 0)
+      context.addIssue({
+        code: "custom",
+        path: ["method_addresses"],
+        message: "Method addresses require a linked binary.",
       });
     report.sections.forEach((section, index) => {
       if (section.name !== names[index])

@@ -97,6 +97,14 @@ export const FIXTURE_STRING_LITERALS = [
   { value: null, value_base64: INVALID_UTF8_LITERAL.toString("base64") },
 ] as const;
 
+/**
+ * Per-image method tokens. Row ids restart in each image and do not follow
+ * metadata order, so linking must use the token rather than the position.
+ */
+export const FIXTURE_METHOD_TOKENS = [
+  0x06000002, 0x06000001, 0x06000003, 0x06000001, 0x06000002,
+] as const;
+
 const writeIndex = (
   target: Buffer,
   offset: number,
@@ -208,7 +216,10 @@ const encodeMethods = (
           ),
     );
     writeIndex(methods, parameterStart + P, G, -1);
-    methods.writeUInt32LE(0x06000001 + index, parameterStart + P + G);
+    methods.writeUInt32LE(
+      FIXTURE_METHOD_TOKENS[index]!,
+      parameterStart + P + G,
+    );
     methods.writeUInt16LE(parameters, at + recordBytes.methods - 2);
   });
 

@@ -8,6 +8,7 @@ import {
   il2cppMetadataMethodSchema,
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
+  il2cppMethodAddressSchema,
   il2cppMetadataObjectSchema,
   il2cppMetadataSchema,
   il2cppMetadataTypeSchema,
@@ -34,6 +35,7 @@ const countsSchema = z.strictObject({
   events: z.number().int().nonnegative(),
   parameters: z.number().int().nonnegative(),
   string_literals: z.number().int().nonnegative(),
+  method_addresses: z.number().int().nonnegative(),
 });
 
 /** Metadata identity, index widths and sections with row counts instead of rows. */
@@ -47,6 +49,7 @@ export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
     events: true,
     parameters: true,
     string_literals: true,
+    method_addresses: true,
   })
   .extend({ counts: countsSchema });
 
@@ -65,6 +68,7 @@ export const il2cppMetadataViewItemsSchema = z.union([
   z.array(il2cppMetadataMemberSchema),
   z.array(il2cppMetadataParameterSchema),
   z.array(il2cppMetadataStringLiteralSchema),
+  z.array(il2cppMethodAddressSchema),
 ]);
 
 export const il2cppMetadataViewContextSchema = z.strictObject({
@@ -112,6 +116,7 @@ const parseMetadataReport = (
       events: report.events.length,
       parameters: report.parameters.length,
       string_literals: report.string_literals.length,
+      method_addresses: report.method_addresses.length,
     },
   };
   if (sealed) checkedReports.set(normalizedResult, new WeakRef(checked));
@@ -146,6 +151,7 @@ export const projectIl2cppMetadataView = (
     events,
     parameters,
     string_literals,
+    method_addresses,
     ...identity
   } = report;
   const rows = {
@@ -157,6 +163,7 @@ export const projectIl2cppMetadataView = (
     events,
     parameters,
     string_literals,
+    method_addresses,
   };
   const shared = {
     parent_evidence_id: parent.evidenceId,
@@ -168,7 +175,9 @@ export const projectIl2cppMetadataView = (
     },
     limitations: [...parent.limitations],
     unknowns: [
-      "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown.",
+      identity.binary === null
+        ? "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown."
+        : "Addresses come from static binary tables; runtime behavior and generic instance code remain unknown.",
       ...(parent.subject == null
         ? [
             "The parent has no recorded subject; its normalized artifact identity cannot be cross-checked against a subject digest.",

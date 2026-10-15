@@ -56,7 +56,7 @@ export type Il2cppMetadataVersion = (typeof IL2CPP_METADATA_VERSIONS)[number];
 type RecordSection = "typeDefinitions" | "images" | "methods";
 export type Il2cppMetadataDecoded = Omit<
   Il2cppMetadata,
-  "artifact" | "limitations"
+  "artifact" | "limitations" | "binary" | "method_addresses"
 >;
 
 /**
@@ -638,14 +638,53 @@ export interface Il2cppMetadataRowCounts {
   readonly methods: number;
 }
 
+export interface Il2cppMetadataReadOptions {
+  /** Called before any row is decoded; may throw to refuse the file. */
+  readonly beforeRows?: (counts: Il2cppMetadataRowCounts) => void;
+}
+
+/** Method definition tokens in method index order. */
+const readMethodTokens = ({
+  bytes,
+  section,
+  widths,
+  recordBytes: sizes,
+  counts,
+  methodReturnParameterToken,
+}: MetadataTables): Uint32Array => {
+  const methods = section("methods");
+  // Name, declaring type, return type, optional return parameter token,
+  // parameter start and generic container precede the token.
+  const tokenAt =
+    4 +
+    widths.type_definition +
+    widths.type +
+    (methodReturnParameterToken ? 4 : 0) +
+    widths.parameter +
+    widths.generic_container;
+  return Uint32Array.from({ length: counts.methods }, (_, index) =>
+    bytes.readUInt32LE(methods.offset + index * sizes.methods + tokenAt),
+  );
+};
+
+/** Decoded metadata plus the method tokens that link methods to native code. */
+export interface Il2cppMetadataWithTokens {
+  readonly metadata: Il2cppMetadataDecoded;
+  readonly methodTokens: Uint32Array;
+}
+
 /** Decode image, type, method and member names and string literals without native binaries or decryption. */
 export const readIl2cppMetadata = (
   bytes: Buffer,
-  options: {
-    /** Called before any row is decoded; may throw to refuse the file. */
-    readonly beforeRows?: (counts: Il2cppMetadataRowCounts) => void;
-  } = {},
-): Il2cppMetadataDecoded => {
+  options: Il2cppMetadataReadOptions = {},
+): Il2cppMetadataDecoded =>
+  readIl2cppMetadataWithTokens(bytes, options).metadata;
+
+/** Decode metadata and retain method definition tokens for native linking. */
+export const readIl2cppMetadataWithTokens = (
+  bytes: Buffer,
+  options: Il2cppMetadataReadOptions = {},
+): Il2cppMetadataWithTokens => {
   const { version, headerBytes, sections } = readHeader(bytes);
   checkSections(bytes, headerBytes, sections);
   const byName = new Map(sections.map((entry) => [entry.name, entry]));
@@ -676,12 +715,15 @@ export const readIl2cppMetadata = (
   const methods = readMethods(tables);
   checkMethodOwners(types, methods);
   return {
-    metadata_version: version,
-    index_widths: widths,
-    sections,
-    images,
-    types,
-    methods,
-    ...readIl2cppMembers(tables, types.length, methods.length),
+    metadata: {
+      metadata_version: version,
+      index_widths: widths,
+      sections,
+      images,
+      types,
+      methods,
+      ...readIl2cppMembers(tables, types.length, methods.length),
+    },
+    methodTokens: readMethodTokens(tables),
   };
 };
