@@ -96,6 +96,16 @@ images, type and method names, index ranges, header sections and SHA-256. It
 does not decrypt metadata or link names to native code addresses. MCP returns a
 summary by default and pages rows on request. See [IL2CPP metadata](il2cpp-metadata.md).
 
+Inventory a Unity player data file or UnityFS AssetBundle without Unity:
+
+```bash
+rea inspect-unity-assets /absolute/path/level0 --json
+```
+
+The command reports SerializedFile headers, types, object tables and external
+references, and for bundles the blocks and directory. It does not decode object
+bodies or LZMA bundles. See [Unity assets](unity-assets.md).
+
 Inspect an embedded cargo-auditable Rust dependency list without installing
 Rust or configuring a disassembler:
 

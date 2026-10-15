@@ -24,6 +24,17 @@ is unsupported, not decrypted. Linking names to `GameAssembly` or
 `UnityFramework` code addresses remains a separate native-analysis question.
 See [IL2CPP metadata](https://github.com/morluto/rea/blob/main/docs/il2cpp-metadata.md).
 
+## Unity assets
+
+Use `inspect_unity_assets` for an explicit local Unity SerializedFile
+(`globalgamemanagers`, `*.assets`, `level*`) or UnityFS AssetBundle when the
+question concerns Unity version, types, object counts, path IDs, object byte
+ranges or external file references. The CLI equivalent is
+`inspect-unity-assets PATH`. Page `objects`, `types` or `externals` through
+`inspect_analysis_view` kind `unity-assets`. LZMA bundles are unsupported, and
+object bodies, names and field values are not decoded.
+See [Unity assets](https://github.com/morluto/rea/blob/main/docs/unity-assets.md).
+
 ## Rust dependency metadata
 
 Use `inspect_rust_binary` for an explicit local ELF, PE, or thin Mach-O when
