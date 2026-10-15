@@ -11,6 +11,8 @@ export interface Il2cppMetadataFixtureOptions {
   readonly interfaceOffsets?: boolean;
   /** Raw interfaceOffsets record size; defaults to 4 + typeIndexWidth. */
   readonly interfaceOffsetRecordBytes?: number;
+  /** Make type 1 also list type 0, so 0 and 1 nest in each other. */
+  readonly nestingCycle?: boolean;
 }
 
 export const FIXTURE_IMAGES = [
@@ -65,8 +67,6 @@ export const FIXTURE_METHODS = [
   { name: "ToString", declaring_type: 3 },
 ] as const;
 
-const FIXTURE_NESTED_TYPES = [1] as const;
-
 const writeIndex = (
   target: Buffer,
   offset: number,
@@ -105,6 +105,12 @@ export const createIl2cppMetadataFixture = (
   const D = 1 as const;
   const G = 1 as const;
   const P = 1 as const;
+  const nestedTypeEntries = options.nestingCycle === true ? [1, 0] : [1];
+  const typeRows = FIXTURE_TYPES.map((type, index) =>
+    options.nestingCycle === true && index === 1
+      ? { ...type, nested_type_start: 1, nested_type_count: 1 }
+      : type,
+  );
   const recordBytes = {
     typeDefinitions: 68 + 3 * T + G,
     images: 32 + 2 * D,
@@ -134,7 +140,7 @@ export const createIl2cppMetadataFixture = (
   const types = Buffer.alloc(
     FIXTURE_TYPES.length * recordBytes.typeDefinitions,
   );
-  FIXTURE_TYPES.forEach((type, index) => {
+  typeRows.forEach((type, index) => {
     let at = index * recordBytes.typeDefinitions;
     types.writeInt32LE(intern(type.name), at);
     types.writeInt32LE(intern(type.namespace), at + 4);
@@ -181,8 +187,8 @@ export const createIl2cppMetadataFixture = (
     methods.writeUInt32LE(0x06000001 + index, at + 8 + D + T + P + G);
   });
 
-  const nested = Buffer.alloc(FIXTURE_NESTED_TYPES.length * 4);
-  FIXTURE_NESTED_TYPES.forEach((value, index) =>
+  const nested = Buffer.alloc(nestedTypeEntries.length * 4);
+  nestedTypeEntries.forEach((value, index) =>
     nested.writeInt32LE(value, index * 4),
   );
 
@@ -195,7 +201,7 @@ export const createIl2cppMetadataFixture = (
   const contents = new Map<SectionName, { bytes: Buffer; count: number }>([
     ["strings", { bytes: strings, count: stringIndex.size }],
     ["methods", { bytes: methods, count: FIXTURE_METHODS.length }],
-    ["nestedTypes", { bytes: nested, count: FIXTURE_NESTED_TYPES.length }],
+    ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
     ["typeDefinitions", { bytes: types, count: FIXTURE_TYPES.length }],
     ["images", { bytes: images, count: FIXTURE_IMAGES.length }],
     ...(interfaceOffsets === null

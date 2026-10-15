@@ -76,16 +76,16 @@ The result contains:
 
 A row's position in its collection is its metadata index, so `type_start`,
 `method_start` and `declaring_type` refer to positions in `types` or `methods`.
+`nested_type_start` instead indexes the metadata's `nestedTypes` table, which is
+not returned; each nested type's `declaring_type` carries that relationship.
 A type's `declaring_type` is derived from the `nestedTypes` section and is `-1`
 for top-level types. The start of an empty range can retain the original value
 `-1`.
 
-On a 12.9 MB file from a Unity 6000.4.2f1 iOS build, the tool reported 96 images,
-14,739 types (5,318 nested) and 112,232 methods. Decoding took about 30 ms and the
-complete CLI Evidence was about 7.8 MB. Over stdio MCP, complete delivery
-(10.5 MB response) exceeded the 10 MiB response budget and was refused with a
-retained Evidence reference, while the summary was about 4.3 KB. Every name and index matched the reading
-of LibCpp2IL 2022.1.0-pre-release.21. That file is not published.
+The complete inventory of a large game is several megabytes and can exceed
+the MCP response budget; the default summary and paging avoid that. The tool has
+no name search: page the collections, or filter the complete CLI JSON with a
+tool such as `jq`.
 
 ## Failures
 
@@ -97,17 +97,18 @@ A version other than 39 fails as an unsupported target with
 Damaged version 39 metadata returns an input error (`invalid_format`) whose
 message names one reason:
 
-| Reason                   | Meaning                                                                                                          |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `truncated-header`       | The file is shorter than the header.                                                                             |
-| `unexpected-header-size` | `stringLiterals.offset` is not 380, the version 39 header size.                                                  |
-| `section-out-of-bounds`  | A section extends beyond the file.                                                                               |
-| `section-overlap`        | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
-| `record-size-mismatch`   | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
-| `type-index-width`       | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
-| `index-out-of-range`     | A serialized index or range points outside its target collection.                                                |
-| `nested-type-conflict`   | A type is listed as nested in two types, or in itself.                                                           |
-| `invalid-string`         | A name in the string section is unterminated or not valid UTF-8.                                                 |
+| Reason                    | Meaning                                                                                                          |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `truncated-header`        | The file is shorter than the header.                                                                             |
+| `unexpected-header-size`  | `stringLiterals.offset` is not 380, the version 39 header size.                                                  |
+| `section-out-of-bounds`   | A section extends beyond the file.                                                                               |
+| `section-overlap`         | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
+| `record-size-mismatch`    | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
+| `type-index-width`        | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
+| `index-out-of-range`      | A serialized index or range points outside its target collection.                                                |
+| `nested-type-conflict`    | A type is listed as nested in two types, in itself, or in a cycle of declaring types.                            |
+| `declaring-type-mismatch` | A method inside a type's method range names a different declaring type.                                          |
+| `invalid-string`          | A name index does not start a string, or the name is unterminated or not valid UTF-8.                            |
 
 There is no partial success. A file that changes during reading and a cancelled
 request keep their own distinct errors. Resource guards bound the selected file
@@ -123,7 +124,7 @@ report limit can still require the summary and paging path.
 - Fields, properties, signatures, parameters and generic instances.
 - Ghidra or other disassembler integration. Use the
   [native workflow](native-investigation.md) for native code.
-- Metadata versions other than 39. Versions 29 and 31 are planned follow-ups.
+- Metadata versions other than 39.
 
 Names come from the metadata file only. They do not establish which methods
 were compiled into the native binary or how they behave at runtime.

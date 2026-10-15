@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  il2cppIndexWidth,
+  il2cppMetadataRecordBytes,
   Il2cppMetadataFormatFailure,
   readIl2cppMetadata,
   type Il2cppMetadataFailureReason,
@@ -193,7 +195,9 @@ describe("rejected IL2CPP global-metadata", () => {
       "type-index-width",
     );
   });
+});
 
+describe("rejected IL2CPP metadata references", () => {
   it("rejects image, type, method and nested-type indices outside their tables", () => {
     rejects(
       mutated((fixture, bytes) =>
@@ -260,5 +264,74 @@ describe("rejected IL2CPP global-metadata", () => {
       ),
       "invalid-string",
     );
+  });
+
+  it("rejects a shifted string section and names that start inside another string", () => {
+    for (const delta of [-1, 1])
+      rejects(
+        mutated((fixture, bytes) => {
+          const strings = fixture.section("strings");
+          bytes.writeInt32LE(
+            strings.offset + delta,
+            fixture.header("strings", "offset"),
+          );
+          // Shrink a forward shift so it stays clear of the next section.
+          bytes.writeInt32LE(
+            strings.size - Math.max(delta, 0),
+            fixture.header("strings", "size"),
+          );
+        }),
+        "invalid-string",
+      );
+    rejects(
+      mutated((fixture, bytes) =>
+        bytes.writeInt32LE(
+          fixture.stringOffset("Update") +
+            1 -
+            fixture.section("strings").offset,
+          fixture.record("methods", 0),
+        ),
+      ),
+      "invalid-string",
+    );
+  });
+
+  it("rejects nesting cycles and self-nesting", () => {
+    // Type 0 owns nestedTypes entry 0; listing itself there is a self-cycle.
+    rejects(
+      mutated((fixture, bytes) =>
+        bytes.writeInt32LE(0, fixture.section("nestedTypes").offset),
+      ),
+      "nested-type-conflict",
+    );
+    rejects(
+      createIl2cppMetadataFixture({ nestingCycle: true }).bytes,
+      "nested-type-conflict",
+    );
+  });
+
+  it("rejects methods whose declaring type disagrees with the owning type range", () => {
+    rejects(
+      mutated((fixture, bytes) =>
+        bytes.writeUInt8(3, fixture.record("methods", 1) + 4),
+      ),
+      "declaring-type-mismatch",
+    );
+  });
+});
+
+describe("IL2CPP index widths", () => {
+  it("switches widths at the runtime's 255 and 65535 entry boundaries", () => {
+    expect(
+      [0, 255, 256, 65535, 65536].map((entries) => il2cppIndexWidth(entries)),
+    ).toEqual([1, 1, 2, 2, 4]);
+    expect(
+      il2cppMetadataRecordBytes({
+        type_definition: 2,
+        generic_container: 2,
+        parameter: 4,
+        type: 2,
+      }),
+    ).toEqual({ typeDefinitions: 76, images: 36, methods: 30 });
   });
 });
