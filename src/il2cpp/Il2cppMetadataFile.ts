@@ -21,6 +21,7 @@ export const IL2CPP_METADATA_FAILURE_REASONS = {
     "index-out-of-range",
     "nested-type-conflict",
     "declaring-type-mismatch",
+    "image-range-overlap",
     "invalid-string",
   ],
 } as const;
@@ -56,45 +57,46 @@ export type Il2cppMetadataDecoded = Omit<
   "artifact" | "limitations"
 >;
 
-/** Version-specific header and record shape. */
+/**
+ * Version-specific header and record shape. "fixed" headers hold
+ * (offset, size) pairs and every index is a 4-byte int32; "counted" headers
+ * hold (offset, size, count) triples whose counts select variable index widths.
+ */
 interface VersionLayout {
-  /** Header entry: (offset, size) before version 38, then (offset, size, count). */
-  readonly sectionEntryBytes: 8 | 12;
+  readonly indexing: "fixed" | "counted";
   /** Version 29 and 31 type records also carry elementTypeIndex. */
   readonly typeDefinitionTypeIndices: 3 | 4;
   /** Version 31 added returnParameterToken to method records. */
   readonly methodReturnParameterToken: boolean;
-  /** Before version 38 every serialized index is a 4-byte int32. */
-  readonly variableWidths: boolean;
 }
 
 const VERSION_LAYOUTS: Readonly<Record<Il2cppMetadataVersion, VersionLayout>> =
   {
     29: {
-      sectionEntryBytes: 8,
+      indexing: "fixed",
       typeDefinitionTypeIndices: 4,
       methodReturnParameterToken: false,
-      variableWidths: false,
     },
     31: {
-      sectionEntryBytes: 8,
+      indexing: "fixed",
       typeDefinitionTypeIndices: 4,
       methodReturnParameterToken: true,
-      variableWidths: false,
     },
     39: {
-      sectionEntryBytes: 12,
+      indexing: "counted",
       typeDefinitionTypeIndices: 3,
       methodReturnParameterToken: true,
-      variableWidths: true,
     },
   };
+
+const sectionEntryBytes = (layout: VersionLayout) =>
+  layout.indexing === "counted" ? 12 : 8;
 
 /** Magic, version and one entry per section. */
 export const il2cppMetadataHeaderBytes = (version: Il2cppMetadataVersion) =>
   8 +
   IL2CPP_METADATA_SECTION_NAMES.length *
-    VERSION_LAYOUTS[version].sectionEntryBytes;
+    sectionEntryBytes(VERSION_LAYOUTS[version]);
 
 const isSupportedVersion = (value: number): value is Il2cppMetadataVersion =>
   (IL2CPP_METADATA_VERSIONS as readonly number[]).includes(value);
@@ -111,7 +113,7 @@ export const il2cppMetadataRecordBytes = (
     readonly parameter: IndexWidth;
     readonly type: IndexWidth;
   },
-  version: Il2cppMetadataVersion = 39,
+  version: Il2cppMetadataVersion,
 ): Readonly<Record<RecordSection, number>> => {
   const layout = VERSION_LAYOUTS[version];
   return {
@@ -170,7 +172,7 @@ const readHeader = (bytes: Buffer) => {
       "truncated-header",
       `the file has ${bytes.length} bytes, fewer than the ${headerBytes}-byte version ${version} header`,
     );
-  const entryBytes = VERSION_LAYOUTS[version].sectionEntryBytes;
+  const entryBytes = sectionEntryBytes(VERSION_LAYOUTS[version]);
   const sections: Il2cppMetadataSection[] = IL2CPP_METADATA_SECTION_NAMES.map(
     (name, index) => {
       const at = 8 + index * entryBytes;
@@ -207,6 +209,11 @@ const checkSections = (
         "section-out-of-bounds",
         `section ${section.name} (offset ${section.offset}, size ${section.size}, count ${String(section.count)}) is negative or extends past the ${bytes.length}-byte file`,
       );
+    else if (section.size > 0 && section.offset < headerBytes)
+      throw new Il2cppMetadataFormatFailure(
+        "section-out-of-bounds",
+        `section ${section.name} starts at ${section.offset}, inside the ${headerBytes}-byte header`,
+      );
   // Empty sections may share an offset with any neighbor; gaps are padding.
   const occupied = sections
     .filter((section) => section.size > 0)
@@ -222,9 +229,16 @@ const checkSections = (
   }
 };
 
-/** Record size from a version 39 header count; null for an empty section. */
+/** A counted header's entry count; fixed headers record none. */
+const headerCount = (section: Il2cppMetadataSection) => {
+  if (section.count === null)
+    throw new TypeError(`section ${section.name} has no header count`);
+  return section.count;
+};
+
+/** Record size from a counted header; null for an empty section. */
 const recordBytes = (section: Il2cppMetadataSection): number | null => {
-  const count = section.count ?? 0;
+  const count = headerCount(section);
   if (count === 0) {
     if (section.size !== 0)
       throw new Il2cppMetadataFormatFailure(
@@ -262,11 +276,13 @@ const FIXED_WIDTHS: Il2cppMetadataDecoded["index_widths"] = {
 const resolveWidths = (
   section: (name: SectionName) => Il2cppMetadataSection,
 ): Il2cppMetadataDecoded["index_widths"] => {
-  const type_definition = il2cppIndexWidth(section("typeDefinitions").count!);
-  const generic_container = il2cppIndexWidth(
-    section("genericContainers").count!,
+  const type_definition = il2cppIndexWidth(
+    headerCount(section("typeDefinitions")),
   );
-  const parameter = il2cppIndexWidth(section("parameters").count!);
+  const generic_container = il2cppIndexWidth(
+    headerCount(section("genericContainers")),
+  );
+  const parameter = il2cppIndexWidth(headerCount(section("parameters")));
   // TypeIndex counts native types, so its width is recovered from records.
   const interfaceOffset = recordBytes(section("interfaceOffsets"));
   let type: number;
@@ -303,12 +319,12 @@ const recordCounts = (
   expected: Readonly<Record<RecordSection, number>>,
 ): Readonly<Record<RecordSection | "nestedTypes", number>> => {
   const names = ["typeDefinitions", "images", "methods"] as const;
-  if (!VERSION_LAYOUTS[version].variableWidths) {
-    const counts = Object.fromEntries(
+  if (VERSION_LAYOUTS[version].indexing === "fixed") {
+    const sized = Object.fromEntries(
       names.map((name) => [name, entriesIn(section(name), expected[name])]),
     ) as Record<RecordSection, number>;
     return {
-      ...counts,
+      ...sized,
       nestedTypes: entriesIn(section("nestedTypes"), NESTED_TYPE_ENTRY_BYTES),
     };
   }
@@ -321,16 +337,16 @@ const recordCounts = (
       );
   }
   const nestedTypes = section("nestedTypes");
-  if (nestedTypes.size !== nestedTypes.count! * NESTED_TYPE_ENTRY_BYTES)
+  if (nestedTypes.size !== headerCount(nestedTypes) * NESTED_TYPE_ENTRY_BYTES)
     throw new Il2cppMetadataFormatFailure(
       "record-size-mismatch",
       `section nestedTypes size ${nestedTypes.size} does not hold ${String(nestedTypes.count)} 4-byte entries`,
     );
   return {
-    typeDefinitions: section("typeDefinitions").count!,
-    images: section("images").count!,
-    methods: section("methods").count!,
-    nestedTypes: nestedTypes.count!,
+    typeDefinitions: headerCount(section("typeDefinitions")),
+    images: headerCount(section("images")),
+    methods: headerCount(section("methods")),
+    nestedTypes: headerCount(nestedTypes),
   };
 };
 
@@ -357,7 +373,7 @@ const checkRange = (
 const createStringReader = (bytes: Buffer, strings: Il2cppMetadataSection) => {
   const stringEnd = strings.offset + strings.size;
   const pool = bytes.subarray(strings.offset, stringEnd);
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const cache = new Map<number, string>();
   return (index: number, label: string) => {
     const cached = cache.get(index);
@@ -502,7 +518,7 @@ const readTypes = (tables: MetadataTables): Il2cppMetadataDecoded["types"] => {
       12 +
       typeDefinitionTypeIndices * widths.type +
       widths.generic_container;
-    const counts = starts + 32;
+    const countsAt = starts + 32;
     const type = {
       name: readString(bytes.readInt32LE(at), `type ${index} name`),
       namespace: readString(
@@ -510,9 +526,9 @@ const readTypes = (tables: MetadataTables): Il2cppMetadataDecoded["types"] => {
         `type ${index} namespace`,
       ),
       method_start: bytes.readInt32LE(starts + 4),
-      method_count: bytes.readUInt16LE(counts),
+      method_count: bytes.readUInt16LE(countsAt),
       nested_type_start: bytes.readInt32LE(starts + 16),
-      nested_type_count: bytes.readUInt16LE(counts + 8),
+      nested_type_count: bytes.readUInt16LE(countsAt + 8),
       declaring_type: -1,
     };
     checkRange(
@@ -552,7 +568,10 @@ const readMethods = ({
   });
 };
 
-/** Methods inside a type's range must name that type as their declaring type. */
+/**
+ * Type method ranges and method declaring types must agree in both
+ * directions, so a damaged range cannot strand or misattribute a method.
+ */
 const checkMethodOwners = (
   types: Il2cppMetadataDecoded["types"],
   methods: Il2cppMetadataDecoded["methods"],
@@ -567,6 +586,35 @@ const checkMethodOwners = (
           `method ${method} is in type ${index}'s range but declares type ${declaring}`,
         );
     }
+  for (const [index, method] of methods.entries()) {
+    const owner = types[method.declaring_type];
+    if (
+      owner !== undefined &&
+      (index < owner.method_start ||
+        index >= owner.method_start + owner.method_count)
+    )
+      throw new Il2cppMetadataFormatFailure(
+        "declaring-type-mismatch",
+        `method ${index} declares type ${method.declaring_type} but is outside its method range`,
+      );
+  }
+};
+
+/** Each type belongs to at most one image. */
+const checkImageRanges = (images: Il2cppMetadataDecoded["images"]) => {
+  const ranges = images
+    .map((image, index) => ({ ...image, index }))
+    .filter((image) => image.type_count > 0)
+    .sort((left, right) => left.type_start - right.type_start);
+  for (let at = 1; at < ranges.length; at += 1) {
+    const previous = ranges[at - 1]!;
+    const current = ranges[at]!;
+    if (previous.type_start + previous.type_count > current.type_start)
+      throw new Il2cppMetadataFormatFailure(
+        "image-range-overlap",
+        `image ${previous.index} types [${previous.type_start}, ${previous.type_start + previous.type_count}) overlap image ${current.index} starting at type ${current.type_start}`,
+      );
+  }
 };
 
 /** Decode image, type and method names without native binaries or decryption. */
@@ -576,7 +624,8 @@ export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
   const byName = new Map(sections.map((entry) => [entry.name, entry]));
   const section = (name: SectionName) => byName.get(name)!;
   const layout = VERSION_LAYOUTS[version];
-  const widths = layout.variableWidths ? resolveWidths(section) : FIXED_WIDTHS;
+  const widths =
+    layout.indexing === "counted" ? resolveWidths(section) : FIXED_WIDTHS;
   const expected = il2cppMetadataRecordBytes(widths, version);
   const tables: MetadataTables = {
     bytes,
@@ -587,6 +636,8 @@ export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
     typeDefinitionTypeIndices: layout.typeDefinitionTypeIndices,
     readString: createStringReader(bytes, section("strings")),
   };
+  const images = readImages(tables);
+  checkImageRanges(images);
   const types = readTypes(tables);
   const methods = readMethods(tables);
   checkMethodOwners(types, methods);
@@ -594,7 +645,7 @@ export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
     metadata_version: version,
     index_widths: widths,
     sections,
-    images: readImages(tables),
+    images,
     types,
     methods,
   };

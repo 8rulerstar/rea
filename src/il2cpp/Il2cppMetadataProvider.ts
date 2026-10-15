@@ -25,6 +25,7 @@ import { err, ok, type Result } from "../domain/result.js";
 import {
   Il2cppMetadataFormatFailure,
   readIl2cppMetadata,
+  type Il2cppMetadataDecoded,
 } from "./Il2cppMetadataFile.js";
 
 /** Bundled format reader identity; the metadata version is a separate observed fact. */
@@ -37,6 +38,46 @@ const OPERATION = "inspect_il2cpp_metadata";
 const INPUT_BYTES = 256 * 1024 * 1024;
 // A 12.9 MB Unity 6000.4 file with 112,232 methods serializes to 7.8 MB.
 const OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/** JSON characters of one row besides its strings, with one-digit numbers. */
+const rowOverhead = (row: Record<string, string | number>) =>
+  JSON.stringify(row).length -
+  2 * Object.values(row).filter((value) => typeof value === "string").length;
+const IMAGE_ROW = rowOverhead({ name: "", type_start: 0, type_count: 0 });
+const TYPE_ROW = rowOverhead({
+  name: "",
+  namespace: "",
+  method_start: 0,
+  method_count: 0,
+  nested_type_start: 0,
+  nested_type_count: 0,
+  declaring_type: 0,
+});
+const METHOD_ROW = rowOverhead({ name: "", declaring_type: 0 });
+
+/**
+ * A lower bound on the serialized rows. Rows share decoded names, so the
+ * report can be far larger than the file; refusing from this bound avoids
+ * building a string the budget would reject anyway.
+ */
+const serializedRowsLowerBound = (decoded: Il2cppMetadataDecoded) => {
+  const lengths = new Map<string, number>();
+  const text = (value: string) => {
+    let length = lengths.get(value);
+    if (length === undefined) {
+      // UTF-16 code units never exceed UTF-8 bytes.
+      length = JSON.stringify(value).length;
+      lengths.set(value, length);
+    }
+    return length;
+  };
+  let total = 0;
+  for (const image of decoded.images) total += IMAGE_ROW + text(image.name);
+  for (const type of decoded.types)
+    total += TYPE_ROW + text(type.name) + text(type.namespace);
+  for (const method of decoded.methods) total += METHOD_ROW + text(method.name);
+  return total;
+};
 
 const failureForPrimary = (
   cause: unknown,
@@ -125,6 +166,14 @@ const failureFor = (
   return analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
 };
 
+const outputLimit = (path: string) =>
+  new AnalysisResourceConstraintError(
+    OPERATION,
+    "transport",
+    `Complete IL2CPP metadata for ${path} exceeds the inline output budget; no partial success is returned.`,
+    { maximum_output_bytes: OUTPUT_BYTES },
+  );
+
 /** Stable in-process decoding without subprocesses, temporary files, native binaries or decryption. */
 export class Il2cppMetadataProvider implements Il2cppMetadataPort {
   readonly identity = IL2CPP_METADATA_PROVIDER_IDENTITY;
@@ -151,6 +200,8 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
       );
       options?.signal?.throwIfAborted();
       const decoded = readIl2cppMetadata(snapshot.bytes);
+      if (serializedRowsLowerBound(decoded) > OUTPUT_BYTES)
+        throw outputLimit(input.path);
       const report = {
         ...decoded,
         artifact: {
@@ -165,12 +216,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
         ],
       };
       if (Buffer.byteLength(JSON.stringify(report), "utf8") > OUTPUT_BYTES)
-        throw new AnalysisResourceConstraintError(
-          OPERATION,
-          "transport",
-          `Complete IL2CPP metadata for ${input.path} exceeds the inline output budget; no partial success is returned.`,
-          { maximum_output_bytes: OUTPUT_BYTES },
-        );
+        throw outputLimit(input.path);
       const parsed = il2cppMetadataSchema.safeParse(report);
       if (!parsed.success)
         throw new AnalysisOutputError(
