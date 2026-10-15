@@ -52,6 +52,47 @@ export const il2cppMetadataViewContextSchema = z.strictObject({
   counts: countsSchema,
 });
 
+type Il2cppMetadataReport = z.infer<typeof il2cppMetadataSchema>;
+interface CheckedReport {
+  readonly report: Il2cppMetadataReport;
+  readonly counts: z.infer<typeof countsSchema>;
+}
+
+// A sealed parent result cannot change, so its validated report and counts
+// stay exact for every later page. The weak reference lets memory pressure
+// reclaim them; unsealed inline input is validated on each call.
+const checkedReports = new WeakMap<object, WeakRef<CheckedReport>>();
+
+/** Validate the parent and count its rows once per sealed result. */
+const parseMetadataReport = (
+  parent: AnalysisViewParent,
+): Result<CheckedReport, AnalysisError> => {
+  const { normalizedResult } = parent;
+  const sealed =
+    parent.sealedResult === true &&
+    typeof normalizedResult === "object" &&
+    normalizedResult !== null;
+  const cached = sealed
+    ? checkedReports.get(normalizedResult)?.deref()
+    : undefined;
+  if (cached !== undefined) return ok(cached);
+  const parsed = parseAnalysisViewResult(il2cppMetadataSchema, parent);
+  if (!parsed.ok) return parsed;
+  const report = parsed.value;
+  const checked = {
+    report,
+    counts: {
+      images: report.images.length,
+      types: report.types.length,
+      methods: report.methods.length,
+      nested_types: report.types.filter((type) => type.declaring_type !== -1)
+        .length,
+    },
+  };
+  if (sealed) checkedReports.set(normalizedResult, new WeakRef(checked));
+  return ok(checked);
+};
+
 /** Reuse retained metadata Evidence without reopening or decoding the file. */
 export const projectIl2cppMetadataView = (
   parent: AnalysisViewParent,
@@ -68,15 +109,10 @@ export const projectIl2cppMetadataView = (
         },
       ]),
     );
-  const parsed = parseAnalysisViewResult(il2cppMetadataSchema, parent);
+  const parsed = parseMetadataReport(parent);
   if (!parsed.ok) return parsed;
-  const { images, types, methods, ...identity } = parsed.value;
-  const counts = {
-    images: images.length,
-    types: types.length,
-    methods: methods.length,
-    nested_types: types.filter((type) => type.declaring_type !== -1).length,
-  };
+  const { report, counts } = parsed.value;
+  const { images, types, methods, ...identity } = report;
   const shared = {
     parent_evidence_id: parent.evidenceId,
     parent_operation: "inspect_il2cpp_metadata" as const,

@@ -618,7 +618,20 @@ const checkImageRanges = (images: Il2cppMetadataDecoded["images"]) => {
 };
 
 /** Decode image, type and method names without native binaries or decryption. */
-export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
+/** Row counts known from the header and record sizes, before rows are built. */
+export interface Il2cppMetadataRowCounts {
+  readonly images: number;
+  readonly types: number;
+  readonly methods: number;
+}
+
+export const readIl2cppMetadata = (
+  bytes: Buffer,
+  options: {
+    /** Called before any row is decoded; may throw to refuse the file. */
+    readonly beforeRows?: (counts: Il2cppMetadataRowCounts) => void;
+  } = {},
+): Il2cppMetadataDecoded => {
   const { version, headerBytes, sections } = readHeader(bytes);
   checkSections(bytes, headerBytes, sections);
   const byName = new Map(sections.map((entry) => [entry.name, entry]));
@@ -636,6 +649,11 @@ export const readIl2cppMetadata = (bytes: Buffer): Il2cppMetadataDecoded => {
     typeDefinitionTypeIndices: layout.typeDefinitionTypeIndices,
     readString: createStringReader(bytes, section("strings")),
   };
+  options.beforeRows?.({
+    images: tables.counts.images,
+    types: tables.counts.typeDefinitions,
+    methods: tables.counts.methods,
+  });
   const images = readImages(tables);
   checkImageRanges(images);
   const types = readTypes(tables);

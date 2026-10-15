@@ -15,7 +15,43 @@ export interface Il2cppMetadataFixtureOptions {
   readonly nestingCycle?: boolean;
   /** Metadata version; 29 and 31 use fixed 4-byte indices and no header counts. */
   readonly version?: 29 | 31 | 39;
+  /**
+   * Version 39 entry counts that widen the serialized indices: filler type
+   * definitions (the last owns one extra method), and generic container and
+   * parameter sections whose records are zero-filled and never decoded.
+   */
+  readonly wide?: {
+    readonly fillerTypes: number;
+    readonly genericContainers: number;
+    readonly parameters: number;
+  };
 }
+
+const widthFor = (entries: number): Width =>
+  entries <= 0xff ? 1 : entries <= 0xffff ? 2 : 4;
+
+/** Type and method rows a fixture holds, including any wide-index filler. */
+export const fixtureRows = (options: Il2cppMetadataFixtureOptions = {}) => {
+  const fillers = options.wide?.fillerTypes ?? 0;
+  const last = FIXTURE_TYPES.length + fillers - 1;
+  const types = [
+    ...FIXTURE_TYPES,
+    ...Array.from({ length: fillers }, (_, index) => ({
+      name: "Filler",
+      namespace: "",
+      method_start: index === fillers - 1 ? FIXTURE_METHODS.length : -1,
+      method_count: index === fillers - 1 ? 1 : 0,
+      nested_type_start: -1,
+      nested_type_count: 0,
+      declaring_type: -1,
+    })),
+  ];
+  const methods = [
+    ...FIXTURE_METHODS,
+    ...(fillers === 0 ? [] : [{ name: "Fill", declaring_type: last }]),
+  ];
+  return { types, methods };
+};
 
 export const FIXTURE_IMAGES = [
   { name: "Assembly-CSharp.dll", type_start: 0, type_count: 3 },
@@ -156,16 +192,18 @@ export const createIl2cppMetadataFixture = (
   const version = options.version ?? 39;
   const fixed = version !== 39;
   const T: Width = fixed ? 4 : (options.typeIndexWidth ?? 1);
-  // Fewer than 256 type definitions, generic containers and parameters.
-  const D: Width = fixed ? 4 : 1;
-  const G: Width = fixed ? 4 : 1;
-  const P: Width = fixed ? 4 : 1;
+  const rows = fixtureRows(options);
+  const genericContainers = options.wide?.genericContainers ?? 0;
+  const parameterCount = options.wide?.parameters ?? 0;
+  const D: Width = fixed ? 4 : widthFor(rows.types.length);
+  const G: Width = fixed ? 4 : widthFor(genericContainers);
+  const P: Width = fixed ? 4 : widthFor(parameterCount);
   // Versions 29 and 31 also store elementTypeIndex in type records.
   const typeIndexFields = fixed ? 4 : 3;
   // Version 31 added returnParameterToken to method records.
   const returnToken = version === 29 ? 0 : 4;
   const nestedTypeEntries = options.nestingCycle === true ? [1, 0] : [1];
-  const typeRows = FIXTURE_TYPES.map((type, index) =>
+  const typeRows = rows.types.map((type, index) =>
     options.nestingCycle === true && index === 1
       ? { ...type, nested_type_start: 1, nested_type_count: 1 }
       : type,
@@ -193,12 +231,10 @@ export const createIl2cppMetadataFixture = (
     intern(type.name);
     intern(type.namespace);
   }
-  for (const method of FIXTURE_METHODS) intern(method.name);
+  for (const row of [...rows.types, ...rows.methods]) intern(row.name);
   const strings = Buffer.concat(stringParts);
 
-  const types = Buffer.alloc(
-    FIXTURE_TYPES.length * recordBytes.typeDefinitions,
-  );
+  const types = Buffer.alloc(typeRows.length * recordBytes.typeDefinitions);
   typeRows.forEach((type, index) => {
     let at = index * recordBytes.typeDefinitions;
     types.writeInt32LE(intern(type.name), at);
@@ -235,8 +271,8 @@ export const createIl2cppMetadataFixture = (
     images.writeInt32LE(-1, at + 16 + 2 * D);
   });
 
-  const methods = Buffer.alloc(FIXTURE_METHODS.length * recordBytes.methods);
-  FIXTURE_METHODS.forEach((method, index) => {
+  const methods = Buffer.alloc(rows.methods.length * recordBytes.methods);
+  rows.methods.forEach((method, index) => {
     const at = index * recordBytes.methods;
     methods.writeInt32LE(intern(method.name), at);
     writeIndex(methods, at + 4, D, method.declaring_type);
@@ -260,9 +296,31 @@ export const createIl2cppMetadataFixture = (
 
   const contents = new Map<SectionName, SectionContent>([
     ["strings", { bytes: strings, count: stringIndex.size }],
-    ["methods", { bytes: methods, count: FIXTURE_METHODS.length }],
+    ["methods", { bytes: methods, count: rows.methods.length }],
+    ...(genericContainers === 0
+      ? []
+      : [
+          [
+            "genericContainers",
+            {
+              bytes: Buffer.alloc(genericContainers * 16),
+              count: genericContainers,
+            },
+          ] as [SectionName, SectionContent],
+        ]),
+    ...(parameterCount === 0
+      ? []
+      : [
+          [
+            "parameters",
+            {
+              bytes: Buffer.alloc(parameterCount * (8 + T)),
+              count: parameterCount,
+            },
+          ] as [SectionName, SectionContent],
+        ]),
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
-    ["typeDefinitions", { bytes: types, count: FIXTURE_TYPES.length }],
+    ["typeDefinitions", { bytes: types, count: typeRows.length }],
     ["images", { bytes: images, count: FIXTURE_IMAGES.length }],
     ...(interfaceOffsets === null
       ? []
