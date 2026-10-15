@@ -8,8 +8,10 @@ running it and requires no Unity installation, IL2CPP binary, active target,
 Hopper, Ghidra or IDA.
 
 Metadata versions 29, 31 and 39 are supported. For example, Unity 2022.3.30f1
-wrote version 29, 2022.3.62f3 wrote 31 and 6000.4.2f1 wrote 39. Other versions
-are rejected as unsupported.
+wrote version 29, 2022.3.62f3 wrote 31 and 6000.4.2f1 wrote 39; other Unity
+releases that write these numbers have not been checked. Other versions are
+rejected as unsupported. The path must name a regular file; directories and
+symbolic links are rejected.
 
 ## MCP
 
@@ -47,8 +49,9 @@ the original rows without reopening or decoding the file:
 ```
 
 Collections are `images`, `types` and `methods`. `limit` defaults to 64. The page
-offset is the metadata index of the first returned row. Select `detail: "complete"`
-to return every row inline when the result fits the MCP response budget.
+offset is the metadata index of the first returned row. `limit` has no cap of
+its own beyond the MCP response budget. Select `detail: "complete"` to return
+every row inline when the result fits that budget, as a small game's often does.
 
 ## CLI
 
@@ -105,14 +108,24 @@ message names one reason:
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `truncated-header`        | The file is shorter than the header.                                                                             |
 | `unexpected-header-size`  | `stringLiterals.offset` is not the header size: 256 bytes for versions 29 and 31, 380 for 39.                    |
-| `section-out-of-bounds`   | A section extends beyond the file.                                                                               |
+| `section-out-of-bounds`   | A section extends beyond the file, or a non-empty section starts inside the header.                              |
 | `section-overlap`         | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |
 | `record-size-mismatch`    | A section size does not divide into its records, or the record size differs from the one the index widths imply. |
 | `type-index-width`        | The record used to derive the type index width implies no 1, 2 or 4 byte width.                                  |
 | `index-out-of-range`      | A serialized index or range points outside its target collection.                                                |
 | `nested-type-conflict`    | A type is listed as nested in two types, in itself, or in a cycle of declaring types.                            |
-| `declaring-type-mismatch` | A method inside a type's method range names a different declaring type.                                          |
+| `declaring-type-mismatch` | A method inside a type's method range names a different type, or a method lies outside its type's range.         |
+| `image-range-overlap`     | Two images claim the same type definitions.                                                                      |
 | `invalid-string`          | A name index does not start a string, or the name is unterminated or not valid UTF-8.                            |
+
+A version field that disagrees with the file's layout, for example a version
+39 file relabeled as 29, usually surfaces as `unexpected-header-size` or
+`record-size-mismatch`.
+
+Two checks are stricter than the IL2CPP runtime: a name index must start a
+string, and an empty range's start must lie between -1 and the collection size.
+Every Unity-written file checked so far satisfies both; metadata rewritten by
+other tools may be rejected.
 
 There is no partial success. A file that changes during reading and a cancelled
 request keep their own distinct errors. Resource guards bound the selected file

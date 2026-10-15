@@ -267,7 +267,11 @@ describe("rejected IL2CPP metadata references", () => {
   });
 
   it("rejects a shifted string section and names that start inside another string", () => {
-    for (const delta of [-1, 1])
+    // Pulled back, the fixture's strings would start inside the header.
+    for (const [delta, reason] of [
+      [-1, "section-out-of-bounds"],
+      [1, "invalid-string"],
+    ] as const)
       rejects(
         mutated((fixture, bytes) => {
           const strings = fixture.section("strings");
@@ -281,7 +285,7 @@ describe("rejected IL2CPP metadata references", () => {
             fixture.header("strings", "size"),
           );
         }),
-        "invalid-string",
+        reason,
       );
     rejects(
       mutated((fixture, bytes) =>
@@ -326,12 +330,15 @@ describe("IL2CPP index widths", () => {
       [0, 255, 256, 65535, 65536].map((entries) => il2cppIndexWidth(entries)),
     ).toEqual([1, 1, 2, 2, 4]);
     expect(
-      il2cppMetadataRecordBytes({
-        type_definition: 2,
-        generic_container: 2,
-        parameter: 4,
-        type: 2,
-      }),
+      il2cppMetadataRecordBytes(
+        {
+          type_definition: 2,
+          generic_container: 2,
+          parameter: 4,
+          type: 2,
+        },
+        39,
+      ),
     ).toEqual({ typeDefinitions: 76, images: 36, methods: 30 });
     const fixed = {
       type_definition: 4,
@@ -443,5 +450,47 @@ describe("IL2CPP global-metadata versions 29 and 31", () => {
       ),
       "declaring-type-mismatch",
     );
+  });
+});
+
+describe("IL2CPP metadata coverage checks", () => {
+  it("rejects occupied sections that overlap the header", () => {
+    rejects(
+      mutated(
+        (fixture, bytes) =>
+          bytes.writeInt32LE(27, fixture.header("strings", "offset")),
+        createIl2cppMetadataFixture({ version: 29 }),
+      ),
+      "section-out-of-bounds",
+    );
+  });
+
+  it("rejects a method outside its declaring type's range", () => {
+    // Type 3 owns methods [3, 5); shrinking it strands method 4.
+    rejects(
+      mutated((fixture, bytes) => {
+        const starts = fixture.record("typeDefinitions", 3) + 8 + 3 + 1 + 4;
+        bytes.writeUInt16LE(1, starts + 32);
+      }),
+      "declaring-type-mismatch",
+    );
+  });
+
+  it("rejects images whose type ranges overlap", () => {
+    rejects(
+      mutated((fixture, bytes) =>
+        bytes.writeUInt8(2, fixture.record("images", 1) + 8),
+      ),
+      "image-range-overlap",
+    );
+  });
+
+  it("preserves a leading byte order mark in names", () => {
+    const fixture = createIl2cppMetadataFixture();
+    const bytes = Buffer.from(fixture.bytes);
+    // Replace the three bytes of "Add" with a lone UTF-8 byte order mark.
+    const at = fixture.stringOffset("Add");
+    bytes.set([0xef, 0xbb, 0xbf], at);
+    expect(readIl2cppMetadata(bytes).methods[2]?.name).toBe("\ufeff");
   });
 });
