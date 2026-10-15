@@ -170,8 +170,8 @@ explicit path or endpoint and do not need it.
   remain explicit. See the
   [Go binary guide](https://github.com/morluto/rea/blob/main/docs/go-binaries.md).
 - Unity IL2CPP image, type or method names from `global-metadata.dat`:
-  `inspect_il2cpp_metadata` with the explicit local file and
-  `detail: "summary"` first, then page rows through `inspect_analysis_view`
+  `inspect_il2cpp_metadata` with the explicit local file; its default
+  summary returns counts, then page rows through `inspect_analysis_view`
   with the returned `parent_evidence_id`. Version 39 only; no Unity, IL2CPP
   binary or disassembler is run. Unrecognized magic (possibly encrypted) and
   other versions are unsupported. Names do not establish native code addresses

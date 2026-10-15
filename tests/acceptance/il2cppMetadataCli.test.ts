@@ -46,16 +46,17 @@ cliTest(
     expect(evidence.parameters).toEqual({ path });
 
     const { client, call } = await connectLocalToolsMcp();
-    const complete = await call("inspect_il2cpp_metadata", { path });
+    const complete = await call("inspect_il2cpp_metadata", {
+      path,
+      detail: "complete",
+    });
     expect(complete.isError, JSON.stringify(complete)).not.toBe(true);
     expect(parseEvidence(complete.structuredContent).normalized_result).toEqual(
       report,
     );
 
-    const summarized = await call("inspect_il2cpp_metadata", {
-      path,
-      detail: "summary",
-    });
+    // Summary is the default MCP delivery.
+    const summarized = await call("inspect_il2cpp_metadata", { path });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
     const view = il2cppMetadataSummaryViewResultSchema.parse(
       parseEvidence(summarized.structuredContent).normalized_result,

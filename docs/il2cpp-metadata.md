@@ -11,15 +11,14 @@ Metadata version 39 is supported. Other versions are rejected as unsupported.
 
 ## MCP
 
-A large game produces megabytes of rows. Select `detail: "summary"` on the first
-call; MCP requires an absolute filesystem path:
+A large game produces megabytes of rows, so MCP delivers a summary by default
+(`detail: "summary"`). MCP requires an absolute filesystem path:
 
 ```json
 {
   "name": "inspect_il2cpp_metadata",
   "arguments": {
-    "path": "/artifacts/Data/Managed/Metadata/global-metadata.dat",
-    "detail": "summary"
+    "path": "/artifacts/Data/Managed/Metadata/global-metadata.dat"
   }
 }
 ```
@@ -46,8 +45,8 @@ the original rows without reopening or decoding the file:
 ```
 
 Collections are `images`, `types` and `methods`. `limit` defaults to 64. The page
-offset is the metadata index of the first returned row. Omitted or `complete`
-detail returns every row inline.
+offset is the metadata index of the first returned row. Select `detail: "complete"`
+to return every row inline when the result fits the MCP response budget.
 
 ## CLI
 

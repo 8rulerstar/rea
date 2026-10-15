@@ -55,9 +55,9 @@ export const inspectIl2cppMetadataInputSchema = z.strictObject({
   ),
   detail: z
     .enum(["complete", "summary"])
-    .default("complete")
+    .default("summary")
     .describe(
-      "complete returns every image, type and method row inline; summary retains them and returns counts with a linked inspect_analysis_view summary",
+      "summary (default) retains every row and returns counts with a linked inspect_analysis_view summary; complete returns every image, type and method row inline",
     ),
 });
 

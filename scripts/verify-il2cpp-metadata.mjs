@@ -63,7 +63,7 @@ try {
     assert.equal(report.artifact.path, path);
     assert.equal(report.artifact.sha256, identity.sha256);
     const complete = await client.callTool(
-      { name: operation, arguments: { path } },
+      { name: operation, arguments: { path, detail: "complete" } },
       { timeout: 120_000 },
     );
     if (complete.isError === true) {
@@ -104,7 +104,7 @@ try {
     console.log("[ok] image type ranges and type method ranges agree");
 
     const summary = contract.outputSchema.parse(
-      await call(operation, { path, detail: "summary" }),
+      await call(operation, { path }),
     ).normalized_result;
     assert.deepEqual(summary.summary.counts, {
       images: report.images.length,
