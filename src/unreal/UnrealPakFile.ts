@@ -55,6 +55,8 @@ export interface UnrealPakLimits {
   readonly regionBytes: number;
   /** Largest number of entries decoded. */
   readonly entries: number;
+  /** Called with each declared entry count before its entries are built; may throw. */
+  readonly beforeEntries?: (count: number) => void;
 }
 
 export type UnrealPakDecoded = Omit<UnrealPak, "artifact" | "limitations">;
@@ -386,6 +388,7 @@ const checkEntryCount = (
       "too-many-entries",
       `${label} declares ${count} entries, above the ${limits.entries}-entry limit`,
     );
+  limits.beforeEntries?.(count);
 };
 
 const finished = (cursor: Cursor) => {

@@ -124,3 +124,7 @@ export type UnrealPak = z.infer<typeof unrealPakSchema>;
 export type UnrealPakEntry = z.infer<typeof entrySchema>;
 export type UnrealPakFooter = z.infer<typeof unrealPakFooterSchema>;
 export type UnrealPakIndex = z.infer<typeof unrealPakIndexSchema>;
+export type UnrealPakProviderInput = Omit<
+  z.infer<typeof inspectUnrealPakInputSchema>,
+  "detail"
+>;
