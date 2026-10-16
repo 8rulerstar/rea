@@ -319,6 +319,20 @@ describe("inconsistent Unreal pak indexes", () => {
     });
   });
 
+  it.each(["v8b", "v11"] as const)(
+    "rejects a NUL inside a %s FString path",
+    async (layout) => {
+      const bytes = createPakFixture({
+        layout,
+        files: [{ path: "A/a\0b", size: 1 }],
+      }).bytes;
+      expect(await failure(bytes)).toEqual({
+        reason: "invalid-string",
+        kind: "corrupt",
+      });
+    },
+  );
+
   it("rejects an entry naming an empty compression slot", async () => {
     const { bytes } = createPakFixture({ layout: "v11" });
     // The five 32-byte compression names end the footer; clear slot 1 (Zlib).

@@ -211,7 +211,15 @@ class Cursor {
         `${this.label} ${what} at byte ${at} is not NUL-terminated`,
       );
     const body = raw.subarray(0, (units - 1) * width);
-    return width === 1 ? body.toString("latin1") : body.toString("utf16le");
+    const text =
+      width === 1 ? body.toString("latin1") : body.toString("utf16le");
+    // Only the terminator may be NUL; an inner one would truncate the path in UE.
+    if (text.includes("\0"))
+      throw new UnrealPakFormatFailure(
+        "invalid-string",
+        `${this.label} ${what} at byte ${at} contains a NUL before its terminator`,
+      );
+    return text;
   };
 }
 
