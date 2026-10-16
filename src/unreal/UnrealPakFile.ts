@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   UNREAL_PAK_FOOTER_LAYOUTS,
   type UnrealPak,
@@ -20,8 +21,10 @@ export const UNREAL_PAK_FAILURE_REASONS = {
     "duplicate-path",
     "entry-count-mismatch",
     "unknown-compression-slot",
+    "region-hash-mismatch",
+    "entry-out-of-bounds",
   ],
-  resource: ["region-too-large", "too-many-entries"],
+  resource: ["region-too-large", "too-many-entries", "paths-too-large"],
 } as const;
 export type UnrealPakFailureKind = keyof typeof UNREAL_PAK_FAILURE_REASONS;
 export type UnrealPakFailureReason =
@@ -57,6 +60,8 @@ export interface UnrealPakLimits {
   readonly regionBytes: number;
   /** Largest number of entries decoded. */
   readonly entries: number;
+  /** Largest total of path characters built from directory and file names. */
+  readonly pathBytes: number;
   /** Called with each declared entry count before its entries are built; may throw. */
   readonly beforeEntries?: (count: number) => void;
 }
@@ -278,7 +283,7 @@ const readFooter = async (
 /** Read one region the footer or index points at, inside the file and the limit. */
 const readRegion = async (
   source: UnrealPakSource,
-  region: { offset: number; size: number },
+  region: { offset: number; size: number; sha1: string },
   limits: UnrealPakLimits,
   label: string,
   end: number,
@@ -293,7 +298,38 @@ const readRegion = async (
       "region-out-of-bounds",
       `${label} at ${region.offset} (+${region.size}) ends past byte ${end}`,
     );
-  return source.read(region.offset, region.size);
+  const bytes = await source.read(region.offset, region.size);
+  if (createHash("sha1").update(bytes).digest("hex") !== region.sha1)
+    throw new UnrealPakFormatFailure(
+      "region-hash-mismatch",
+      `${label} bytes do not match the SHA-1 recorded for them`,
+    );
+  return bytes;
+};
+
+/** Count path characters against the limit before a path is built. */
+const spendPath = (
+  budget: { used: number },
+  limits: UnrealPakLimits,
+  length: number,
+  label: string,
+) => {
+  budget.used += length;
+  if (budget.used > limits.pathBytes)
+    throw new UnrealPakFormatFailure(
+      "paths-too-large",
+      `${label} builds more than ${limits.pathBytes} path characters`,
+    );
+};
+
+/** Reject entries whose stored bytes would extend past the data area. */
+const checkPlacement = (entries: readonly UnrealPakEntry[], end: number) => {
+  for (const entry of entries)
+    if (entry.offset + entry.size > end)
+      throw new UnrealPakFormatFailure(
+        "entry-out-of-bounds",
+        `${entry.path ?? entry.path_hash} at ${entry.offset} (+${entry.size}) ends past the data area at byte ${end}`,
+      );
 };
 
 const compressionName = (
@@ -420,6 +456,7 @@ const readDirectoryListing = (
   cursor: Cursor,
   footer: UnrealPakFooter,
   limits: UnrealPakLimits,
+  budget: { used: number },
 ) => {
   const directories = cursor.u32();
   checkEntryCount(directories, limits, cursor.label);
@@ -434,6 +471,7 @@ const readDirectoryListing = (
         footer.version >= 12
           ? cursor.utf8Name("file name")
           : cursor.string("file name");
+      spendPath(budget, limits, directory.length + name.length, cursor.label);
       const path = joinPath(directory, name);
       if (seen.has(path))
         throw new UnrealPakFormatFailure(
@@ -480,8 +518,10 @@ export const readUnrealPak = async (
   if (footer.version < 10) {
     const entries: UnrealPakEntry[] = [];
     const seen = new Set<string>();
+    const budget = { used: 0 };
     for (let at = 0; at < entryCount; at++) {
       const path = index.string("entry path");
+      spendPath(budget, limits, path.length, "index");
       if (seen.has(path))
         throw new UnrealPakFormatFailure(
           "duplicate-path",
@@ -491,6 +531,7 @@ export const readUnrealPak = async (
       entries.push(readFullEntry(index, footer, path, null));
     }
     finished(index);
+    checkPlacement(entries, footer.index.offset);
     return {
       footer,
       index: {
@@ -567,6 +608,7 @@ export const readUnrealPak = async (
   };
 
   const entries: UnrealPakEntry[] = [];
+  const budget = { used: 0 };
   let directoryIndex = null;
   let pathHashIndex = null;
   if (pathHashRegion !== null) {
@@ -595,7 +637,7 @@ export const readUnrealPak = async (
       hashed.push([hash, phi.i32()]);
     }
     // The pruned directory index follows the hashes inside the same region.
-    const pruned = readDirectoryListing(phi, footer, limits);
+    const pruned = readDirectoryListing(phi, footer, limits, budget);
     finished(phi);
     for (const [path, reference] of pruned.listed)
       resolve(reference, path, null);
@@ -626,7 +668,12 @@ export const readUnrealPak = async (
       ),
       "full directory index",
     );
-    const { directories, listed } = readDirectoryListing(fdi, footer, limits);
+    const { directories, listed } = readDirectoryListing(
+      fdi,
+      footer,
+      limits,
+      budget,
+    );
     for (const [path, reference] of listed)
       entries.push(resolve(reference, path, null));
     const files = listed.length;
@@ -652,6 +699,7 @@ export const readUnrealPak = async (
         "entry-count-mismatch",
         `the index declares ${entryCount} entries but the ${label} holds ${listedCount}`,
       );
+  checkPlacement(entries, footer.index.offset);
   return {
     footer,
     index: {

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Byte-level Unreal pak builder for parser tests. It writes a data area of
  * zeros, an index and a footer in the layout of the selected version; file
@@ -41,6 +43,8 @@ export interface PakFixtureOptions {
   readonly declaredEntries?: number;
   /** Version 10+: replace the first file's entry reference. */
   readonly firstReference?: number;
+  /** Move the last file's recorded offset by this many bytes. */
+  readonly lastOffsetShift?: number;
 }
 
 export const PAK_FIXTURE_FILES: readonly PakFixtureFile[] = [
@@ -88,6 +92,7 @@ const utf8Name = (value: string) => {
 };
 
 const sha1 = (seed: number) => Buffer.alloc(20, seed & 0xff);
+const digest = (bytes: Buffer) => createHash("sha1").update(bytes).digest();
 
 interface Placed extends PakFixtureFile {
   readonly offset: number;
@@ -144,7 +149,7 @@ const footer = (
   options: PakFixtureOptions,
   version: number,
   indexOffset: number,
-  indexSize: number,
+  index: Buffer,
 ) => {
   const parts: Buffer[] = [];
   if (version >= 7) parts.push(Buffer.alloc(16));
@@ -154,8 +159,8 @@ const footer = (
     u32(MAGIC),
     u32(version),
     u64(indexOffset),
-    u64(indexSize),
-    sha1(0x1d),
+    u64(index.length),
+    digest(index),
   );
   if (version === 9)
     parts.push(Buffer.of(options.frozenIndex === true ? 1 : 0));
@@ -187,6 +192,13 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     cursor += file.size;
     return entry;
   });
+  const shift = options.lastOffsetShift ?? 0;
+  const lastAt = placed.length - 1;
+  if (shift !== 0 && lastAt >= 0)
+    placed[lastAt] = {
+      ...placed[lastAt]!,
+      offset: placed[lastAt]!.offset + shift,
+    };
   const data = Buffer.alloc(cursor);
   const mount = fstring(options.mountPoint ?? "../../../");
   const regions: Buffer[] = [];
@@ -260,9 +272,11 @@ export const createPakFixture = (options: PakFixtureOptions) => {
         u32(options.declaredEntries ?? placed.length),
         u64(0x1234),
         u32(withPhi ? 1 : 0),
-        ...(withPhi ? [u64(phiOffset), u64(phi.length), sha1(0x50)] : []),
+        ...(withPhi ? [u64(phiOffset), u64(phi.length), digest(phi)] : []),
         u32(withFdi ? 1 : 0),
-        ...(withFdi ? [u64(fdiOffset), u64(fdiBytes.length), sha1(0x51)] : []),
+        ...(withFdi
+          ? [u64(fdiOffset), u64(fdiBytes.length), digest(fdiBytes)]
+          : []),
         u32(encoded.length),
         encoded,
         u32(fullParts.length),
@@ -279,7 +293,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     data,
     index,
     ...regions,
-    footer(options, version, data.length, index.length),
+    footer(options, version, data.length, index),
   ]);
   return {
     bytes,

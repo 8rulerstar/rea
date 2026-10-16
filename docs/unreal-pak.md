@@ -78,12 +78,19 @@ The CLI always returns the complete report.
   counts are reported and its references are checked. The header entry count,
   the path hash count, the directory index file count and the decoded entries
   must all agree.
-- **Version 12.** The footer is the version 11 layout. In the directory
+- **Integrity.** The index, path hash index and full directory index bytes must
+  match the SHA-1 recorded for them, and every entry's offset plus stored size
+  must end before the index. The per-entry SHA-1 of file data is reported, not
+  checked, because file data is not read.
+- **Version 12.** Reported as layout `v12`; its bytes are arranged like the
+  version 11 footer. In the directory
   listings, directory names keep the FString form and file names are UTF-8
   byte counts without a terminator; a NUL inside a name is rejected. This was
   observed on a pak written by Unreal Engine 5.8.3.
-- **Compression names.** From the footer table in version 8+, where a method
-  naming an empty or missing slot is rejected. Before version 8, from the legacy
+- **Compression names.** `compression_method` 0 means stored, with
+  `compression_name: null`. In version 8+ any other value counts from 1 into the
+  footer table (`compression_methods[method - 1]`), and a method naming an empty
+  or missing slot is rejected. Before version 8, from the legacy
   flag values (1 `Zlib`, 2 `Gzip`, 4 `Custom`); other legacy values keep their
   raw `compression_method` with `compression_name: null`. Names identify
   methods; no data is decompressed, so they are not codec verification.
@@ -105,8 +112,11 @@ The CLI always returns the complete report.
 | `duplicate-path`               | corrupt     | A listing names one path, or the path hash index one hash, twice.                      |
 | `entry-count-mismatch`         | corrupt     | The header entry count disagrees with a listing or the decoded entries.                |
 | `unknown-compression-slot`     | corrupt     | A version 8+ entry names an empty or missing compression slot.                         |
+| `region-hash-mismatch`         | corrupt     | An index region does not match its recorded SHA-1.                                     |
+| `entry-out-of-bounds`          | corrupt     | An entry's stored bytes would end past the data area.                                  |
 | `region-too-large`             | resource    | An index region exceeds 256 MiB.                                                       |
 | `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                         |
+| `paths-too-large`              | resource    | Directory and file names would build more path text than the 64 MiB report allows.     |
 
 The complete report is limited to 64 MiB. It is refused from the declared entry
 count before entries are built when even minimal rows would exceed it. There is

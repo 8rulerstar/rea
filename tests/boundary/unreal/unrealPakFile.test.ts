@@ -10,7 +10,11 @@ import {
   type PakFixtureLayout,
 } from "../../fixtures/unreal/pak.js";
 
-const LIMITS: UnrealPakLimits = { regionBytes: 1 << 20, entries: 1000 };
+const LIMITS: UnrealPakLimits = {
+  regionBytes: 1 << 20,
+  entries: 1000,
+  pathBytes: 1 << 20,
+};
 
 const sourceOf = (bytes: Buffer) => ({
   size: bytes.length,
@@ -191,14 +195,12 @@ describe("rejected Unreal pak files", () => {
 
   it("refuses an index region above the limit before reading it", async () => {
     expect(
-      await failure(valid().bytes, { regionBytes: 16, entries: 1000 }),
+      await failure(valid().bytes, { ...LIMITS, regionBytes: 16 }),
     ).toEqual({ reason: "region-too-large", kind: "resource" });
   });
 
   it("refuses more entries than the limit before building them", async () => {
-    expect(
-      await failure(valid().bytes, { regionBytes: 1 << 20, entries: 2 }),
-    ).toEqual({
+    expect(await failure(valid().bytes, { ...LIMITS, entries: 2 })).toEqual({
       reason: "too-many-entries",
       kind: "resource",
     });
@@ -282,6 +284,50 @@ describe("inconsistent Unreal pak indexes", () => {
       kind: "corrupt",
     });
   });
+
+  it.each(["index", "path hash index", "full directory index"] as const)(
+    "rejects %s bytes that do not match their recorded SHA-1",
+    async (region) => {
+      const { bytes, indexOffset } = createPakFixture({ layout: "v11" });
+      const pak = await read(Buffer.from(bytes));
+      if (pak.index.state !== "decoded") throw new Error("expected an index");
+      const at =
+        region === "index"
+          ? indexOffset
+          : region === "path hash index"
+            ? pak.index.path_hash_index!.region.offset
+            : pak.index.full_directory_index!.region.offset;
+      // Flip the last byte of the region's first u32 count or mount length.
+      bytes[at + 3]! ^= 0x80;
+      expect(await failure(bytes)).toEqual({
+        reason: "region-hash-mismatch",
+        kind: "corrupt",
+      });
+    },
+  );
+
+  it.each(["v8b", "v11"] as const)(
+    "rejects a %s entry that ends past the data area",
+    async (layout) => {
+      expect(
+        await failure(
+          createPakFixture({ layout, lastOffsetShift: 1 << 20 }).bytes,
+        ),
+      ).toEqual({ reason: "entry-out-of-bounds", kind: "corrupt" });
+    },
+  );
+
+  it.each(["v8b", "v11"] as const)(
+    "refuses %s paths whose total length exceeds the limit before building them",
+    async (layout) => {
+      expect(
+        await failure(createPakFixture({ layout }).bytes, {
+          ...LIMITS,
+          pathBytes: 40,
+        }),
+      ).toEqual({ reason: "paths-too-large", kind: "resource" });
+    },
+  );
 
   it("reads the pruned directory index stored after the path hashes", async () => {
     const pak = await read(createPakFixture({ layout: "v11" }).bytes);
