@@ -184,7 +184,7 @@ export class UnrealPakProvider implements UnrealPakPort {
             readUnrealPak(source, {
               regionBytes: REGION_BYTES,
               entries: ENTRIES,
-              pathBytes: limit,
+              pathChars: limit,
               beforeEntries: (count) => {
                 if (count * ENTRY_ROW > limit)
                   throw outputLimit(input.path, limit);

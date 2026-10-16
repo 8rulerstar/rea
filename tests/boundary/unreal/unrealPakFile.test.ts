@@ -13,7 +13,7 @@ import {
 const LIMITS: UnrealPakLimits = {
   regionBytes: 1 << 20,
   entries: 1000,
-  pathBytes: 1 << 20,
+  pathChars: 1 << 20,
 };
 
 const sourceOf = (bytes: Buffer) => ({
@@ -323,7 +323,7 @@ describe("inconsistent Unreal pak indexes", () => {
       expect(
         await failure(createPakFixture({ layout }).bytes, {
           ...LIMITS,
-          pathBytes: 40,
+          pathChars: 40,
         }),
       ).toEqual({ reason: "paths-too-large", kind: "resource" });
     },

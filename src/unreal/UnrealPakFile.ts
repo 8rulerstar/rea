@@ -60,8 +60,8 @@ export interface UnrealPakLimits {
   readonly regionBytes: number;
   /** Largest number of entries decoded. */
   readonly entries: number;
-  /** Largest total of path characters built from directory and file names. */
-  readonly pathBytes: number;
+  /** Largest total of path characters (UTF-16 units) built from directory and file names. */
+  readonly pathChars: number;
   /** Called with each declared entry count before its entries are built; may throw. */
   readonly beforeEntries?: (count: number) => void;
 }
@@ -315,10 +315,10 @@ const spendPath = (
   label: string,
 ) => {
   budget.used += length;
-  if (budget.used > limits.pathBytes)
+  if (budget.used > limits.pathChars)
     throw new UnrealPakFormatFailure(
       "paths-too-large",
-      `${label} builds more than ${limits.pathBytes} path characters`,
+      `${label} builds more than ${limits.pathChars} path characters`,
     );
 };
 

@@ -81,7 +81,8 @@ The CLI always returns the complete report.
 - **Integrity.** The index, path hash index and full directory index bytes must
   match the SHA-1 recorded for them, and every entry's offset plus stored size
   must end before the index. The per-entry SHA-1 of file data is reported, not
-  checked, because file data is not read.
+  checked, because file data is not read. Footer fields (compression names, the
+  key GUID and the flags) have no recorded hash and are reported as stored.
 - **Version 12.** Reported as layout `v12`; its bytes are arranged like the
   version 11 footer. In the directory
   listings, directory names keep the FString form and file names are UTF-8
