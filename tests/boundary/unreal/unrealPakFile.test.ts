@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   readUnrealPak,
@@ -389,6 +390,36 @@ describe("inconsistent Unreal pak indexes", () => {
 });
 
 describe("Unreal pak record and resource guards", () => {
+  /** Change index bytes, then rewrite the footer's index SHA-1 so the edit reaches the decoder. */
+  const editIndex = (layout: PakFixtureLayout, at: number, edit: Buffer) => {
+    const { bytes, indexOffset, indexSize } = createPakFixture({ layout });
+    edit.copy(bytes, indexOffset + at);
+    const magic = bytes.lastIndexOf(Buffer.from([0xe1, 0x12, 0x6f, 0x5a]));
+    createHash("sha1")
+      .update(bytes.subarray(indexOffset, indexOffset + indexSize))
+      .digest()
+      .copy(bytes, magic + 24);
+    return bytes;
+  };
+
+  it("rejects a string that runs past its region", async () => {
+    // The mount point's FString length is the first index field.
+    const length = Buffer.alloc(4);
+    length.writeInt32LE(0x7fff);
+    expect(await failure(editIndex("v8b", 0, length))).toEqual({
+      reason: "truncated-record",
+      kind: "corrupt",
+    });
+  });
+
+  it("rejects a version 10+ index flag that is neither 0 nor 1", async () => {
+    // Mount point (4 + 10 bytes), entry count (4) and path hash seed (8) precede the flag.
+    expect(await failure(editIndex("v11", 26, Buffer.of(2, 0, 0, 0)))).toEqual({
+      reason: "invalid-flag",
+      kind: "corrupt",
+    });
+  });
+
   it("rejects a version 10+ reference into the middle of an encoded entry", async () => {
     expect(
       await failure(
