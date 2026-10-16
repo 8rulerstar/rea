@@ -25,6 +25,7 @@ export const IL2CPP_TOOL_CONTRACTS = [
         title: "Summarize metadata and retain rows for paging",
         input: {
           path: "/artifacts/Data/Managed/Metadata/global-metadata.dat",
+          detail: "summary",
         },
       },
     ],
