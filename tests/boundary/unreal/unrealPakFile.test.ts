@@ -372,7 +372,9 @@ describe("inconsistent Unreal pak indexes", () => {
       ).toEqual({ reason: "paths-too-large", kind: "resource" });
     },
   );
+});
 
+describe("Unreal pak record and resource guards", () => {
   it("rejects a version 10+ reference into the middle of an encoded entry", async () => {
     expect(
       await failure(
@@ -405,6 +407,28 @@ describe("inconsistent Unreal pak indexes", () => {
     expect(pak.index).toMatchObject({
       full_directory_index: { directories: 13 },
     });
+  });
+
+  it("refuses more encoded records than the entry limit even when unreferenced", async () => {
+    const files = Array.from({ length: 5 }, (_, at) => ({
+      path: `D/${at}`,
+      size: 0,
+    }));
+    expect(
+      await failure(
+        createPakFixture({
+          layout: "v11",
+          files,
+          declaredEntries: 1,
+          pathHashIndex: false,
+          directoryIndex: false,
+        }).bytes,
+        {
+          ...LIMITS,
+          entries: 4,
+        },
+      ),
+    ).toEqual({ reason: "too-many-entries", kind: "resource" });
   });
 
   it("lists a large path-hash-only index", async () => {

@@ -602,6 +602,7 @@ export const readUnrealPak = async (
   const recordStarts = new Set<number>();
   const walk = new Cursor(encoded, "encoded entries");
   while (walk.position < encoded.length) {
+    checkCountLimit(recordStarts.size + 1, limits, "encoded entries");
     recordStarts.add(walk.position);
     readEncodedEntry(walk, footer, null, null);
   }

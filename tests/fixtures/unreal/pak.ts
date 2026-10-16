@@ -235,16 +235,16 @@ export const createPakFixture = (options: PakFixtureOptions) => {
   } else {
     const encodedParts: Buffer[] = [];
     const fullParts: Buffer[] = [];
+    let encodedLength = 0;
     const references = placed.map((file, at) => {
       if (file.fullRecord === true) {
         fullParts.push(fullRecord(version, options.layout, file, at));
         return -fullParts.length;
       }
-      const reference = encodedParts.reduce(
-        (sum, part) => sum + part.length,
-        0,
-      );
-      encodedParts.push(encodedRecord(file));
+      const reference = encodedLength;
+      const record = encodedRecord(file);
+      encodedParts.push(record);
+      encodedLength += record.length;
       return reference;
     });
     if (options.firstReference !== undefined)
