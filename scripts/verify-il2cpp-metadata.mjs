@@ -6,8 +6,10 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { toolContract } from "../dist/contracts/toolContracts.js";
 import { analysisViewResultSchema } from "../dist/domain/analysisView/analysisView.js";
-import { hashStableFile } from "../dist/filesystem/StableFileHash.js";
+import { ArtifactResourceScope } from "../dist/artifacts/ArtifactResourceScope.js";
 import { mcpTextValue } from "./lib/mcp-verifier-results.mjs";
+import { closeVerifierResources } from "./lib/verifier-cleanup.mjs";
+import { hashVerifierFile } from "./lib/verifier-file-resources.mjs";
 
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
@@ -43,6 +45,7 @@ const call = async (name, input) => {
   assert.notEqual(response.isError, true, mcpTextValue(response));
   return JSON.parse(mcpTextValue(response));
 };
+const resources = new ArtifactResourceScope();
 try {
   await client.connect(transport);
   const { tools } = await client.listTools();
@@ -50,7 +53,7 @@ try {
   if (path === null)
     console.log("[unverified] Metadata inspection: no --metadata was supplied");
   else {
-    const identity = await hashStableFile(path);
+    const identity = await hashVerifierFile(path, resources);
     const started = performance.now();
     const { stdout } = await execute(
       process.execPath,
@@ -144,7 +147,7 @@ try {
     assert.deepEqual(last.items, report.types.slice(-4));
     assert.equal(last.coverage.next_offset ?? null, null);
     assert.deepEqual(
-      await hashStableFile(path),
+      await hashVerifierFile(path, resources),
       identity,
       "Input metadata must remain unchanged",
     );
@@ -153,10 +156,10 @@ try {
     );
   }
 } finally {
-  try {
-    await client.close();
-  } finally {
-    await transport.close();
-  }
+  await closeVerifierResources([
+    () => client.close(),
+    () => transport.close(),
+    () => resources.close(),
+  ]);
 }
 console.log("All asserted IL2CPP metadata CLI/MCP checks passed");
