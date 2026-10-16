@@ -1,6 +1,6 @@
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
-import { readStableArtifactRanges } from "../artifacts/readStableArtifactRanges.js";
+import { readStableArtifactRanges } from "../artifacts/readStableArtifact.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type { UnrealPakPort } from "../application/unreal/UnrealPakPort.js";
