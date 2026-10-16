@@ -63,7 +63,7 @@ export const unrealPakFooterSchema = z.strictObject({
   compression_methods: z.array(z.string().nullable()),
 });
 
-const entrySchema = z.strictObject({
+export const unrealPakEntrySchema = z.strictObject({
   /** null when only the path hash index names the entry. */
   path: z.string().nullable(),
   /** FNV-64 path hash, present for entries found through the path hash index. */
@@ -116,12 +116,12 @@ export const unrealPakSchema = z.strictObject({
   }),
   footer: unrealPakFooterSchema,
   index: unrealPakIndexSchema,
-  entries: z.array(entrySchema),
+  entries: z.array(unrealPakEntrySchema),
   limitations: z.array(z.string()),
 });
 
 export type UnrealPak = z.infer<typeof unrealPakSchema>;
-export type UnrealPakEntry = z.infer<typeof entrySchema>;
+export type UnrealPakEntry = z.infer<typeof unrealPakEntrySchema>;
 export type UnrealPakFooter = z.infer<typeof unrealPakFooterSchema>;
 export type UnrealPakIndex = z.infer<typeof unrealPakIndexSchema>;
 export type UnrealPakProviderInput = Omit<
