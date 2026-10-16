@@ -88,6 +88,10 @@ The CLI always returns the complete report.
   listings, directory names keep the FString form and file names are UTF-8
   byte counts without a terminator; a NUL inside a name is rejected. This was
   observed on a pak written by Unreal Engine 5.8.3.
+- **Block facts.** `compression_blocks` and `compression_block_size` are the
+  values stored in the index. Unreal Engine 5.8.3 writes a block size of 0 for
+  some single-block entries; it is reported as 0, not replaced by the
+  uncompressed size.
 - **Compression names.** `compression_method` 0 means stored, with
   `compression_name: null`. In version 8+ any other value counts from 1 into the
   footer table (`compression_methods[method - 1]`), and a method naming an empty
