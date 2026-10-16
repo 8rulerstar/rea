@@ -73,13 +73,20 @@ The CLI always returns the complete report.
   locations of the path hash index and the full directory index, a blob of
   bit-packed entries and a list of full records. Paths come from the full
   directory index. Without one, entries are listed from the path hash index
-  with `path: null` and their 64-bit `path_hash`.
-- **Version 12.** The footer is the version 11 layout. In the full directory
-  index, directory names keep the FString form and file names are UTF-8 byte
-  counts without a terminator.
-- **Compression names.** From the footer table in version 8+, otherwise from
-  the legacy flag values (1 `Zlib`, 2 `Gzip`, 4 `Custom`). They name methods;
-  no data is decompressed, so they are not codec verification.
+  with `path: null` and their 64-bit `path_hash`. The path hash index region
+  also holds a pruned directory index after the hashes; its directory and file
+  counts are reported and its references are checked. The header entry count,
+  the path hash count, the directory index file count and the decoded entries
+  must all agree.
+- **Version 12.** The footer is the version 11 layout. In the directory
+  listings, directory names keep the FString form and file names are UTF-8
+  byte counts without a terminator; a NUL inside a name is rejected. This was
+  observed on a pak written by Unreal Engine 5.8.3.
+- **Compression names.** From the footer table in version 8+, where a method
+  naming an empty or missing slot is rejected. Before version 8, from the legacy
+  flag values (1 `Zlib`, 2 `Gzip`, 4 `Custom`); other legacy values keep their
+  raw `compression_method` with `compression_name: null`. Names identify
+  methods; no data is decompressed, so they are not codec verification.
 - **Encrypted index.** Reported with `index.state: "encrypted"`, the footer
   facts and no entries. No key is accepted and nothing is decrypted.
 
@@ -93,9 +100,11 @@ The CLI always returns the complete report.
 | `truncated-record`             | corrupt     | A record or declared block list ends past its region.                                  |
 | `invalid-string`               | corrupt     | A string lacks its terminator or is not valid UTF-8.                                   |
 | `invalid-flag`                 | corrupt     | A boolean field is neither 0 nor 1.                                                    |
-| `index-trailing-bytes`         | corrupt     | The index has bytes after its last record.                                             |
+| `index-trailing-bytes`         | corrupt     | The index or a listing region has bytes after its last record.                         |
 | `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record.                                        |
-| `duplicate-path`               | corrupt     | The index lists one path twice.                                                        |
+| `duplicate-path`               | corrupt     | A listing names one path, or the path hash index one hash, twice.                      |
+| `entry-count-mismatch`         | corrupt     | The header entry count disagrees with a listing or the decoded entries.                |
+| `unknown-compression-slot`     | corrupt     | A version 8+ entry names an empty or missing compression slot.                         |
 | `region-too-large`             | resource    | An index region exceeds 256 MiB.                                                       |
 | `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                         |
 
