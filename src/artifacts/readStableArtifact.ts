@@ -255,9 +255,15 @@ export const readStableArtifactRanges = async <T>(
       });
       assertArtifactReadActive(signal);
       const hash = createHash("sha256");
-      const count = await streamFile(file, path, signal, (bytes) =>
-        hash.update(bytes),
-      );
+      const count = await streamFile(file, path, signal, (bytes, total) => {
+        // Stop at the first byte past the admitted size instead of following growth.
+        if (total > size)
+          throw new ArtifactReaderFailure(
+            "integrity",
+            `Artifact grew during read: ${path}`,
+          );
+        hash.update(bytes);
+      });
       return {
         value: { result, sha256: hash.digest("hex"), bytes: size },
         count,

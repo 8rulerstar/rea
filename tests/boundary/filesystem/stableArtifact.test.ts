@@ -1,4 +1,5 @@
 import {
+  appendFile,
   lstat,
   open,
   rename,
@@ -320,6 +321,21 @@ it("decodes ranges and hashes the whole file through one admitted descriptor", a
   await expect(
     readStableArtifactRanges(link, (source) => source.read(0, 1)),
   ).rejects.toMatchObject({ reason: "path" });
+});
+
+it("stops hashing a file that grows after its ranges were decoded", async () => {
+  const root = await createTestTempDirectory("rea-stable-ranges-grow-");
+  const path = join(root, "selected");
+  await writeFile(path, "original evidence");
+  await expect(
+    readStableArtifactRanges(path, async (source) => {
+      await appendFile(path, Buffer.alloc(1 << 20));
+      return source.read(0, 4);
+    }),
+  ).rejects.toMatchObject({
+    reason: "integrity",
+    message: expect.stringContaining("grew during read"),
+  });
 });
 
 it("rejects a file changed after its ranges were decoded", async () => {
