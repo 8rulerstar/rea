@@ -9,6 +9,7 @@ import {
 import {
   createIl2cppMetadataFixture,
   FIXTURE_IMAGES,
+  fixtureImages,
   FIXTURE_METHODS,
   FIXTURE_TYPES,
   fixtureRows,
@@ -519,6 +520,26 @@ describe("IL2CPP version 39 wide indices", () => {
         rows.types.length - 1,
       );
       expect(decoded.images).toEqual(FIXTURE_IMAGES);
+    },
+  );
+});
+
+describe("IL2CPP narrow index sentinels", () => {
+  it.each([
+    [1, undefined],
+    [2, { fillerTypes: 300, genericContainers: 0, parameters: 0 }],
+  ] as const)(
+    "reads an empty image's all-ones %i-byte type start as -1",
+    (width, wide) => {
+      const options = {
+        emptyImage: true,
+        ...(wide === undefined ? {} : { wide }),
+      };
+      const decoded = readIl2cppMetadata(
+        createIl2cppMetadataFixture(options).bytes,
+      );
+      expect(decoded.index_widths.type_definition).toBe(width);
+      expect(decoded.images).toEqual(fixtureImages(options));
     },
   );
 });

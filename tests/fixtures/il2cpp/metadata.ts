@@ -13,6 +13,8 @@ export interface Il2cppMetadataFixtureOptions {
   readonly interfaceOffsetRecordBytes?: number;
   /** Make type 1 also list type 0, so 0 and 1 nest in each other. */
   readonly nestingCycle?: boolean;
+  /** Append an image with no types, whose start is the -1 sentinel at the narrow width. */
+  readonly emptyImage?: boolean;
   /** Metadata version; 29 and 31 use fixed 4-byte indices and no header counts. */
   readonly version?: 29 | 31 | 39;
   /**
@@ -185,6 +187,14 @@ const assembleFile = (
   return { bytes, headerField, section };
 };
 
+/** Image rows a fixture holds, including the optional empty image. */
+export const fixtureImages = (options: Il2cppMetadataFixtureOptions = {}) => [
+  ...FIXTURE_IMAGES,
+  ...(options.emptyImage === true
+    ? [{ name: "Empty.dll", type_start: -1, type_count: 0 }]
+    : []),
+];
+
 /** Lay sections out in header order; empty sections share the next offset. */
 export const createIl2cppMetadataFixture = (
   options: Il2cppMetadataFixtureOptions = {},
@@ -226,7 +236,8 @@ export const createIl2cppMetadataFixture = (
     stringBytes += encoded.length;
     return stringIndex.get(value)!;
   };
-  for (const image of FIXTURE_IMAGES) intern(image.name);
+  const imageRows = fixtureImages(options);
+  for (const image of imageRows) intern(image.name);
   for (const type of FIXTURE_TYPES) {
     intern(type.name);
     intern(type.namespace);
@@ -259,8 +270,8 @@ export const createIl2cppMetadataFixture = (
     types.writeUInt32LE(0x02000001 + index, at + 4);
   });
 
-  const images = Buffer.alloc(FIXTURE_IMAGES.length * recordBytes.images);
-  FIXTURE_IMAGES.forEach((image, index) => {
+  const images = Buffer.alloc(imageRows.length * recordBytes.images);
+  imageRows.forEach((image, index) => {
     const at = index * recordBytes.images;
     images.writeInt32LE(intern(image.name), at);
     images.writeInt32LE(index, at + 4);
@@ -321,7 +332,7 @@ export const createIl2cppMetadataFixture = (
         ]),
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],
     ["typeDefinitions", { bytes: types, count: typeRows.length }],
-    ["images", { bytes: images, count: FIXTURE_IMAGES.length }],
+    ["images", { bytes: images, count: imageRows.length }],
     ...(interfaceOffsets === null
       ? []
       : [
