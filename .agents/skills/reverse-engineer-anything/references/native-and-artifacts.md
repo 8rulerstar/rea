@@ -17,7 +17,7 @@ Use `inspect_il2cpp_metadata` for an explicit local Unity `global-metadata.dat`
 (versions 29, 31 and 39) when the question concerns assembly images, type or method names,
 namespaces or index ranges. No `open_binary`, Unity installation or target
 execution is required. The CLI equivalent is `inspect-il2cpp-metadata PATH`.
-The default summary returns counts; page `images`, `types` or `methods`
+Select `detail: "summary"` on the first call for counts; page `images`, `types` or `methods`
 through `inspect_analysis_view`; row positions are metadata indices. Preserve
 artifact SHA-256 and index widths. Unrecognized magic may mean encryption and
 is unsupported, not decrypted. Linking names to `GameAssembly` or

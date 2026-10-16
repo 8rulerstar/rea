@@ -104,7 +104,7 @@ try {
     console.log("[ok] image type ranges and type method ranges agree");
 
     const summary = contract.outputSchema.parse(
-      await call(operation, { path }),
+      await call(operation, { path, detail: "summary" }),
     ).normalized_result;
     assert.deepEqual(summary.summary.counts, {
       images: report.images.length,

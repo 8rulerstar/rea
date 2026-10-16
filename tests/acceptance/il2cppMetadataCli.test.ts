@@ -55,8 +55,18 @@ cliTest(
       report,
     );
 
-    // Summary is the default MCP delivery.
-    const summarized = await call("inspect_il2cpp_metadata", { path });
+    // Omitted detail delivers the complete rows, like the other inspection tools.
+    const omitted = await call("inspect_il2cpp_metadata", { path });
+    expect(omitted.isError, JSON.stringify(omitted)).not.toBe(true);
+    expect(
+      il2cppMetadataSchema.parse(
+        parseEvidence(omitted.structuredContent).normalized_result,
+      ).methods,
+    ).toEqual(FIXTURE_METHODS);
+    const summarized = await call("inspect_il2cpp_metadata", {
+      path,
+      detail: "summary",
+    });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
     const view = il2cppMetadataSummaryViewResultSchema.parse(
       parseEvidence(summarized.structuredContent).normalized_result,

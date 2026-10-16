@@ -68,10 +68,11 @@ it("rejects invalid paths and extra arguments before invoking the reader", async
   expect(calls.count).toBe(0);
 });
 
-it("refuses the default summary without Evidence retention before reading", async () => {
+it("refuses summary delivery without Evidence retention before reading", async () => {
   const calls = { count: 0 };
   const result = await serviceReturning(report, calls).inspect({
     path: report.artifact.path,
+    detail: "summary",
   });
   expect(result.ok).toBe(false);
   if (!result.ok)
@@ -79,10 +80,9 @@ it("refuses the default summary without Evidence retention before reading", asyn
   expect(calls.count).toBe(0);
 });
 
-it("returns complete artifact-bound Evidence without retention", async () => {
+it("returns complete artifact-bound Evidence without retention by default", async () => {
   const result = await serviceReturning(report).inspect({
     path: report.artifact.path,
-    detail: "complete",
   });
   if (!result.ok) throw result.error;
   expect(result.value.parameters).toEqual({ path: report.artifact.path });

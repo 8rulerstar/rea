@@ -15,14 +15,16 @@ symbolic links are rejected.
 
 ## MCP
 
-A large game produces megabytes of rows, so MCP delivers a summary by default
-(`detail: "summary"`). MCP requires an absolute filesystem path:
+MCP returns every row by default, like the other inspection tools. A large game
+produces megabytes of rows, so select `detail: "summary"` first. MCP requires an
+absolute filesystem path:
 
 ```json
 {
   "name": "inspect_il2cpp_metadata",
   "arguments": {
-    "path": "/artifacts/Data/Managed/Metadata/global-metadata.dat"
+    "path": "/artifacts/Data/Managed/Metadata/global-metadata.dat",
+    "detail": "summary"
   }
 }
 ```
@@ -90,7 +92,7 @@ for top-level types. The start of an empty range can retain the original value
 `-1`.
 
 The complete inventory of a large game is several megabytes and can exceed
-the MCP response budget; the default summary and paging avoid that. The tool has
+the MCP response budget; summary delivery and paging avoid that. The tool has
 no name search: page the collections, or filter the complete CLI JSON with a
 tool such as `jq`.
 
