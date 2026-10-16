@@ -617,7 +617,6 @@ const checkImageRanges = (images: Il2cppMetadataDecoded["images"]) => {
   }
 };
 
-/** Decode image, type and method names without native binaries or decryption. */
 /** Row counts known from the header and record sizes, before rows are built. */
 export interface Il2cppMetadataRowCounts {
   readonly images: number;
@@ -625,6 +624,7 @@ export interface Il2cppMetadataRowCounts {
   readonly methods: number;
 }
 
+/** Decode image, type and method names without native binaries or decryption. */
 export const readIl2cppMetadata = (
   bytes: Buffer,
   options: {
