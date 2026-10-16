@@ -218,3 +218,75 @@ describe("rejected Unreal pak files", () => {
     expect(seen).toEqual([PAK_FIXTURE_FILES.length]);
   });
 });
+
+describe("inconsistent Unreal pak indexes", () => {
+  it("rejects a header entry count the listings do not match", async () => {
+    expect(
+      await failure(
+        createPakFixture({ layout: "v11", declaredEntries: 5 }).bytes,
+      ),
+    ).toEqual({ reason: "entry-count-mismatch", kind: "corrupt" });
+  });
+
+  it.each(["pathHashTrailer", "directoryTrailer"] as const)(
+    "rejects bytes left over after the listing (%s)",
+    async (option) => {
+      expect(
+        await failure(
+          createPakFixture({ layout: "v11", [option]: Buffer.of(1, 2, 3, 4) })
+            .bytes,
+        ),
+      ).toEqual({ reason: "index-trailing-bytes", kind: "corrupt" });
+    },
+  );
+
+  it("rejects a directory index that lists one path twice", async () => {
+    const bytes = createPakFixture({
+      layout: "v11",
+      files: [
+        { path: "A/x", size: 1 },
+        { path: "A/x", size: 1 },
+      ],
+    }).bytes;
+    expect(await failure(bytes)).toEqual({
+      reason: "duplicate-path",
+      kind: "corrupt",
+    });
+  });
+
+  it("rejects a version 10+ reference past the encoded entries", async () => {
+    expect(
+      await failure(
+        createPakFixture({ layout: "v11", firstReference: 4096 }).bytes,
+      ),
+    ).toEqual({ reason: "entry-reference-out-of-range", kind: "corrupt" });
+  });
+
+  it("rejects a NUL inside a version 12 file name", async () => {
+    const bytes = createPakFixture({
+      layout: "v12",
+      files: [{ path: "A/a\0b", size: 1 }],
+    }).bytes;
+    expect(await failure(bytes)).toEqual({
+      reason: "invalid-string",
+      kind: "corrupt",
+    });
+  });
+
+  it("rejects an entry naming an empty compression slot", async () => {
+    const { bytes } = createPakFixture({ layout: "v11" });
+    // The five 32-byte compression names end the footer; clear slot 1 (Zlib).
+    bytes.fill(0, bytes.length - 160, bytes.length - 128);
+    expect(await failure(bytes)).toEqual({
+      reason: "unknown-compression-slot",
+      kind: "corrupt",
+    });
+  });
+
+  it("reads the pruned directory index stored after the path hashes", async () => {
+    const pak = await read(createPakFixture({ layout: "v11" }).bytes);
+    expect(pak.index).toMatchObject({
+      path_hash_index: { entries: 3, pruned_directories: 0, pruned_files: 0 },
+    });
+  });
+});

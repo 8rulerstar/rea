@@ -18,6 +18,8 @@ export const UNREAL_PAK_FAILURE_REASONS = {
     "index-trailing-bytes",
     "entry-reference-out-of-range",
     "duplicate-path",
+    "entry-count-mismatch",
+    "unknown-compression-slot",
   ],
   resource: ["region-too-large", "too-many-entries"],
 } as const;
@@ -167,9 +169,15 @@ class Cursor {
         `${this.label} ${what} has negative length ${length}`,
       );
     const at = this.take(length);
+    const raw = this.bytes.subarray(at, at + length);
+    if (raw.includes(0))
+      throw new UnrealPakFormatFailure(
+        "invalid-string",
+        `${this.label} ${what} at byte ${at} contains a NUL`,
+      );
     try {
       return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-        this.bytes.subarray(at, at + length),
+        raw,
       );
     } catch (cause: unknown) {
       throw new UnrealPakFormatFailure(
@@ -293,9 +301,14 @@ const compressionName = (
   method: number,
 ): string | null => {
   if (method === 0) return null;
-  if (footer.version >= 8)
-    return footer.compression_methods[method - 1] ?? null;
-  return LEGACY_COMPRESSION.get(method) ?? null;
+  if (footer.version < 8) return LEGACY_COMPRESSION.get(method) ?? null;
+  const name = footer.compression_methods[method - 1];
+  if (name === undefined || name === null)
+    throw new UnrealPakFormatFailure(
+      "unknown-compression-slot",
+      `an entry names compression slot ${method}, which the footer leaves ${name === null ? "empty" : "undefined"}`,
+    );
+  return name;
 };
 
 /** A full FPakEntry record, as stored in legacy indexes and non-encoded lists. */
@@ -397,6 +410,41 @@ const finished = (cursor: Cursor) => {
       "index-trailing-bytes",
       `${cursor.label} has ${cursor.bytes.length - cursor.position} unread bytes`,
     );
+};
+
+/**
+ * One directory listing (the full directory index, or the pruned one inside
+ * the path hash index): directories, each with file names and entry references.
+ */
+const readDirectoryListing = (
+  cursor: Cursor,
+  footer: UnrealPakFooter,
+  limits: UnrealPakLimits,
+) => {
+  const directories = cursor.u32();
+  checkEntryCount(directories, limits, cursor.label);
+  const seen = new Set<string>();
+  const listed: [string, number][] = [];
+  for (let d = 0; d < directories; d++) {
+    const directory = cursor.string("directory name");
+    const fileCount = cursor.u32();
+    checkEntryCount(listed.length + fileCount, limits, cursor.label);
+    for (let f = 0; f < fileCount; f++) {
+      const name =
+        footer.version >= 12
+          ? cursor.utf8Name("file name")
+          : cursor.string("file name");
+      const path = joinPath(directory, name);
+      if (seen.has(path))
+        throw new UnrealPakFormatFailure(
+          "duplicate-path",
+          `${cursor.label} lists ${path} twice`,
+        );
+      seen.add(path);
+      listed.push([path, cursor.i32()]);
+    }
+  }
+  return { directories, listed };
 };
 
 /** Join a full-directory-index directory and file name as the pak stores them. */
@@ -535,8 +583,26 @@ export const readUnrealPak = async (
     const phiCount = phi.u32();
     checkEntryCount(phiCount, limits, "path hash index");
     const hashed: [string, number][] = [];
-    for (let at = 0; at < phiCount; at++)
-      hashed.push([phi.u64Hex(), phi.i32()]);
+    const seenHashes = new Set<string>();
+    for (let at = 0; at < phiCount; at++) {
+      const hash = phi.u64Hex();
+      if (seenHashes.has(hash))
+        throw new UnrealPakFormatFailure(
+          "duplicate-path",
+          `path hash index lists hash ${hash} twice`,
+        );
+      seenHashes.add(hash);
+      hashed.push([hash, phi.i32()]);
+    }
+    // The pruned directory index follows the hashes inside the same region.
+    const pruned = readDirectoryListing(phi, footer, limits);
+    finished(phi);
+    for (const [path, reference] of pruned.listed)
+      resolve(reference, path, null);
+    // Every reference must name a record even when the directory index names the paths.
+    const fromHashes = hashed.map(([hash, reference]) =>
+      resolve(reference, null, hash),
+    );
     pathHashIndex = {
       region: {
         offset: pathHashRegion.offset,
@@ -544,10 +610,10 @@ export const readUnrealPak = async (
         sha1: pathHashRegion.sha1,
       },
       entries: phiCount,
+      pruned_directories: pruned.directories,
+      pruned_files: pruned.listed.length,
     };
-    if (directoryRegion === null)
-      for (const [hash, reference] of hashed)
-        entries.push(resolve(reference, null, hash));
+    if (directoryRegion === null) entries.push(...fromHashes);
   }
   if (directoryRegion !== null) {
     const fdi = new Cursor(
@@ -560,30 +626,11 @@ export const readUnrealPak = async (
       ),
       "full directory index",
     );
-    const directories = fdi.u32();
-    checkEntryCount(directories, limits, "full directory index");
-    const seen = new Set<string>();
-    let files = 0;
-    for (let d = 0; d < directories; d++) {
-      const directory = fdi.string("directory name");
-      const fileCount = fdi.u32();
-      files += fileCount;
-      checkEntryCount(files, limits, "full directory index");
-      for (let f = 0; f < fileCount; f++) {
-        const name =
-          footer.version >= 12
-            ? fdi.utf8Name("file name")
-            : fdi.string("file name");
-        const path = joinPath(directory, name);
-        if (seen.has(path))
-          throw new UnrealPakFormatFailure(
-            "duplicate-path",
-            `directory index lists ${path} twice`,
-          );
-        seen.add(path);
-        entries.push(resolve(fdi.i32(), path, null));
-      }
-    }
+    const { directories, listed } = readDirectoryListing(fdi, footer, limits);
+    for (const [path, reference] of listed)
+      entries.push(resolve(reference, path, null));
+    const files = listed.length;
+    finished(fdi);
     directoryIndex = {
       region: {
         offset: directoryRegion.offset,
@@ -594,6 +641,17 @@ export const readUnrealPak = async (
       files,
     };
   }
+  const listed = [
+    ["path hash index", pathHashIndex?.entries],
+    ["full directory index", directoryIndex?.files],
+    ["decoded entry list", entries.length],
+  ] as const;
+  for (const [label, listedCount] of listed)
+    if (listedCount !== undefined && listedCount !== entryCount)
+      throw new UnrealPakFormatFailure(
+        "entry-count-mismatch",
+        `the index declares ${entryCount} entries but the ${label} holds ${listedCount}`,
+      );
   return {
     footer,
     index: {

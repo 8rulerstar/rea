@@ -93,6 +93,9 @@ const directoryIndexSchema = z.strictObject({
 const pathHashIndexSchema = z.strictObject({
   region: regionSchema,
   entries: count,
+  /** The pruned directory index stored after the hashes in the same region. */
+  pruned_directories: count,
+  pruned_files: count,
 });
 
 /** A decoded index, or an encrypted one recorded without decryption. */

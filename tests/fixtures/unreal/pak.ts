@@ -34,6 +34,13 @@ export interface PakFixtureOptions {
   /** Version 10+: write the path hash index, the full directory index, or both. */
   readonly pathHashIndex?: boolean;
   readonly directoryIndex?: boolean;
+  /** Bytes appended after the path hash index or the directory index content. */
+  readonly pathHashTrailer?: Buffer;
+  readonly directoryTrailer?: Buffer;
+  /** Version 10+: the entry count written in the index header. */
+  readonly declaredEntries?: number;
+  /** Version 10+: replace the first file's entry reference. */
+  readonly firstReference?: number;
 }
 
 export const PAK_FIXTURE_FILES: readonly PakFixtureFile[] = [
@@ -208,6 +215,8 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       encodedParts.push(encodedRecord(file));
       return reference;
     });
+    if (options.firstReference !== undefined)
+      references[0] = options.firstReference;
     const encoded = Buffer.concat(encodedParts);
     // Region offsets are absolute, after the data area and the main index.
     const directories = new Map<string, [string, number][]>();
@@ -229,24 +238,31 @@ export const createPakFixture = (options: PakFixtureOptions) => {
         ]),
       ]),
     ]);
+    const fdiBytes = Buffer.concat([
+      fdi,
+      options.directoryTrailer ?? Buffer.alloc(0),
+    ]);
     const phi = Buffer.concat([
       u32(placed.length),
       ...placed.flatMap((file, at) => [
         u64(fnv64(file.path)),
         i32(references[at]!),
       ]),
+      // An empty pruned directory index, as repak writes it.
+      u32(0),
+      options.pathHashTrailer ?? Buffer.alloc(0),
     ]);
     const withPhi = options.pathHashIndex ?? true;
     const withFdi = options.directoryIndex ?? true;
     const head = (phiOffset: number, fdiOffset: number) =>
       Buffer.concat([
         mount,
-        u32(placed.length),
+        u32(options.declaredEntries ?? placed.length),
         u64(0x1234),
         u32(withPhi ? 1 : 0),
         ...(withPhi ? [u64(phiOffset), u64(phi.length), sha1(0x50)] : []),
         u32(withFdi ? 1 : 0),
-        ...(withFdi ? [u64(fdiOffset), u64(fdi.length), sha1(0x51)] : []),
+        ...(withFdi ? [u64(fdiOffset), u64(fdiBytes.length), sha1(0x51)] : []),
         u32(encoded.length),
         encoded,
         u32(fullParts.length),
@@ -257,7 +273,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     const fdiOffset = phiOffset + (withPhi ? phi.length : 0);
     index = head(phiOffset, fdiOffset);
     if (withPhi) regions.push(phi);
-    if (withFdi) regions.push(fdi);
+    if (withFdi) regions.push(fdiBytes);
   }
   const bytes = Buffer.concat([
     data,
