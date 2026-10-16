@@ -118,6 +118,18 @@ selected fields. The CLI defaults to complete Evidence;
 `--detail summary --evidence_output FILE` exports the full result to a new file
 and returns a compact overview. See [IL2CPP metadata](il2cpp-metadata.md).
 
+Inspect an Unreal Engine pak index without Unreal or extraction:
+
+```bash
+rea inspect-unreal-pak /absolute/path/Game-Windows.pak --json
+```
+
+The command reads the footer and index of a version 1 to 12 pak and reports
+every entry's path, offset, sizes and compression method. It does not extract,
+decompress or decrypt file data. MCP returns every entry by default;
+`detail: "summary"` returns counts and pages entries on request. See
+[Unreal pak indexes](unreal-pak.md).
+
 Inspect an embedded cargo-auditable Rust dependency list without installing
 Rust or configuring a disassembler:
 

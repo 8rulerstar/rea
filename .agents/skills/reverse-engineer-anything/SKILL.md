@@ -181,6 +181,11 @@ explicit path or endpoint and do not need it.
   other versions are unsupported. Names do not establish native code addresses
   or runtime behavior. See the
   [IL2CPP metadata guide](https://github.com/morluto/rea/blob/main/docs/il2cpp-metadata.md).
+- Unreal Engine `.pak` contents: `inspect_unreal_pak` with the explicit local
+  file; select `detail: "summary"` first for counts, then page entries through
+  `inspect_analysis_view`. Versions 1 to 12; only the footer and index are read,
+  nothing is extracted, decompressed or decrypted. See the
+  [Unreal pak guide](https://github.com/morluto/rea/blob/main/docs/unreal-pak.md).
 - Embedded cargo-auditable Rust dependency metadata: `inspect_rust_binary`
   with the explicit local ELF, PE, or thin Mach-O file. This built-in
   target-free inspection requires no Rust installation or disassembler. Preserve
