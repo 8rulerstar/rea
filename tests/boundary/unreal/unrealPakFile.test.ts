@@ -90,6 +90,50 @@ describe("Unreal pak footers and indexes", () => {
     },
   );
 
+  it.each(["v8b", "v11"] as const)(
+    "reports %s block counts, flags and record hashes",
+    async (layout) => {
+      const pak = await read(
+        createPakFixture({
+          layout,
+          files: [
+            { path: "A/multi", size: 30, compressed: true, blocks: 3 },
+            { path: "A/sealed", size: 20, compressed: true, encrypted: true },
+            { path: "A/gone", size: 4, fullRecord: true, deleted: true },
+          ],
+        }).bytes,
+      );
+      expect(
+        pak.entries.map((entry) => [
+          entry.path,
+          entry.compression_blocks,
+          entry.compression_block_size,
+          entry.encrypted,
+          entry.deleted,
+          entry.sha1,
+        ]),
+      ).toEqual([
+        [
+          "A/multi",
+          3,
+          65536,
+          false,
+          false,
+          layout === "v8b" ? "00".repeat(20) : null,
+        ],
+        [
+          "A/sealed",
+          1,
+          65536,
+          true,
+          false,
+          layout === "v8b" ? "01".repeat(20) : null,
+        ],
+        ["A/gone", 0, 0, false, true, "02".repeat(20)],
+      ]);
+    },
+  );
+
   it("reads version 12 file names as UTF-8 without a terminator", async () => {
     const pak = await read(createPakFixture({ layout: "v12" }).bytes);
     expect(pak.entries.map((entry) => entry.path)).toContain(
@@ -328,6 +372,52 @@ describe("inconsistent Unreal pak indexes", () => {
       ).toEqual({ reason: "paths-too-large", kind: "resource" });
     },
   );
+
+  it("rejects a version 10+ reference into the middle of an encoded entry", async () => {
+    expect(
+      await failure(
+        createPakFixture({ layout: "v11", firstReference: 2 }).bytes,
+      ),
+    ).toEqual({ reason: "entry-reference-out-of-range", kind: "corrupt" });
+  });
+
+  it("rejects an encrypted index region that leaves the file without reading it", async () => {
+    const { bytes } = createPakFixture({ layout: "v11", encryptedIndex: true });
+    const magic = bytes.lastIndexOf(Buffer.from([0xe1, 0x12, 0x6f, 0x5a]));
+    bytes.writeBigUInt64LE(BigInt(bytes.length), magic + 8);
+    expect(await failure(bytes)).toEqual({
+      reason: "region-out-of-bounds",
+      kind: "corrupt",
+    });
+  });
+
+  it("does not charge directories to the entry-row hook", async () => {
+    const pak = await read(
+      createPakFixture({ layout: "v11", emptyDirectories: 10 }).bytes,
+      {
+        ...LIMITS,
+        beforeEntries: (count) => {
+          if (count > PAK_FIXTURE_FILES.length)
+            throw new Error(`charged ${count}`);
+        },
+      },
+    );
+    expect(pak.index).toMatchObject({
+      full_directory_index: { directories: 13 },
+    });
+  });
+
+  it("lists a large path-hash-only index", async () => {
+    const files = Array.from({ length: 200_000 }, (_, at) => ({
+      path: `D/${at}`,
+      size: 0,
+    }));
+    const pak = await read(
+      createPakFixture({ layout: "v11", files, directoryIndex: false }).bytes,
+      { ...LIMITS, entries: 300_000, regionBytes: 64 << 20 },
+    );
+    expect(pak.entries).toHaveLength(200_000);
+  }, 60_000);
 
   it("reads the pruned directory index stored after the path hashes", async () => {
     const pak = await read(createPakFixture({ layout: "v11" }).bytes);

@@ -14,7 +14,7 @@ import { hashVerifierFile } from "./lib/verifier-file-resources.mjs";
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
   console.log(
-    "Usage: npm run verify:il2cpp:metadata -- [--metadata PATH]\nPATH is a caller-owned, unencrypted global-metadata.dat (version 29, 31 or 39). Without --metadata, only the advertised contract is verified.",
+    "Usage: npm run verify:unreal:pak -- [--pak PATH]\nPATH is a caller-owned Unreal Engine .pak file (versions 1 to 12). Without --pak, only the advertised contract is verified.",
   );
   process.exit(0);
 }

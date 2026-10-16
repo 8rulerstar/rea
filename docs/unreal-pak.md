@@ -109,7 +109,7 @@ The CLI always returns the complete report.
 | `invalid-string`               | corrupt     | A string lacks its terminator or is not valid UTF-8.                                   |
 | `invalid-flag`                 | corrupt     | A boolean field is neither 0 nor 1.                                                    |
 | `index-trailing-bytes`         | corrupt     | The index or a listing region has bytes after its last record.                         |
-| `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record.                                        |
+| `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record start.                                  |
 | `duplicate-path`               | corrupt     | A listing names one path, or the path hash index one hash, twice.                      |
 | `entry-count-mismatch`         | corrupt     | The header entry count disagrees with a listing or the decoded entries.                |
 | `unknown-compression-slot`     | corrupt     | A version 8+ entry names an empty or missing compression slot.                         |

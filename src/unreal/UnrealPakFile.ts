@@ -280,14 +280,13 @@ const readFooter = async (
   );
 };
 
-/** Read one region the footer or index points at, inside the file and the limit. */
-const readRegion = async (
-  source: UnrealPakSource,
-  region: { offset: number; size: number; sha1: string },
+/** Reject a region the footer or index names outside the file or the limit. */
+const checkRegion = (
+  region: { offset: number; size: number },
   limits: UnrealPakLimits,
   label: string,
   end: number,
-): Promise<Buffer> => {
+) => {
   if (region.size > limits.regionBytes)
     throw new UnrealPakFormatFailure(
       "region-too-large",
@@ -298,6 +297,17 @@ const readRegion = async (
       "region-out-of-bounds",
       `${label} at ${region.offset} (+${region.size}) ends past byte ${end}`,
     );
+};
+
+/** Read one region the footer or index points at, inside the file and the limit. */
+const readRegion = async (
+  source: UnrealPakSource,
+  region: { offset: number; size: number; sha1: string },
+  limits: UnrealPakLimits,
+  label: string,
+  end: number,
+): Promise<Buffer> => {
+  checkRegion(region, limits, label, end);
   const bytes = await source.read(region.offset, region.size);
   if (createHash("sha1").update(bytes).digest("hex") !== region.sha1)
     throw new UnrealPakFormatFailure(
@@ -391,14 +401,11 @@ const readFullEntry = (
 
 /** One bit-packed FPakEntry from the version 10+ encoded entry blob. */
 const readEncodedEntry = (
-  blob: Buffer,
-  at: number,
+  cursor: Cursor,
   footer: UnrealPakFooter,
   path: string | null,
   pathHash: string | null,
 ): UnrealPakEntry => {
-  const cursor = new Cursor(blob, "encoded entries");
-  cursor.position = at;
   const bits = cursor.u32();
   const method = (bits >>> 23) & 0x3f;
   const encrypted = (bits & (1 << 22)) !== 0;
@@ -410,6 +417,15 @@ const readEncodedEntry = (
   const offset = varInt(31);
   const uncompressed = varInt(30);
   const size = method === 0 ? uncompressed : varInt(29);
+  // One unencrypted block is implied; otherwise each block's size follows.
+  if (blocks > 1 || (blocks === 1 && encrypted)) {
+    if (blocks * 4 > cursor.bytes.length - cursor.position)
+      throw new UnrealPakFormatFailure(
+        "truncated-record",
+        `encoded entry declares ${blocks} compression blocks past its end`,
+      );
+    cursor.position += blocks * 4;
+  }
   return {
     path,
     path_hash: pathHash,
@@ -427,7 +443,7 @@ const readEncodedEntry = (
   };
 };
 
-const checkEntryCount = (
+const checkCountLimit = (
   count: number,
   limits: UnrealPakLimits,
   label: string,
@@ -437,6 +453,15 @@ const checkEntryCount = (
       "too-many-entries",
       `${label} declares ${count} entries, above the ${limits.entries}-entry limit`,
     );
+};
+
+/** Entry counts become report rows, so the caller may refuse them before they are built. */
+const checkEntryCount = (
+  count: number,
+  limits: UnrealPakLimits,
+  label: string,
+) => {
+  checkCountLimit(count, limits, label);
   limits.beforeEntries?.(count);
 };
 
@@ -459,7 +484,8 @@ const readDirectoryListing = (
   budget: { used: number },
 ) => {
   const directories = cursor.u32();
-  checkEntryCount(directories, limits, cursor.label);
+  // Directories produce no rows, so only the count limit applies.
+  checkCountLimit(directories, limits, cursor.label);
   const seen = new Set<string>();
   const listed: [string, number][] = [];
   for (let d = 0; d < directories; d++) {
@@ -503,10 +529,12 @@ export const readUnrealPak = async (
       "frozen-index",
       "version 9 frozen indexes store a serialized memory image and are not decoded",
     );
-  if (footer.index_encrypted === true)
-    return { footer, index: { state: "encrypted" }, entries: [] };
-
   const dataEnd = footer.offset;
+  if (footer.index_encrypted === true) {
+    // The encrypted index is not read, but its declared region must still fit.
+    checkRegion(footer.index, limits, "index", dataEnd);
+    return { footer, index: { state: "encrypted" }, entries: [] };
+  }
   const index = new Cursor(
     await readRegion(source, footer.index, limits, "index", dataEnd),
     "index",
@@ -570,6 +598,13 @@ export const readUnrealPak = async (
     index.position + encodedSize,
   );
   index.position += encodedSize;
+  // Walk the encoded records so references can only name a record start.
+  const recordStarts = new Set<number>();
+  const walk = new Cursor(encoded, "encoded entries");
+  while (walk.position < encoded.length) {
+    recordStarts.add(walk.position);
+    readEncodedEntry(walk, footer, null, null);
+  }
   const fullCount = index.u32();
   checkEntryCount(fullCount, limits, "non-encoded entry list");
   const fullEntries: Buffer[] = [];
@@ -586,12 +621,14 @@ export const readUnrealPak = async (
     hash: string | null,
   ) => {
     if (reference >= 0) {
-      if (reference >= encoded.length)
+      if (!recordStarts.has(reference))
         throw new UnrealPakFormatFailure(
           "entry-reference-out-of-range",
-          `entry reference ${reference} is outside the ${encoded.length}-byte encoded entries`,
+          `entry reference ${reference} is not the start of an encoded entry`,
         );
-      return readEncodedEntry(encoded, reference, footer, path, hash);
+      const cursor = new Cursor(encoded, "encoded entries");
+      cursor.position = reference;
+      return readEncodedEntry(cursor, footer, path, hash);
     }
     const record = fullEntries[-reference - 1];
     if (record === undefined)
@@ -655,7 +692,8 @@ export const readUnrealPak = async (
       pruned_directories: pruned.directories,
       pruned_files: pruned.listed.length,
     };
-    if (directoryRegion === null) entries.push(...fromHashes);
+    if (directoryRegion === null)
+      for (const entry of fromHashes) entries.push(entry);
   }
   if (directoryRegion !== null) {
     const fdi = new Cursor(

@@ -25,6 +25,11 @@ export interface PakFixtureFile {
   readonly compressed?: boolean;
   /** Version 10+: store as a full record in the non-encoded list. */
   readonly fullRecord?: boolean;
+  /** Compressed only: number of 64 KiB blocks (default 1). */
+  readonly blocks?: number;
+  readonly encrypted?: boolean;
+  /** Full records only. */
+  readonly deleted?: boolean;
 }
 
 export interface PakFixtureOptions {
@@ -45,6 +50,8 @@ export interface PakFixtureOptions {
   readonly firstReference?: number;
   /** Move the last file's recorded offset by this many bytes. */
   readonly lastOffsetShift?: number;
+  /** Version 10+: empty directories added to the full directory index. */
+  readonly emptyDirectories?: number;
 }
 
 export const PAK_FIXTURE_FILES: readonly PakFixtureFile[] = [
@@ -116,23 +123,36 @@ const fullRecord = (
   if (version === 1) parts.push(u64(0));
   parts.push(sha1(seed));
   if (version >= 3) {
-    if (file.method !== 0) parts.push(u32(1), u64(0), u64(file.stored));
-    parts.push(Buffer.of(0), u32(file.method === 0 ? 0 : 65536));
+    if (file.method !== 0) {
+      const blocks = file.blocks ?? 1;
+      parts.push(u32(blocks));
+      for (let b = 0; b < blocks; b++) parts.push(u64(b), u64(b + 1));
+    }
+    parts.push(
+      Buffer.of(
+        (file.encrypted === true ? 1 : 0) | (file.deleted === true ? 2 : 0),
+      ),
+      u32(file.method === 0 ? 0 : 65536),
+    );
   }
   return Buffer.concat(parts);
 };
 
 const encodedRecord = (file: Placed) => {
-  const blocks = file.method === 0 ? 0 : 1;
+  const blocks = file.method === 0 ? 0 : (file.blocks ?? 1);
+  const encrypted = file.encrypted === true;
   const bits =
     (file.method === 0 ? 0 : 65536 >> 11) |
     (blocks << 6) |
+    (encrypted ? 1 << 22 : 0) |
     (file.method << 23) |
     (1 << 29) |
     (1 << 30) |
     (1 << 31);
   const parts = [u32(bits >>> 0), u32(file.offset), u32(file.uncompressed)];
   if (file.method !== 0) parts.push(u32(file.stored));
+  if (blocks > 1 || (blocks === 1 && encrypted))
+    for (let b = 0; b < blocks; b++) parts.push(u32(1));
   return Buffer.concat(parts);
 };
 
@@ -239,6 +259,8 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       list.push([file.path.slice(slash + 1), references[at]!]);
       directories.set(directory, list);
     });
+    for (let at = 0; at < (options.emptyDirectories ?? 0); at++)
+      directories.set(`/Empty${at}/`, []);
     const fdi = Buffer.concat([
       u32(directories.size),
       ...[...directories].flatMap(([directory, list]) => [
