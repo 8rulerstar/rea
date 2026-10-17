@@ -46,6 +46,7 @@ const call = async (name, input) => {
   return JSON.parse(mcpTextValue(response));
 };
 const resources = new ArtifactResourceScope();
+let primaryError;
 try {
   await client.connect(transport);
   const { tools } = await client.listTools();
@@ -138,7 +139,7 @@ try {
           view: {
             kind: "il2cpp-metadata",
             collection: "types",
-            offset: report.types.length - 4,
+            offset: Math.max(0, report.types.length - 4),
             limit: 16,
           },
         })
@@ -155,11 +156,13 @@ try {
       `[ok] summary and page parity; ${report.images.length} images, ${report.types.length} types, ${report.methods.length} methods; complete Evidence ${Buffer.byteLength(stdout)} bytes, summary ${Buffer.byteLength(JSON.stringify(summary))} bytes; CLI ${cliMs} ms`,
     );
   }
+} catch (cause) {
+  primaryError = cause;
+  throw cause;
 } finally {
-  await closeVerifierResources([
-    () => client.close(),
-    () => transport.close(),
-    () => resources.close(),
-  ]);
+  await closeVerifierResources(
+    [() => client.close(), () => transport.close(), () => resources.close()],
+    primaryError,
+  );
 }
 console.log("All asserted IL2CPP metadata CLI/MCP checks passed");
