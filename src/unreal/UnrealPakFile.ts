@@ -548,13 +548,15 @@ export const readUnrealPak = async (
     "index",
   );
   const mountPoint = index.string("mount point");
+  // The mount point is returned text too, so it shares the path budget.
+  const budget = { used: 0 };
+  spendPath(budget, limits, mountPoint.length, "index mount point");
   const entryCount = index.u32();
   checkEntryCount(entryCount, limits, "index");
 
   if (footer.version < 10) {
     const entries: UnrealPakEntry[] = [];
     const seen = new Set<string>();
-    const budget = { used: 0 };
     for (let at = 0; at < entryCount; at++) {
       const path = index.string("entry path");
       spendPath(budget, limits, path.length, "index");
@@ -654,7 +656,6 @@ export const readUnrealPak = async (
   };
 
   const entries: UnrealPakEntry[] = [];
-  const budget = { used: 0 };
   let directoryIndex = null;
   let pathHashIndex = null;
   if (pathHashRegion !== null) {
@@ -685,12 +686,16 @@ export const readUnrealPak = async (
     // The pruned directory index follows the hashes inside the same region.
     const pruned = readDirectoryListing(phi, footer, limits, budget);
     finished(phi);
-    for (const [path, reference] of pruned.listed)
-      resolve(reference, path, null);
-    // Every reference must name a record even when the directory index names the paths.
+    // Every reference must name a placed record, even when the full
+    // directory index is the one that names the returned entries.
+    checkPlacement(
+      pruned.listed.map(([path, reference]) => resolve(reference, path, null)),
+      footer.index.offset,
+    );
     const fromHashes = hashed.map(([hash, reference]) =>
       resolve(reference, null, hash),
     );
+    checkPlacement(fromHashes, footer.index.offset);
     pathHashIndex = {
       region: {
         offset: pathHashRegion.offset,

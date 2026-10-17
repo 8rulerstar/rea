@@ -476,6 +476,27 @@ describe("Unreal pak record and resource guards", () => {
     ).toEqual({ reason: "too-many-entries", kind: "resource" });
   });
 
+  it("rejects a path-hash row naming a misplaced record the directory index does not list", async () => {
+    expect(
+      await failure(
+        createPakFixture({ layout: "v11", strayHashOffset: 1 << 20 }).bytes,
+      ),
+    ).toEqual({ reason: "entry-out-of-bounds", kind: "corrupt" });
+  });
+
+  it("counts the mount point against the path budget", async () => {
+    expect(
+      await failure(
+        createPakFixture({
+          layout: "v11",
+          files: [],
+          mountPoint: "M".repeat(64),
+        }).bytes,
+        { ...LIMITS, pathChars: 32 },
+      ),
+    ).toEqual({ reason: "paths-too-large", kind: "resource" });
+  });
+
   it("lists a large path-hash-only index", async () => {
     const files = Array.from({ length: 200_000 }, (_, at) => ({
       path: `D/${at}`,

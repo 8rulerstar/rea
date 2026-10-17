@@ -50,6 +50,11 @@ export interface PakFixtureOptions {
   readonly firstReference?: number;
   /** Move the last file's recorded offset by this many bytes. */
   readonly lastOffsetShift?: number;
+  /**
+   * Version 10+: append one unlisted encoded record at this data offset and
+   * point the first path-hash row at it, leaving the directory listings intact.
+   */
+  readonly strayHashOffset?: number;
   /** Version 10+: empty directories added to the full directory index. */
   readonly emptyDirectories?: number;
 }
@@ -249,6 +254,16 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     });
     if (options.firstReference !== undefined)
       references[0] = options.firstReference;
+    const hashReferences = [...references];
+    if (options.strayHashOffset !== undefined) {
+      hashReferences[0] = encodedLength;
+      encodedParts.push(
+        encodedRecord({
+          ...placed[0]!,
+          offset: options.strayHashOffset,
+        }),
+      );
+    }
     const encoded = Buffer.concat(encodedParts);
     // Region offsets are absolute, after the data area and the main index.
     const directories = new Map<string, [string, number][]>();
@@ -280,7 +295,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       u32(placed.length),
       ...placed.flatMap((file, at) => [
         u64(fnv64(file.path)),
-        i32(references[at]!),
+        i32(hashReferences[at]!),
       ]),
       // An empty pruned directory index, as repak writes it.
       u32(0),
