@@ -1,9 +1,10 @@
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactFileCleanupFailure,
   bindArtifactFileCleanup,
+  artifactFileCancellationCause,
 } from "../artifacts/ArtifactFileOperation.js";
-import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
-import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { readStableArtifactRanges } from "../artifacts/readStableArtifact.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
@@ -26,7 +27,12 @@ import {
   type UnrealPak,
   type UnrealPakProviderInput,
 } from "../domain/unreal/unrealPak.js";
-import { readUnrealPak, UnrealPakFormatFailure } from "./UnrealPakFile.js";
+import { jsonStringLength } from "../domain/jsonStringLength.js";
+import {
+  readUnrealPak,
+  UnrealPakFormatFailure,
+  type UnrealPakDecoded,
+} from "./UnrealPakFile.js";
 
 /** Bundled format reader identity; the pak version is a separate observed fact. */
 export const UNREAL_PAK_PROVIDER_IDENTITY = {
@@ -56,6 +62,29 @@ const ENTRY_ROW = JSON.stringify({
   record: "full",
 }).length;
 
+/**
+ * A lower bound on the serialized mount point and entry rows. Escaping can make
+ * a string six times longer than the index bytes it came from, so this refuses
+ * from escaped lengths before JSON.stringify builds a string the budget would
+ * reject, and returns as soon as the bound passes `limit`.
+ */
+const serializedLowerBound = (decoded: UnrealPakDecoded, limit: number) => {
+  let total =
+    decoded.index.state === "decoded"
+      ? jsonStringLength(decoded.index.mount_point, limit)
+      : 0;
+  for (const entry of decoded.entries) {
+    if (total > limit) return total;
+    // ENTRY_ROW already counts a null path as four characters.
+    total +=
+      ENTRY_ROW +
+      (entry.path === null
+        ? 0
+        : jsonStringLength(entry.path, limit - total) - "null".length);
+  }
+  return total;
+};
+
 const LIMITATIONS = [
   "Only the footer and index of pak versions 1 to 12 are decoded; entry paths, offsets, sizes and compression names are observed index content. File data is not read, decompressed or extracted.",
   "Encrypted indexes are reported as encrypted with their footer facts only; no key is accepted and nothing is decrypted. Version 9 frozen indexes are unsupported.",
@@ -73,8 +102,9 @@ const failureForPrimary = (
       cause,
     });
   if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
-    return new AnalysisCancelledError(OPERATION, { cause });
-  if (signal?.aborted) return new AnalysisCancelledError(OPERATION, { cause });
+    return new AnalysisCancelledError(OPERATION, {
+      cause: artifactFileCancellationCause(cause),
+    });
   if (cause instanceof UnrealPakFormatFailure) {
     if (cause.kind === "unsupported")
       return new AnalysisUnsupportedTargetError(
@@ -99,10 +129,15 @@ const failureForPrimary = (
       },
     ]);
   }
-  if (
-    cause instanceof ArtifactReaderFailure &&
-    (cause.reason === "path" || cause.reason === "limit")
-  )
+  if (cause instanceof ArtifactReaderFailure && cause.reason === "limit")
+    return new AnalysisResourceConstraintError(
+      OPERATION,
+      "file-size",
+      cause.message,
+      { maximum_input_bytes: Number.MAX_SAFE_INTEGER },
+      { cause },
+    );
+  if (cause instanceof ArtifactReaderFailure && cause.reason === "path")
     return new AnalysisInputError(OPERATION, { cause }, [
       { path: ["path"], reason: "invalid_format", message: cause.message },
     ]);
@@ -124,6 +159,8 @@ const failureForPrimary = (
         },
       ]);
   }
+  // A decoder interrupted by cancellation can fail in any way; report the cancellation.
+  if (signal?.aborted) return new AnalysisCancelledError(OPERATION, { cause });
   return new ProviderAdapterError(UNREAL_PAK_PROVIDER_IDENTITY.id, OPERATION, {
     cause,
     diagnostics: {
@@ -223,6 +260,8 @@ export class UnrealPakProvider implements UnrealPakPort {
         ),
       );
       options?.signal?.throwIfAborted();
+      if (serializedLowerBound(decoded, limit) > limit)
+        throw outputLimit(input.path, limit);
       const report = {
         ...decoded,
         artifact: { path: input.path, sha256, bytes },

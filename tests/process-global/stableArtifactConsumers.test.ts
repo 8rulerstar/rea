@@ -59,12 +59,14 @@ import { ArtifactReaderFailure } from "../../src/artifacts/ArtifactReader.js";
 import { GoBinaryProvider } from "../../src/go/GoBinaryProvider.js";
 import { PeResourcesProvider } from "../../src/native/pe/PeResourcesProvider.js";
 import { Il2cppMetadataProvider } from "../../src/il2cpp/Il2cppMetadataProvider.js";
+import { UnrealPakProvider } from "../../src/unreal/UnrealPakProvider.js";
 import { inspectPeResourcesInputSchema } from "../../src/domain/native/peResources.js";
 import { peResourceFixture } from "../../src/native/pe/PeResources.fixture.js";
 import { createServer } from "../../src/server/createServer.js";
 import { createTestBinarySession } from "../fixtures/binarySession.js";
 import { createRustImage } from "../fixtures/rust/image.js";
 import { createIl2cppMetadataFixture } from "../fixtures/il2cpp/metadata.js";
+import { createPakFixture } from "../fixtures/unreal/pak.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 import { parseMcpToolError } from "../fixtures/mcpToolError.js";
 import { mcpTest } from "../support/mcp/mcpFixture.js";
@@ -83,6 +85,7 @@ const staticProviders = [
   ["Go", () => new GoBinaryProvider()],
   ["PE", () => new PeResourcesProvider()],
   ["IL2CPP metadata", () => new Il2cppMetadataProvider()],
+  ["Unreal pak", () => new UnrealPakProvider()],
 ] as const;
 
 const expectIl2cppSource = (
@@ -112,6 +115,8 @@ it.each(staticProviders)(
       await writeFile(path, peResourceFixture().bytes);
     if (provider instanceof Il2cppMetadataProvider)
       await writeFile(path, createIl2cppMetadataFixture().bytes);
+    if (provider instanceof UnrealPakProvider)
+      await writeFile(path, createPakFixture({ layout: "v11" }).bytes);
     const controller = new AbortController();
     const reason = new Error("cancel during confirmed descriptor close");
     fault.blockNew = false;
