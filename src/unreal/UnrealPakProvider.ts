@@ -1,3 +1,7 @@
+import {
+  ArtifactFileCleanupFailure,
+  bindArtifactFileCleanup,
+} from "../artifacts/ArtifactFileOperation.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { readStableArtifactRanges } from "../artifacts/readStableArtifact.js";
@@ -134,7 +138,13 @@ const failureFor = (
   path: string,
   signal?: AbortSignal,
 ): AnalysisError => {
-  const primary = failureForPrimary(cause, path, signal);
+  const primary =
+    cause instanceof ArtifactFileCleanupFailure &&
+    cause.fileCleanupFailure.outcome.kind === "failed"
+      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path, signal)
+      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
+        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
+        : failureForPrimary(cause, path, signal);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -143,7 +153,9 @@ const failureFor = (
     { reason: cause.cleanup.reason },
     { operation: OPERATION, cause },
   );
-  return analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
+  const error = analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
+  bindArtifactFileCleanup(cause, error);
+  return error;
 };
 
 const outputLimit = (path: string, maximumBytes: number) =>
@@ -162,8 +174,24 @@ export class UnrealPakProvider implements UnrealPakPort {
   /** `outputBytes` exists so tests can reach the guard with small files. */
   constructor(private readonly outputBytes: number = OUTPUT_BYTES) {}
 
-  close(): Promise<void> {
-    return this.#resources.close();
+  async close(): Promise<void> {
+    try {
+      await this.#resources.close();
+    } catch (cause: unknown) {
+      if (
+        !(cause instanceof ArtifactReaderFailure) ||
+        cause.cleanup === undefined
+      )
+        throw cause;
+      const error = new ProviderCleanupError(
+        UNREAL_PAK_PROVIDER_IDENTITY.id,
+        cause.cleanup.resources,
+        { reason: cause.cleanup.reason },
+        { cause, operation: OPERATION },
+      );
+      bindArtifactFileCleanup(cause, error);
+      throw error;
+    }
   }
 
   /** Read the footer and index of one stable file snapshot and hash the whole file. */
@@ -200,7 +228,15 @@ export class UnrealPakProvider implements UnrealPakPort {
         artifact: { path: input.path, sha256, bytes },
         limitations: LIMITATIONS,
       };
-      if (Buffer.byteLength(JSON.stringify(report), "utf8") > limit)
+      let serialized: string;
+      try {
+        serialized = JSON.stringify(report);
+      } catch (cause: unknown) {
+        // Escaped text can pass the character budget and still exceed V8's string limit.
+        if (cause instanceof RangeError) throw outputLimit(input.path, limit);
+        throw cause;
+      }
+      if (Buffer.byteLength(serialized, "utf8") > limit)
         throw outputLimit(input.path, limit);
       const parsed = unrealPakSchema.safeParse(report);
       if (!parsed.success)
