@@ -1,10 +1,16 @@
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import {
+  ArtifactFileCleanupFailure,
+  bindArtifactFileCleanup,
+  artifactFileCancellationCause,
+} from "../artifacts/ArtifactFileOperation.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type { Il2cppMetadataPort } from "../application/il2cpp/Il2cppMetadataPort.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { jsonStringLength } from "../domain/jsonStringLength.js";
 import {
   AnalysisAccessDeniedError,
   AnalysisArtifactChangedError,
@@ -59,29 +65,6 @@ const TYPE_ROW = rowOverhead({
 const METHOD_ROW = rowOverhead({ name: "", declaring_type: 0 });
 
 /**
- * JSON.stringify(value).length, counted without building the escaped string,
- * which for control characters is six times the name. Counting stops once it
- * passes `budget`, so the result is then only known to exceed it.
- */
-const jsonStringLength = (value: string, budget: number): number => {
-  let length = EMPTY_NAME;
-  for (let index = 0; index < value.length && length <= budget; index += 1) {
-    const unit = value.charCodeAt(index);
-    if (unit === 0x22 || unit === 0x5c) length += 2;
-    else if (unit < 0x20)
-      length += [0x08, 0x09, 0x0a, 0x0c, 0x0d].includes(unit) ? 2 : 6;
-    else if (unit >= 0xd800 && unit <= 0xdfff) {
-      const next = value.charCodeAt(index + 1);
-      if (unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
-        length += 2;
-        index += 1;
-      } else length += 6;
-    } else length += 1;
-  }
-  return length;
-};
-
-/**
  * A lower bound on the serialized rows. Rows share decoded names, so the
  * report can be far larger than the file; refusing from this bound avoids
  * building a string the budget would reject anyway. Once the bound passes
@@ -128,8 +111,9 @@ const failureForPrimary = (
       cause,
     });
   if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
-    return new AnalysisCancelledError(OPERATION, { cause });
-  if (signal?.aborted) return new AnalysisCancelledError(OPERATION, { cause });
+    return new AnalysisCancelledError(OPERATION, {
+      cause: artifactFileCancellationCause(cause),
+    });
   if (cause instanceof Il2cppMetadataFormatFailure)
     return cause.kind === "unsupported"
       ? new AnalysisUnsupportedTargetError(OPERATION, path, cause.message, {
@@ -174,6 +158,8 @@ const failureForPrimary = (
         },
       ]);
   }
+  // A decoder interrupted by cancellation can fail in any way; report the cancellation.
+  if (signal?.aborted) return new AnalysisCancelledError(OPERATION, { cause });
   return new ProviderAdapterError(
     IL2CPP_METADATA_PROVIDER_IDENTITY.id,
     OPERATION,
@@ -192,7 +178,13 @@ const failureFor = (
   path: string,
   signal?: AbortSignal,
 ): AnalysisError => {
-  const primary = failureForPrimary(cause, path, signal);
+  const primary =
+    cause instanceof ArtifactFileCleanupFailure &&
+    cause.fileCleanupFailure.outcome.kind === "failed"
+      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path, signal)
+      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
+        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
+        : failureForPrimary(cause, path, signal);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -201,7 +193,9 @@ const failureFor = (
     { reason: cause.cleanup.reason },
     { operation: OPERATION, cause },
   );
-  return analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
+  const error = analysisErrorWithCleanupFailure(primary, cleanup, OPERATION);
+  bindArtifactFileCleanup(cause, error);
+  return error;
 };
 
 const outputLimit = (path: string, maximumBytes: number) =>
@@ -226,8 +220,24 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
   /** `outputBytes` exists so tests can reach the guard with small files. */
   constructor(private readonly outputBytes: number = OUTPUT_BYTES) {}
 
-  close(): Promise<void> {
-    return this.#resources.close();
+  async close(): Promise<void> {
+    try {
+      await this.#resources.close();
+    } catch (cause: unknown) {
+      if (
+        !(cause instanceof ArtifactReaderFailure) ||
+        cause.cleanup === undefined
+      )
+        throw cause;
+      const error = new ProviderCleanupError(
+        IL2CPP_METADATA_PROVIDER_IDENTITY.id,
+        cause.cleanup.resources,
+        { reason: cause.cleanup.reason },
+        { cause, operation: OPERATION },
+      );
+      bindArtifactFileCleanup(cause, error);
+      throw error;
+    }
   }
 
   /** Read every image, type and method name from one stable file snapshot. */
