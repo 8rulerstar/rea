@@ -4,7 +4,7 @@ import { jsonStringLength } from "./jsonStringLength.js";
 it.each([
   "",
   "Assembly-CSharp.dll",
-  '"quoted" \ back\slash',
+  '"quoted" \\ back\\slash',
   "\b\f\n\r\t",
   "\u0000\u0001\u001f\u007f",
   "한국어 ünïcödé",
