@@ -11,8 +11,12 @@ afterEach(() => {
 });
 
 /** Version 29 file whose methods all share one long name. */
-const sharedNameMetadata = (nameBytes: number, methods: number) => {
-  const name = Buffer.alloc(nameBytes + 1, "A");
+const sharedNameMetadata = (
+  nameBytes: number,
+  methods: number,
+  fill = 0x41,
+) => {
+  const name = Buffer.alloc(nameBytes + 1, fill);
   name[nameBytes] = 0;
   const records = Buffer.alloc(methods * 32);
   for (let index = 0; index < methods; index += 1)
@@ -51,6 +55,50 @@ it("refuses an oversized report from its row lower bound before serializing it",
     ).toBe(false);
   } finally {
     await provider.close();
+  }
+});
+
+it("counts escaped name characters toward the budget without escaping the name", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-provider-escape-");
+  const path = join(root, "global-metadata.dat");
+  // 4 KiB of U+0001 is 4 KiB raw but 24 KiB once escaped as .
+  await writeFile(path, sharedNameMetadata(4096, 1, 0x01));
+  const stringify = vi.spyOn(JSON, "stringify");
+  const provider = new Il2cppMetadataProvider(8192);
+  try {
+    const result = await provider.inspect({ path });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
+    expect(
+      stringify.mock.calls.some(
+        ([value]) => typeof value === "string" && value.length >= 4096,
+      ),
+    ).toBe(false);
+  } finally {
+    await provider.close();
+  }
+});
+
+it("admits a report whose escaped names fit the budget exactly", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-provider-fit-");
+  const path = join(root, "global-metadata.dat");
+  await writeFile(path, sharedNameMetadata(4096, 1, 0x01));
+  const unbounded = new Il2cppMetadataProvider();
+  let bytes: number;
+  try {
+    const result = await unbounded.inspect({ path });
+    if (!result.ok) throw result.error;
+    expect(result.value.methods[0]?.name).toBe("".repeat(4096));
+    bytes = Buffer.byteLength(JSON.stringify(result.value));
+  } finally {
+    await unbounded.close();
+  }
+  const exact = new Il2cppMetadataProvider(bytes);
+  try {
+    expect((await exact.inspect({ path })).ok).toBe(true);
+  } finally {
+    await exact.close();
   }
 });
 

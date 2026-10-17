@@ -59,26 +59,61 @@ const TYPE_ROW = rowOverhead({
 const METHOD_ROW = rowOverhead({ name: "", declaring_type: 0 });
 
 /**
+ * JSON.stringify(value).length, counted without building the escaped string,
+ * which for control characters is six times the name. Counting stops once it
+ * passes `budget`, so the result is then only known to exceed it.
+ */
+const jsonStringLength = (value: string, budget: number): number => {
+  let length = EMPTY_NAME;
+  for (let index = 0; index < value.length && length <= budget; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit === 0x22 || unit === 0x5c) length += 2;
+    else if (unit < 0x20)
+      length += [0x08, 0x09, 0x0a, 0x0c, 0x0d].includes(unit) ? 2 : 6;
+    else if (unit >= 0xd800 && unit <= 0xdfff) {
+      const next = value.charCodeAt(index + 1);
+      if (unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+        length += 2;
+        index += 1;
+      } else length += 6;
+    } else length += 1;
+  }
+  return length;
+};
+
+/**
  * A lower bound on the serialized rows. Rows share decoded names, so the
  * report can be far larger than the file; refusing from this bound avoids
- * building a string the budget would reject anyway.
+ * building a string the budget would reject anyway. Once the bound passes
+ * `limit` it returns early, so no single name is escaped past the budget.
  */
-const serializedRowsLowerBound = (decoded: Il2cppMetadataDecoded) => {
+const serializedRowsLowerBound = (
+  decoded: Il2cppMetadataDecoded,
+  limit: number,
+) => {
   const lengths = new Map<string, number>();
+  let total = 0;
   const text = (value: string) => {
     let length = lengths.get(value);
     if (length === undefined) {
       // UTF-16 code units never exceed UTF-8 bytes.
-      length = JSON.stringify(value).length;
+      length = jsonStringLength(value, limit - total);
       lengths.set(value, length);
     }
     return length;
   };
-  let total = 0;
-  for (const image of decoded.images) total += IMAGE_ROW + text(image.name);
-  for (const type of decoded.types)
+  for (const image of decoded.images) {
+    total += IMAGE_ROW + text(image.name);
+    if (total > limit) return total;
+  }
+  for (const type of decoded.types) {
     total += TYPE_ROW + text(type.name) + text(type.namespace);
-  for (const method of decoded.methods) total += METHOD_ROW + text(method.name);
+    if (total > limit) return total;
+  }
+  for (const method of decoded.methods) {
+    total += METHOD_ROW + text(method.name);
+    if (total > limit) return total;
+  }
   return total;
 };
 
@@ -218,7 +253,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             throw outputLimit(input.path, limit);
         },
       });
-      if (serializedRowsLowerBound(decoded) > limit)
+      if (serializedRowsLowerBound(decoded, limit) > limit)
         throw outputLimit(input.path, limit);
       const report = {
         ...decoded,
