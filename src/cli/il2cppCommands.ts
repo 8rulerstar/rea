@@ -1,5 +1,5 @@
+import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
-import { resolve } from "node:path";
 import { createIl2cppMetadataService } from "../composition/il2cpp.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
@@ -32,12 +32,13 @@ export const registerIl2cppCommands = (
               () =>
                 service.inspect(
                   // One-shot CLI runs retain no Evidence for later views.
-                  { path: resolve(args.path), detail: "complete" },
+                  { path: absoluteCallerPath(args.path), detail: "complete" },
                   { signal },
                 ),
               service,
               "il2cpp-metadata",
               "inspect_il2cpp_metadata",
+              signal,
             ),
         );
       }),
