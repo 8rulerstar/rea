@@ -89,7 +89,10 @@ export const applyElfRelativeRelocations = (image: Buffer): Buffer => {
   ) {
     const tag = image.readBigInt64LE(at);
     if (tag === DT_NULL) break;
-    if (tags.has(tag) && tag === DT_RELA)
+    if (
+      tags.has(tag) &&
+      (tag === DT_RELA || tag === DT_RELASZ || tag === DT_RELAENT)
+    )
       throw malformed(`duplicate dynamic tag ${tag}`);
     tags.set(tag, image.readBigUInt64LE(at + 8));
   }
@@ -109,7 +112,7 @@ export const applyElfRelativeRelocations = (image: Buffer): Buffer => {
   if (relaAddress !== undefined) {
     const size = Number(tags.get(DT_RELASZ) ?? -1n);
     const entry = Number(tags.get(DT_RELAENT) ?? 24n);
-    if (size < 0 || entry !== 24)
+    if (size < 0 || entry !== 24 || size % entry !== 0)
       throw malformed("invalid DT_RELASZ or DT_RELAENT");
     const start = fileOffset(relaAddress, size);
     if (start === null) throw malformed("DT_RELA table is not file-backed");

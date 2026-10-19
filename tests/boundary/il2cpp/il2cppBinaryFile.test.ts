@@ -163,6 +163,27 @@ it("refuses an image name repeated past the search bound", () => {
   });
 });
 
+it.each([
+  [{ duplicateRela: true }],
+  [{ relaEntry: 16n }],
+  [{ relaSize: 25n }],
+] as const)("rejects malformed ELF relocation tables (%o)", (options) => {
+  expect(
+    failure(createElfFixture(createIl2cppBinaryFixture(), options)),
+  ).toEqual({ reason: "malformed-container", kind: "malformed" });
+});
+
+it("does not apply symbol relocations as RELATIVE ones", () => {
+  // With every slot left zero, no module table can be found.
+  expect(() =>
+    link(
+      createElfFixture(createIl2cppBinaryFixture(), {
+        symbolRelocations: true,
+      }),
+    ),
+  ).toThrow(Il2cppBinaryFormatFailure);
+});
+
 it("finds image names padded with 0xFF as MSVC writes them", () => {
   expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
     link(createIl2cppBinaryFixture()),

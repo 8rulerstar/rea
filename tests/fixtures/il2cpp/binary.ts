@@ -183,6 +183,13 @@ export interface ElfFixtureOptions {
   readonly androidPacked?: boolean;
   /** Omit PT_DYNAMIC. */
   readonly dynamic?: boolean;
+  /** Give every relocation a symbol index, so none is RELATIVE-only. */
+  readonly symbolRelocations?: boolean;
+  /** Write DT_RELA twice. */
+  readonly duplicateRela?: boolean;
+  /** Override DT_RELASZ or DT_RELAENT. */
+  readonly relaSize?: bigint;
+  readonly relaEntry?: bigint;
 }
 
 /**
@@ -210,13 +217,19 @@ export const createElfFixture = (
   const rela = Buffer.alloc(relocations.length * 24);
   relocations.forEach(([slot, value], index) => {
     rela.writeBigUInt64LE(slot, index * 24);
-    rela.writeBigUInt64LE(1027n, index * 24 + 8);
+    rela.writeBigUInt64LE(
+      options.symbolRelocations === true ? (1n << 32n) | 1027n : 1027n,
+      index * 24 + 8,
+    );
     rela.writeBigInt64LE(value, index * 24 + 16);
   });
   const tags: [bigint, bigint][] = [
     [7n, FIXTURE_BINARY_BASE + BigInt(SIZE)],
-    [8n, BigInt(rela.length)],
-    [9n, 24n],
+    ...(options.duplicateRela === true
+      ? [[7n, FIXTURE_BINARY_BASE + BigInt(SIZE)] as [bigint, bigint]]
+      : []),
+    [8n, options.relaSize ?? BigInt(rela.length)],
+    [9n, options.relaEntry ?? 24n],
     ...(options.androidPacked === true
       ? [[0x60000011n, 0n] as [bigint, bigint]]
       : []),

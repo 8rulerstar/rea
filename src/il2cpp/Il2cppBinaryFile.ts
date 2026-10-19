@@ -183,7 +183,16 @@ const openImage = (
   const imageBase =
     container.format === "pe"
       ? readPeImageBase(image)
-      : (container.mappings.find((mapping) => mapping.offset === 0)?.address ??
+      : // The segment holding the file start; without one, the lowest load
+        // address, which is where Ghidra's loaders place the image.
+        (container.mappings.find((mapping) => mapping.offset === 0)?.address ??
+        container.mappings.reduce<bigint | undefined>(
+          (lowest, mapping) =>
+            lowest === undefined || mapping.address < lowest
+              ? mapping.address
+              : lowest,
+          undefined,
+        ) ??
         0n);
   return { bytes: image, container, imageBase };
 };
@@ -222,6 +231,8 @@ const isMapped = (image: NativeImage, address: bigint, size: number) => {
 // A real image name occurs a few times at most; a bound keeps a crafted image
 // from filling the address map.
 const NAME_OCCURRENCES = 4096;
+// Real images hold a handful of matches per image; this bounds the whole map.
+const TOTAL_NAME_OCCURRENCES = 65536;
 
 /** Bytes that can appear inside an assembly file name. */
 const isNameByte = (byte: number) =>
@@ -238,35 +249,56 @@ const isNameByte = (byte: number) =>
  * The preceding byte only has to be outside the name alphabet: compilers pad
  * between strings with NUL, or with 0xFF as MSVC does, and a name byte there
  * would mean this is the tail of a longer name (System.dll in Mono.System.dll).
+ * One pass over each mapping reads the name-alphabet run before every NUL and
+ * looks it up, so the cost does not grow with the image count. Names with a
+ * byte outside the alphabet (a space, say) are therefore never found.
  */
 const nameAddresses = (
   image: NativeImage,
   names: readonly string[],
 ): Map<bigint, number> => {
-  const found = new Map<bigint, number>();
-  const hits = names.map(() => 0);
+  const byName = new Map<string, number>();
+  let longest = 0;
   for (const [index, name] of names.entries()) {
     // An empty name would match every NUL in the image.
     if (name === "") continue;
-    const needle = Buffer.concat([Buffer.from(name, "utf8"), Buffer.of(0)]);
-    for (const mapping of image.container.mappings) {
-      const region = image.bytes.subarray(
-        mapping.offset,
-        mapping.offset + mapping.size,
-      );
-      for (
-        let at = region.indexOf(needle);
-        at >= 0;
-        at = region.indexOf(needle, at + 1)
+    byName.set(name, index);
+    longest = Math.max(longest, Buffer.byteLength(name, "utf8"));
+  }
+  const found = new Map<bigint, number>();
+  const hits = names.map(() => 0);
+  for (const mapping of image.container.mappings) {
+    const region = image.bytes.subarray(
+      mapping.offset,
+      mapping.offset + mapping.size,
+    );
+    for (
+      let end = region.indexOf(0);
+      end >= 0;
+      end = region.indexOf(0, end + 1)
+    ) {
+      let begin = end;
+      while (
+        begin > 0 &&
+        end - begin <= longest &&
+        isNameByte(region[begin - 1]!)
       )
-        if (at === 0 || !isNameByte(region[at - 1]!)) {
-          found.set(mapping.address + BigInt(at), index);
-          if (++hits[index]! > NAME_OCCURRENCES)
-            throw new Il2cppBinaryFormatFailure(
-              "ambiguous-code-gen-module",
-              `image name ${name} occurs more than ${NAME_OCCURRENCES} times`,
-            );
-        }
+        begin--;
+      // A run longer than every name, or none at all, names no image.
+      if (begin === end || end - begin > longest) continue;
+      const index = byName.get(region.toString("utf8", begin, end));
+      if (index === undefined) continue;
+      found.set(mapping.address + BigInt(begin), index);
+      if (found.size > TOTAL_NAME_OCCURRENCES)
+        throw new Il2cppBinaryFormatFailure(
+          "ambiguous-code-gen-module",
+          `image names occur more than ${TOTAL_NAME_OCCURRENCES} times in total`,
+        );
+      if (++hits[index]! > NAME_OCCURRENCES)
+        throw new Il2cppBinaryFormatFailure(
+          "ambiguous-code-gen-module",
+          `image name ${names[index]} occurs more than ${NAME_OCCURRENCES} times`,
+        );
     }
   }
   return found;

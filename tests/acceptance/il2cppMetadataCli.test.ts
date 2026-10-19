@@ -319,6 +319,17 @@ cliTest(
     await writeFile(seeds, "kept\n");
     const again = await run(seeds);
     expect(again.exitCode).not.toBe(0);
+    expect(again.json).toMatchObject({
+      code: "invalid_request",
+      details: {
+        issues: [
+          {
+            path: ["ghidra_seeds"],
+            message: expect.stringContaining("already exists"),
+          },
+        ],
+      },
+    });
     expect(await readFile(seeds, "utf8")).toBe("kept\n");
 
     const unlinked = await cli.run({
@@ -331,5 +342,16 @@ cliTest(
       ],
     });
     expect(unlinked.exitCode).not.toBe(0);
+    expect(unlinked.json).toMatchObject({
+      code: "invalid_request",
+      details: {
+        issues: [
+          {
+            path: ["ghidra_seeds"],
+            message: expect.stringContaining("needs --binary"),
+          },
+        ],
+      },
+    });
   },
 );

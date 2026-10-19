@@ -106,6 +106,21 @@ export const registerIl2cppCommands = (
                   options.ghidraSeeds === undefined
                     ? undefined
                     : absoluteCallerPath(options.ghidraSeeds);
+                if (seedPath !== undefined && options.binary === undefined)
+                  return err(
+                    new AnalysisInputError(
+                      "inspect_il2cpp_metadata",
+                      undefined,
+                      [
+                        {
+                          path: ["ghidra_seeds"],
+                          reason: "invalid_value",
+                          message:
+                            "--ghidra-seeds needs --binary to link method addresses.",
+                        },
+                      ],
+                    ),
+                  );
                 if (
                   seedPath !== undefined &&
                   (await lstat(seedPath).catch(() => undefined)) !== undefined
