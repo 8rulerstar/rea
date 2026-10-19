@@ -150,7 +150,7 @@ Checked builds: macOS arm64 and x86_64 slices from Unity 2021.3.45f2, 2022.3.30f
 against `libil2cpp.sym.so`; Windows x64 from 2023.2.13f1 (metadata version 29,
 an MIT-licensed game) against Il2CppDumper, where all 43,198 linked methods
 share an address with a same-named Il2CppDumper method and identical code
-folding groups 10,448 methods into 1,735 addresses.
+folding groups 10,448 methods into 1,735 addresses. A macOS x86_64 build from Unity 2020.3.49f1 (metadata version 27, which Il2CppDumper reads as 27.1) links 10,555 methods, all at addresses where Il2CppDumper names the same method; its other addresses are generic instances.
 
 The result adds:
 
