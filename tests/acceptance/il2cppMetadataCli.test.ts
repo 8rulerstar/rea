@@ -244,6 +244,7 @@ cliTest(
       path,
       binary_path: binaryPath,
       binary_architecture: "arm64",
+      detail: "summary",
     });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
     const view = il2cppMetadataSummaryViewResultSchema.parse(

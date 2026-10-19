@@ -118,6 +118,19 @@ it.each<
   expect(failure(createIl2cppBinaryFixture(options))).toEqual({ reason, kind });
 });
 
+it("finds image names padded with 0xFF as MSVC writes them", () => {
+  expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
+    link(createIl2cppBinaryFixture()),
+  );
+});
+
+it("does not take an image name from the tail of a longer name", () => {
+  expect(failure(createIl2cppBinaryFixture({ namePrefix: "Mono." }))).toEqual({
+    reason: "code-gen-modules-not-found",
+    kind: "malformed",
+  });
+});
+
 it("links an ELF shared object after applying its RELATIVE relocations", () => {
   const elf = createElfFixture(createIl2cppBinaryFixture());
   const fromMacho = link(createIl2cppBinaryFixture());

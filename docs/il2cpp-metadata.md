@@ -133,6 +133,20 @@ whose count equals the image's method count. It then requires exactly one
 symbols are needed, so stripped builds work. A method's token row id selects its
 slot in the module's method pointer array.
 
+Name strings may be padded with NUL or, as MSVC writes them, with `0xFF`; a
+name byte directly before a match means it is the tail of a longer name and is
+not used. Some builds have no static pointer to the module array: a Linux x86-64
+`GameAssembly.so` from Unity 2023.2.13f1 lists every module but keeps no
+`codeGenModules` pointer in its data or relocations, so it fails with
+`code-registration-not-found` (Il2CppDumper also fails to link that file).
+
+Checked builds: macOS arm64 from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
+6000.0.84f1 against dSYM symbols; Android arm64 and x86-64 from 2022.3.62f3
+against `libil2cpp.sym.so`; Windows x64 from 2023.2.13f1 (metadata version 29,
+an MIT-licensed game) against Il2CppDumper, where all 43,198 linked methods
+share an address with a same-named Il2CppDumper method and identical code
+folding groups 10,448 methods into 1,735 addresses.
+
 The result adds:
 
 - `binary`: artifact identity, `format`, `architecture`, `image_base`,

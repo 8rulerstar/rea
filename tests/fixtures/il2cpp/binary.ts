@@ -25,6 +25,10 @@ export interface Il2cppBinaryFixtureOptions {
   readonly codeRegistration?: boolean;
   /** Omit the MetadataRegistration type table. */
   readonly metadataRegistration?: boolean;
+  /** Byte written before each image name instead of NUL (MSVC pads with 0xFF). */
+  readonly namePadding?: number;
+  /** Text written directly before mscorlib.dll, making it the tail of a longer name. */
+  readonly namePrefix?: string;
 }
 
 /** Every fixture method returns type 0, an array of a generic instance. */
@@ -73,8 +77,11 @@ export const createIl2cppBinaryFixture = (
   }
   const names = ["Assembly-CSharp.dll", "mscorlib.dll"];
   const nameAt: number[] = [];
-  let cursor = STRINGS + 1;
+  let cursor = STRINGS;
   for (const name of names) {
+    bytes[cursor++] = options.namePadding ?? 0;
+    if (name === "mscorlib.dll" && options.namePrefix !== undefined)
+      cursor += bytes.write(options.namePrefix, cursor, "utf8");
     nameAt.push(cursor);
     cursor += bytes.write(`${name}\0`, cursor, "utf8");
   }

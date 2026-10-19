@@ -219,18 +219,29 @@ const isMapped = (image: NativeImage, address: bigint, size: number) => {
   }
 };
 
-/** Virtual addresses of every NUL-terminated occurrence of each image name. */
+/** Bytes that can appear inside an assembly file name. */
+const isNameByte = (byte: number) =>
+  (byte >= 0x30 && byte <= 0x39) ||
+  (byte >= 0x41 && byte <= 0x5a) ||
+  (byte >= 0x61 && byte <= 0x7a) ||
+  byte === 0x2e ||
+  byte === 0x2d ||
+  byte === 0x5f ||
+  (byte >= 0x80 && byte <= 0xf4); // UTF-8 never uses 0xF5 to 0xFF
+
+/**
+ * Virtual addresses of every NUL-terminated occurrence of each image name.
+ * The preceding byte only has to be outside the name alphabet: compilers pad
+ * between strings with NUL, or with 0xFF as MSVC does, and a name byte there
+ * would mean this is the tail of a longer name (System.dll in Mono.System.dll).
+ */
 const nameAddresses = (
   image: NativeImage,
   names: readonly string[],
 ): Map<bigint, number> => {
   const found = new Map<bigint, number>();
   for (const [index, name] of names.entries()) {
-    const needle = Buffer.concat([
-      Buffer.of(0),
-      Buffer.from(name, "utf8"),
-      Buffer.of(0),
-    ]);
+    const needle = Buffer.concat([Buffer.from(name, "utf8"), Buffer.of(0)]);
     for (const mapping of image.container.mappings) {
       const region = image.bytes.subarray(
         mapping.offset,
@@ -241,7 +252,8 @@ const nameAddresses = (
         at >= 0;
         at = region.indexOf(needle, at + 1)
       )
-        found.set(mapping.address + BigInt(at + 1), index);
+        if (at === 0 || !isNameByte(region[at - 1]!))
+          found.set(mapping.address + BigInt(at), index);
     }
   }
   return found;
