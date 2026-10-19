@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { absoluteCallerPath } from "../dist/filesystem/callerPath.js";
 import { toolContract } from "../dist/contracts/toolContracts.js";
 import { analysisViewResultSchema } from "../dist/domain/analysisView/analysisView.js";
 import { ArtifactResourceScope } from "../dist/artifacts/ArtifactResourceScope.js";
@@ -20,7 +21,7 @@ if (args.includes("--help") || args.includes("-h")) {
 }
 if (!(args.length === 0 || (args.length === 2 && args[0] === "--pak")))
   throw new Error("Expected --pak PATH");
-const path = args[1] === undefined ? null : resolve(args[1]);
+const path = args[1] === undefined ? null : absoluteCallerPath(args[1]);
 const operation = "inspect_unreal_pak";
 const contract = toolContract(operation);
 const entrypoint = resolve("scripts/rea.mjs");
