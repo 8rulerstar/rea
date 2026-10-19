@@ -274,6 +274,47 @@ cliTest(
 );
 
 cliTest(
+  "marks a module array found through an x86-64 instruction as derived",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-inlined-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "GameAssembly.so");
+    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(
+      binaryPath,
+      createElfFixture(
+        createIl2cppBinaryFixture({
+          codeRegistration: false,
+          codeReference: true,
+        }),
+        { machine: 62 },
+      ),
+    );
+    const result = await cli.run({
+      arguments: [
+        "inspect-il2cpp-metadata",
+        path,
+        "--binary",
+        binaryPath,
+        "--json",
+      ],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const report = il2cppMetadataSchema.parse(
+      toolContract("inspect_il2cpp_metadata").outputSchema.parse(result.json)
+        .normalized_result,
+    );
+    expect(report.binary?.code_gen_modules_field).toBeNull();
+    expect(
+      report.limitations.some((line) =>
+        line.includes("no static CodeRegistration"),
+      ),
+    ).toBe(true);
+  },
+  30000,
+);
+
+cliTest(
   "writes Ghidra function seeds for a linked ELF and refuses to overwrite them",
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-il2cpp-seeds-");

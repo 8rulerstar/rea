@@ -213,6 +213,24 @@ it.each([
   ).toBe("code-registration-not-found");
 });
 
+it("refuses to choose among too many candidate module arrays", () => {
+  const base = createIl2cppBinaryFixture({
+    codeRegistration: false,
+    codeReference: true,
+  });
+  // Copy the two-slot module array (16 bytes at 0x500) 80 times after the image.
+  const copies = Buffer.concat(
+    Array.from({ length: 80 }, () => base.subarray(0x500, 0x510)),
+  );
+  const crafted = Buffer.concat([base, copies]);
+  crafted.writeBigUInt64LE(BigInt(crafted.length), 64);
+  crafted.writeBigUInt64LE(BigInt(crafted.length), 80);
+  // Mach-O is arm64 in the fixture; relabel it x86-64 so the fallback runs.
+  crafted.writeUInt32LE(0x01000007, 4);
+  crafted.writeUInt32LE(3, 8);
+  expect(failure(crafted).reason).toBe("code-registration-not-found");
+});
+
 it("finds image names padded with 0xFF as MSVC writes them", () => {
   expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
     link(createIl2cppBinaryFixture()),

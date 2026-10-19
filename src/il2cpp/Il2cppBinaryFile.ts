@@ -419,6 +419,8 @@ const findCodeRegistration = (
  * one of them to be the target of a RIP-relative `lea`/`mov` (REX.W 8D/8B with
  * a disp32 operand). Anything else stays code-registration-not-found.
  */
+const MODULE_ARRAY_CANDIDATES = 64;
+
 const findModuleArrayByCode = (
   image: NativeImage,
   expected: ReadonlySet<bigint>,
@@ -435,6 +437,8 @@ const findModuleArrayByCode = (
         run.add(value);
         if (run.size === expected.size) {
           arrays.add(mapping.address + BigInt(runStart));
+          // A real image holds one such array; many mean a crafted image.
+          if (arrays.size > MODULE_ARRAY_CANDIDATES) return null;
           runStart = -1;
           run.clear();
         }

@@ -432,6 +432,12 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             : decoded.metadata_version === 27
               ? "Field, parameter and return type names are null for metadata version 27: versions 27.0 to 27.2 share that header number but place the Il2CppType byref flag differently, so a name could gain or lose & without warning; type indices are still reported."
               : "Field, parameter and return type names are rendered from the binary's Il2CppType table in a C#-like form (keywords for primitives, Namespace.Outer+Inner, generic parameters by metadata name); custom modifiers, array bounds and attributes are not reported.",
+          ...(linked.binary !== null &&
+          linked.binary.code_gen_modules_field === null
+            ? [
+                "This binary keeps no static CodeRegistration, so the module array (code_gen_modules_array) was derived from the single x86-64 instruction that loads it, not read from a registration structure; the module records and method pointers themselves are read from the binary.",
+              ]
+            : []),
           "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
         ],
       };

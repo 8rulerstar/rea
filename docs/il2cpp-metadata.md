@@ -186,20 +186,20 @@ Il2CppType byref flag in different bits, so a rendered name could gain or lose
 
 The builds checked are listed after the module search rules above.
 
-| Reason                            | Category    | Meaning                                                                                                        |
-| --------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------- |
-| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section).              |
-| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                                                    |
-| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.                                     |
-| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.                          |
-| `malformed-container`             | input error | The container headers are damaged.                                                                             |
-| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                                          |
-| `ambiguous-code-gen-module`       | input error | More than one record matches an image, or image names occur more than 4,096 times each or 65,536 times in all. |
-| `code-registration-not-found`     | input error | No single module table lists exactly the located records.                                                      |
-| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                                          |
-| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                                         |
-| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                              |
-| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.                        |
+| Reason                            | Category    | Meaning                                                                                                            |
+| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section).                  |
+| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                                                        |
+| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.                                         |
+| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.                              |
+| `malformed-container`             | input error | The container headers are damaged.                                                                                 |
+| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                                              |
+| `ambiguous-code-gen-module`       | input error | More than one record matches an image, or image names occur more than 4,096 times each or 65,536 times in all.     |
+| `code-registration-not-found`     | input error | No single module table lists exactly the located records, and on x86-64 no single instruction loads such an array. |
+| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                                              |
+| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                                             |
+| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                                  |
+| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.                            |
 
 Binary failures report `binary_path` as the input field. There is no partial
 linking: any failure returns no addresses. The binary is bounded to 1 GiB.
