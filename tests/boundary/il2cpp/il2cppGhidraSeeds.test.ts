@@ -76,6 +76,7 @@ const report: Il2cppMetadata = {
     architecture: "arm64",
     image_base: "0x0",
     code_gen_modules_field: "0x800",
+    code_gen_modules_array: "0x900",
     code_gen_modules: [{ image: 0, address: "0x700", method_pointer_count: 5 }],
     types_field: "0x900",
     types_count: 0,

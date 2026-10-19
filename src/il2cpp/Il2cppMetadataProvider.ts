@@ -266,7 +266,11 @@ const binaryReport = (
     format: link.format,
     architecture: link.architecture,
     image_base: hex(link.image_base),
-    code_gen_modules_field: hex(link.code_gen_modules_field),
+    code_gen_modules_field:
+      link.code_gen_modules_field === null
+        ? null
+        : hex(link.code_gen_modules_field),
+    code_gen_modules_array: hex(link.code_gen_modules_array),
     code_gen_modules: link.code_gen_modules.map((module) => ({
       image: module.image,
       address: hex(module.address),

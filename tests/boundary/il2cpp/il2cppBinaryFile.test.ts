@@ -38,6 +38,7 @@ it("links methods to code through module tokens, not metadata order", () => {
     architecture: "arm64",
     image_base: FIXTURE_BINARY_BASE,
     code_gen_modules_field: FIXTURE_BINARY_BASE + 0x600n,
+    code_gen_modules_array: FIXTURE_BINARY_BASE + 0x500n,
     code_gen_modules: [
       {
         image: 0,
@@ -182,6 +183,34 @@ it("does not apply symbol relocations as RELATIVE ones", () => {
       }),
     ),
   ).toThrow(Il2cppBinaryFormatFailure);
+});
+
+it("finds an x86-64 module array through the instruction that loads it", () => {
+  const inlined = createElfFixture(
+    createIl2cppBinaryFixture({ codeRegistration: false, codeReference: true }),
+    { machine: 62 },
+  );
+  const linked = link(inlined);
+  expect(linked.code_gen_modules_field).toBeNull();
+  expect(linked.code_gen_modules_array).toBe(FIXTURE_BINARY_BASE + 0x500n);
+  expect(linked.method_addresses).toEqual(
+    link(createElfFixture(createIl2cppBinaryFixture(), { machine: 62 }))
+      .method_addresses,
+  );
+});
+
+it.each([
+  ["no instruction loads the array", { machine: 62 }, { codeReference: false }],
+  ["the image is not x86-64", { machine: 183 }, { codeReference: true }],
+] as const)("keeps code-registration-not-found when %s", (_, elf, binary) => {
+  expect(
+    failure(
+      createElfFixture(
+        createIl2cppBinaryFixture({ codeRegistration: false, ...binary }),
+        elf,
+      ),
+    ).reason,
+  ).toBe("code-registration-not-found");
 });
 
 it("finds image names padded with 0xFF as MSVC writes them", () => {

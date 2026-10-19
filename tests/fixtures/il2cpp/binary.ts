@@ -23,6 +23,8 @@ export interface Il2cppBinaryFixtureOptions {
   readonly chainedFixups?: boolean;
   /** Omit the CodeRegistration module count and array pointer. */
   readonly codeRegistration?: boolean;
+  /** Write a RIP-relative `lea rax, [module array]`, as an inlined build loads it. */
+  readonly codeReference?: boolean;
   /** Omit the MetadataRegistration type table. */
   readonly metadataRegistration?: boolean;
   /** Byte written before each image name instead of NUL (MSVC pads with 0xFF). */
@@ -112,6 +114,12 @@ export const createIl2cppBinaryFixture = (
   if (options.duplicateModule === true) writeModule(DUPLICATE, 0, 3);
   bytes.writeBigUInt64LE(address(MODULES), MODULE_ARRAY);
   bytes.writeBigUInt64LE(address(MODULES + 0x40), MODULE_ARRAY + 8);
+  if (options.codeReference === true) {
+    // lea rax, [rip + disp32]; disp is relative to the next instruction.
+    const at = 0xc00;
+    bytes.set([0x48, 0x8d, 0x05], at);
+    bytes.writeInt32LE(MODULE_ARRAY - (at + 7), at + 3);
+  }
   if (options.codeRegistration !== false) {
     bytes.writeBigUInt64LE(2n, REGISTRATION);
     bytes.writeBigUInt64LE(address(MODULE_ARRAY), REGISTRATION + 8);
@@ -218,7 +226,8 @@ export const createElfFixture = (
   relocations.forEach(([slot, value], index) => {
     rela.writeBigUInt64LE(slot, index * 24);
     rela.writeBigUInt64LE(
-      options.symbolRelocations === true ? (1n << 32n) | 1027n : 1027n,
+      (options.symbolRelocations === true ? 1n << 32n : 0n) |
+        (options.machine === 62 ? 8n : 1027n),
       index * 24 + 8,
     );
     rela.writeBigInt64LE(value, index * 24 + 16);

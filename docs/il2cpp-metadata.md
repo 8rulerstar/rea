@@ -135,10 +135,15 @@ slot in the module's method pointer array.
 
 Name strings may be padded with NUL or, as MSVC writes them, with `0xFF`; a
 name byte directly before a match means it is the tail of a longer name and is
-not used. Some builds have no static pointer to the module array: a Linux x86-64
-`GameAssembly.so` from Unity 2023.2.13f1 lists every module but keeps no
-`codeGenModules` pointer in its data or relocations, so it fails with
-`code-registration-not-found` (Il2CppDumper also fails to link that file).
+not used. Some x86-64 builds keep no static CodeRegistration: in a Linux
+`GameAssembly.so` from Unity 2023.2.13f1 the compiler folded the module array
+and its count into the one loop that walks it, so no data word points at the
+array (Il2CppDumper fails to link that file). When no CodeRegistration pair is
+found on x86-64, the reader looks for pointer arrays listing exactly the located
+modules and accepts one only if exactly one such array is the target of a
+RIP-relative `lea` or `mov`; `code_gen_modules_field` is then `null`. Otherwise
+the result stays `code-registration-not-found`. On that Linux build all 42,605
+linked addresses are function starts in its `.eh_frame_hdr` table.
 
 Checked builds: macOS arm64 and x86_64 slices from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
 6000.0.84f1 against dSYM symbols; Android arm64 and x86-64 from 2022.3.62f3
@@ -150,7 +155,8 @@ folding groups 10,448 methods into 1,735 addresses.
 The result adds:
 
 - `binary`: artifact identity, `format`, `architecture`, `image_base`,
-  `code_gen_modules_field` (the address of `codeGenModulesCount`) and
+  `code_gen_modules_field` (the address of `codeGenModulesCount`, or `null` as
+  described above), `code_gen_modules_array` (the module pointer array) and
   `code_gen_modules` (`image`, record `address`, `method_pointer_count`);
 - `method_addresses`: one row per method index with `address` and `rva`
   (address minus `image_base`), both hexadecimal strings. Both are `null` when

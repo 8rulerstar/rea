@@ -65,8 +65,14 @@ export interface Il2cppBinaryLink {
   readonly format: "elf" | "macho" | "pe";
   readonly architecture: string;
   readonly image_base: bigint;
-  /** Address of the CodeRegistration field holding the module pointer array. */
-  readonly code_gen_modules_field: bigint;
+  /**
+   * Address of the CodeRegistration codeGenModulesCount field, or null when the
+   * build keeps no static CodeRegistration and the array was found through the
+   * one instruction that loads it (see findModuleArrayByCode).
+   */
+  readonly code_gen_modules_field: bigint | null;
+  /** Address of the code-generation module pointer array. */
+  readonly code_gen_modules_array: bigint;
   readonly code_gen_modules: readonly Il2cppCodeGenModule[];
   /** Native code address per metadata method index; null when the module has no body. */
   readonly method_addresses: readonly (bigint | null)[];
@@ -372,10 +378,10 @@ const findModules = (
 const findCodeRegistration = (
   image: NativeImage,
   modules: readonly Il2cppCodeGenModule[],
-): bigint => {
+): { readonly field: bigint | null; readonly array: bigint } => {
   const expected = new Set(modules.map((module) => module.address));
   const total = BigInt(modules.length);
-  const matches: bigint[] = [];
+  const matches: { field: bigint; array: bigint }[] = [];
   for (const mapping of image.container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
     for (let at = start; at + 16 <= mapping.size; at += 8) {
@@ -390,8 +396,12 @@ const findCodeRegistration = (
         seen.add(pointer);
       }
       if (seen.size === modules.length)
-        matches.push(mapping.address + BigInt(at));
+        matches.push({ field: mapping.address + BigInt(at), array });
     }
+  }
+  if (matches.length === 0 && image.container.architecture === "amd64") {
+    const array = findModuleArrayByCode(image, expected);
+    if (array !== null) return { field: null, array };
   }
   if (matches.length !== 1)
     throw new Il2cppBinaryFormatFailure(
@@ -399,6 +409,62 @@ const findCodeRegistration = (
       `${matches.length} CodeRegistration module tables list the ${modules.length} located modules`,
     );
   return matches[0]!;
+};
+
+/**
+ * Some x86-64 builds (a Unity 2023.2 Linux GameAssembly.so) keep no static
+ * CodeRegistration: the compiler folded the module array and its count into
+ * the one loop that walks it, so no data word points at the array. Find every
+ * pointer array that lists exactly the located modules, then require exactly
+ * one of them to be the target of a RIP-relative `lea`/`mov` (REX.W 8D/8B with
+ * a disp32 operand). Anything else stays code-registration-not-found.
+ */
+const findModuleArrayByCode = (
+  image: NativeImage,
+  expected: ReadonlySet<bigint>,
+): bigint | null => {
+  const arrays = new Set<bigint>();
+  for (const mapping of image.container.mappings) {
+    const start = Number((8n - (mapping.address % 8n)) % 8n);
+    let runStart = -1;
+    const run = new Set<bigint>();
+    for (let at = start; at + 8 <= mapping.size; at += 8) {
+      const value = image.bytes.readBigUInt64LE(mapping.offset + at);
+      if (expected.has(value) && !run.has(value)) {
+        if (runStart < 0) runStart = at;
+        run.add(value);
+        if (run.size === expected.size) {
+          arrays.add(mapping.address + BigInt(runStart));
+          runStart = -1;
+          run.clear();
+        }
+      } else {
+        runStart = -1;
+        run.clear();
+        if (expected.has(value)) {
+          runStart = at;
+          run.add(value);
+        }
+      }
+    }
+  }
+  if (arrays.size === 0) return null;
+  const referenced = new Set<bigint>();
+  for (const mapping of image.container.mappings) {
+    const bytes = image.bytes;
+    const end = mapping.offset + mapping.size - 7;
+    for (let at = mapping.offset; at < end; at++) {
+      const rex = bytes[at]!;
+      if ((rex & 0xfb) !== 0x48) continue; // REX.W, optionally REX.R
+      const opcode = bytes[at + 1]!;
+      if (opcode !== 0x8d && opcode !== 0x8b) continue;
+      if ((bytes[at + 2]! & 0xc7) !== 0x05) continue; // mod 00, rm 101: RIP + disp32
+      const next = mapping.address + BigInt(at - mapping.offset + 7);
+      const target = next + BigInt(bytes.readInt32LE(at + 3));
+      if (arrays.has(target)) referenced.add(target);
+    }
+  }
+  return referenced.size === 1 ? [...referenced][0]! : null;
 };
 
 /**
@@ -562,7 +628,7 @@ export const linkIl2cppBinary = (
   const version = metadata.metadata_version;
   const image = openImage(bytes, architecture);
   const modules = findModules(image, metadata);
-  const codeGenModulesField = findCodeRegistration(image, modules);
+  const registration_ = findCodeRegistration(image, modules);
   const methodImage = new Int32Array(metadata.methods.length).fill(-1);
   for (const [index, entry] of metadata.images.entries())
     for (let offset = 0; offset < entry.type_count; offset++) {
@@ -628,7 +694,8 @@ export const linkIl2cppBinary = (
     format: image.container.format,
     architecture: image.container.architecture,
     image_base: image.imageBase,
-    code_gen_modules_field: codeGenModulesField,
+    code_gen_modules_field: registration_.field,
+    code_gen_modules_array: registration_.array,
     code_gen_modules: modules,
     method_addresses,
     types_field: registration.field,

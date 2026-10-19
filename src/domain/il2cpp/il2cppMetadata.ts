@@ -219,8 +219,14 @@ export const il2cppBinaryLinkSchema = z.strictObject({
   format: z.enum(["elf", "macho", "pe"]),
   architecture: z.string(),
   image_base: hexAddress,
-  /** CodeRegistration's codeGenModulesCount field, followed by the module array pointer. */
-  code_gen_modules_field: hexAddress,
+  /**
+   * CodeRegistration's codeGenModulesCount field, followed by the module array
+   * pointer; null when the build keeps no static CodeRegistration and the array
+   * was found through the instruction that loads it.
+   */
+  code_gen_modules_field: hexAddress.nullable(),
+  /** The code-generation module pointer array. */
+  code_gen_modules_array: hexAddress,
   code_gen_modules: z.array(il2cppCodeGenModuleSchema),
   /** MetadataRegistration's typesCount field, followed by the types pointer. */
   types_field: hexAddress,
