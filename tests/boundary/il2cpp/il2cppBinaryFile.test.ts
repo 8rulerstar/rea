@@ -185,6 +185,18 @@ it("does not apply symbol relocations as RELATIVE ones", () => {
   ).toThrow(Il2cppBinaryFormatFailure);
 });
 
+it("reads a method pointer array in zero-fill as methods without bodies", () => {
+  // An iOS-only assembly in an Android build keeps its array in .bss.
+  const linked = link(
+    createElfFixture(createIl2cppBinaryFixture(), { zeroFilledTable: true }),
+  );
+  expect(linked.method_addresses).toEqual([
+    ...FIXTURE_METHOD_ADDRESSES.slice(0, 3),
+    null,
+    null,
+  ]);
+});
+
 it("finds an x86-64 module array through the instruction that loads it", () => {
   const inlined = createElfFixture(
     createIl2cppBinaryFixture({ codeRegistration: false, codeReference: true }),

@@ -198,6 +198,8 @@ export interface ElfFixtureOptions {
   /** Override DT_RELASZ or DT_RELAENT. */
   readonly relaSize?: bigint;
   readonly relaEntry?: bigint;
+  /** Move mscorlib.dll's method pointers into zero-fill past the file end. */
+  readonly zeroFilledTable?: boolean;
 }
 
 /**
@@ -221,6 +223,17 @@ export const createElfFixture = (
       continue;
     relocations.push([FIXTURE_BINARY_BASE + BigInt(at), value]);
     body.writeBigUInt64LE(0n, at);
+  }
+  const tagCount =
+    4 +
+    (options.duplicateRela === true ? 1 : 0) +
+    (options.androidPacked === true ? 1 : 0);
+  const fileSize = SIZE + relocations.length * 24 + tagCount * 16;
+  if (options.zeroFilledTable === true) {
+    // The second module record's methodPointers field (MODULES + 0x40 + 16).
+    const slot = FIXTURE_BINARY_BASE + BigInt(0x400 + 0x40 + 16);
+    const entry = relocations.find(([at]) => at === slot)!;
+    entry[1] = FIXTURE_BINARY_BASE + BigInt(fileSize);
   }
   const rela = Buffer.alloc(relocations.length * 24);
   relocations.forEach(([slot, value], index) => {
@@ -250,6 +263,7 @@ export const createElfFixture = (
     dynamic.writeBigUInt64LE(value, index * 16 + 8);
   });
   const file = Buffer.concat([body, rela, dynamic]);
+  if (file.length !== fileSize) throw new Error("ELF fixture size drifted");
   const withDynamic = options.dynamic !== false;
   // ELF64 header: little-endian shared object, no section headers.
   file.write("\x7fELF", 0, "latin1");
@@ -269,7 +283,10 @@ export const createElfFixture = (
   file.writeBigUInt64LE(FIXTURE_BINARY_BASE, 80);
   file.writeBigUInt64LE(FIXTURE_BINARY_BASE, 88);
   file.writeBigUInt64LE(BigInt(file.length), 96);
-  file.writeBigUInt64LE(BigInt(file.length), 104);
+  file.writeBigUInt64LE(
+    BigInt(file.length) + (options.zeroFilledTable === true ? 0x100n : 0n),
+    104,
+  );
   if (withDynamic) {
     const at = SIZE + rela.length;
     file.writeUInt32LE(2, 120);

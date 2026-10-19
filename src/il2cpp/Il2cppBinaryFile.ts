@@ -234,6 +234,18 @@ const isMapped = (image: NativeImage, address: bigint, size: number) => {
   }
 };
 
+// An array of slots that all lack a body can sit wholly in zero-fill (.bss):
+// an iOS-only assembly in an Android build has its pointers there.
+const isZeroFilled = (image: NativeImage, address: bigint, size: number) =>
+  image.container.zero_fills.some(
+    (fill) =>
+      address >= fill.address &&
+      address + BigInt(size) <= fill.address + BigInt(fill.size),
+  );
+
+const readSlot = (image: NativeImage, address: bigint): bigint | null =>
+  isZeroFilled(image, address, 8) ? 0n : readPointer(image, address);
+
 // A real image name occurs a few times at most; a bound keeps a crafted image
 // from filling the address map.
 const NAME_OCCURRENCES = 4096;
@@ -343,7 +355,12 @@ const findModules = (
       const count = image.bytes.readUInt32LE(offset + 8);
       if (count !== counts[index]) continue;
       const pointers = image.bytes.readBigUInt64LE(offset + 16);
-      if (count > 0 && !isMapped(image, pointers, count * 8)) continue;
+      if (
+        count > 0 &&
+        !isMapped(image, pointers, count * 8) &&
+        !isZeroFilled(image, pointers, count * 8)
+      )
+        continue;
       const list = candidates.get(index) ?? [];
       list.push({
         image: index,
@@ -655,7 +672,7 @@ export const linkIl2cppBinary = (
     let table = tables.get(owner);
     if (table === undefined) {
       table = Array.from({ length: module.method_pointer_count }, (_, slot) =>
-        readPointer(image, module.method_pointers + BigInt(slot * 8)),
+        readSlot(image, module.method_pointers + BigInt(slot * 8)),
       );
       tables.set(owner, table);
     }
