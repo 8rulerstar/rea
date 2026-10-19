@@ -425,7 +425,9 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             : "Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; generic method instances, adjustor thunks and invokers are not linked, and a null address means the module records no body.",
           binaryPath === undefined
             ? "Field, parameter and return types are not recovered without binary_path; type indices refer to the native binary."
-            : "Field, parameter and return type names are rendered from the binary's Il2CppType table in a C#-like form (keywords for primitives, Namespace.Outer+Inner, generic parameters by metadata name); custom modifiers, array bounds and attributes are not reported.",
+            : decoded.metadata_version === 27
+              ? "Field, parameter and return type names are null for metadata version 27: versions 27.0 to 27.2 share that header number but place the Il2CppType byref flag differently, so a name could gain or lose & without warning; type indices are still reported."
+              : "Field, parameter and return type names are rendered from the binary's Il2CppType table in a C#-like form (keywords for primitives, Namespace.Outer+Inner, generic parameters by metadata name); custom modifiers, array bounds and attributes are not reported.",
           "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
         ],
       };

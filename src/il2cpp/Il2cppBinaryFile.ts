@@ -241,6 +241,8 @@ const nameAddresses = (
 ): Map<bigint, number> => {
   const found = new Map<bigint, number>();
   for (const [index, name] of names.entries()) {
+    // An empty name would match every NUL in the image.
+    if (name === "") continue;
     const needle = Buffer.concat([Buffer.from(name, "utf8"), Buffer.of(0)]);
     for (const mapping of image.container.mappings) {
       const region = image.bytes.subarray(
@@ -446,7 +448,9 @@ const createTypeNamer = (
     const value = pointer(address, label);
     return Number(value & 0xffffffffn);
   };
-  // num_mods grew from 5 to 6 bits before version 29, moving byref.
+  // Version 27.2 narrowed num_mods from 6 to 5 bits, moving byref from bit 30
+  // to 29. Headers still say 27 for 27.0 to 27.2, so version 27 names are not
+  // rendered (see linkIl2cppBinary); 24 uses bit 30 and 29+ use bit 29.
   const byrefBit = version >= 29 ? 29 : 30;
   const definitionName = (index: number): string => {
     const type =
@@ -560,6 +564,8 @@ export const linkIl2cppBinary = (
   const typeName = createTypeNamer(image, metadata, facts, version);
   const reference = (type: number): Il2cppTypeReference => {
     if (type === -1) return { type, name: null };
+    // 27.0/27.1 and 27.2 share header version 27 but place byref differently.
+    if (version === 27) return { type, name: null };
     if (type < 0 || type >= registration.count)
       throw new Il2cppBinaryFormatFailure(
         "invalid-type",

@@ -1,6 +1,6 @@
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
-import { writeFile } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import {
   ghidraDefaultBase,
   il2cppGhidraSeeds,
@@ -29,7 +29,17 @@ const writeSeeds = async (
       ? ghidraDefaultBase(report.binary)
       : BigInt(seedBase),
   );
-  await writeFile(path, seeds.text, { flag: "wx" });
+  // Create only (never replace), and remove the file again if writing fails so
+  // no partial seed list is left for Ghidra to apply.
+  const file = await open(path, "wx");
+  try {
+    await file.writeFile(seeds.text);
+  } catch (cause) {
+    await file.close().catch(() => undefined);
+    await unlink(path).catch(() => undefined);
+    throw cause;
+  }
+  await file.close();
 };
 
 /** Resolve caller paths and inspect IL2CPP metadata names through the shared workflow. */

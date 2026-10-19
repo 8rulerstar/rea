@@ -140,7 +140,7 @@ not used. Some builds have no static pointer to the module array: a Linux x86-64
 `codeGenModules` pointer in its data or relocations, so it fails with
 `code-registration-not-found` (Il2CppDumper also fails to link that file).
 
-Checked builds: macOS arm64 from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
+Checked builds: macOS arm64 and x86_64 slices from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
 6000.0.84f1 against dSYM symbols; Android arm64 and x86-64 from 2022.3.62f3
 against `libil2cpp.sym.so`; Windows x64 from 2023.2.13f1 (metadata version 29,
 an MIT-licensed game) against Il2CppDumper, where all 43,198 linked methods
@@ -173,24 +173,27 @@ equal the metadata type-definition count and whose type table is file mapped.
 Without `binary_path`, `binary` is `null` and the four binary collections are
 empty.
 
-Checked against Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and 6000.0.84f1
-macOS builds, both arm64 and x86_64 slices. PE linking follows the same rules
-but has not been checked against a real Windows build.
+For metadata version 27, type names are `null` and only type indices are
+reported: versions 27.0 to 27.2 share that header number but place the
+Il2CppType byref flag in different bits, so a rendered name could gain or lose
+`&` without warning.
 
-| Reason                            | Category    | Meaning                                                                                 |
-| --------------------------------- | ----------- | --------------------------------------------------------------------------------------- |
-| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O or PE image.                                          |
-| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                             |
-| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.              |
-| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.   |
-| `malformed-container`             | input error | The container headers are damaged.                                                      |
-| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                   |
-| `ambiguous-code-gen-module`       | input error | More than one record matches an image.                                                  |
-| `code-registration-not-found`     | input error | No single module table lists exactly the located records.                               |
-| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                   |
-| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                  |
-| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                       |
-| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind. |
+The builds checked are listed after the module search rules above.
+
+| Reason                            | Category    | Meaning                                                                                           |
+| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section). |
+| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                                       |
+| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.                        |
+| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.             |
+| `malformed-container`             | input error | The container headers are damaged.                                                                |
+| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                             |
+| `ambiguous-code-gen-module`       | input error | More than one record matches an image.                                                            |
+| `code-registration-not-found`     | input error | No single module table lists exactly the located records.                                         |
+| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                             |
+| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                            |
+| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                 |
+| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.           |
 
 Binary failures report `binary_path` as the input field. There is no partial
 linking: any failure returns no addresses. The binary is bounded to 1 GiB.
@@ -262,8 +265,10 @@ report limit can still require the summary and paging path.
 - Linking Mach-O binaries that use chained fixups, ELF images with Android
   packed (APS2) relocations, and 32-bit images; generic method instances,
   adjustor thunks and invokers.
-- Fields, properties, signatures, parameters and generic instances.
-- Ghidra or other disassembler integration. Use the
+- Full method signatures beyond the rendered field, parameter and return type
+  names, generic method instances, and type names for metadata version 27.
+- Running Ghidra or another disassembler. `--ghidra-seeds` only writes a seed
+  file for [`REA_GHIDRA_SEED_FILE`](installation.md); use the
   [native workflow](native-investigation.md) for native code.
 - Metadata versions other than 24, 27, 29, 31 and 39.
 

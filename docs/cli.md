@@ -92,8 +92,11 @@ rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
 ```
 
 The command decodes a version 24, 27, 29, 31 or 39 `global-metadata.dat` and reports assembly
-images, type and method names, index ranges, header sections and SHA-256. It
-does not decrypt metadata or link names to native code addresses. MCP returns every row by
+images, type, method and member names, string literals, index ranges, header
+sections and SHA-256. With `--binary PATH` it also reads the matching
+`GameAssembly.dylib`, `GameAssembly.dll` or `libil2cpp.so` (never runs it) and
+links each method to its code address; `--ghidra-seeds PATH` then writes Ghidra
+function seeds. It does not decrypt metadata. MCP returns every row by
 default; `detail: "summary"` returns counts and pages rows on request. See [IL2CPP metadata](il2cpp-metadata.md).
 
 Inspect an embedded cargo-auditable Rust dependency list without installing

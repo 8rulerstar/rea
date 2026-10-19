@@ -118,6 +118,36 @@ it.each<
   expect(failure(createIl2cppBinaryFixture(options))).toEqual({ reason, kind });
 });
 
+it("reports type indices without names for metadata version 27", () => {
+  const linked = linkIl2cppBinary(
+    createIl2cppBinaryFixture(),
+    { ...metadata, metadata_version: 27 },
+    facts,
+  );
+  const rows = [
+    ...linked.return_types,
+    ...linked.field_types,
+    ...linked.parameter_types,
+  ];
+  expect(rows.length).toBeGreaterThan(0);
+  expect(rows.every((row) => row.name === null)).toBe(true);
+  expect(link(createIl2cppBinaryFixture()).return_types[0]?.name).toBe(
+    FIXTURE_RETURN_TYPE_NAME,
+  );
+});
+
+it("does not search for an empty image name", () => {
+  const unnamed = {
+    ...metadata,
+    images: metadata.images.map((image, index) =>
+      index === 0 ? { ...image, name: "" } : image,
+    ),
+  };
+  expect(() =>
+    linkIl2cppBinary(createIl2cppBinaryFixture(), unnamed, facts),
+  ).toThrow("code-gen-modules-not-found");
+});
+
 it("finds image names padded with 0xFF as MSVC writes them", () => {
   expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
     link(createIl2cppBinaryFixture()),
