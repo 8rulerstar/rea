@@ -91,7 +91,7 @@ Inspect Unity IL2CPP metadata names without Unity or a disassembler:
 rea inspect-il2cpp-metadata /absolute/path/global-metadata.dat --json
 ```
 
-The command decodes a version 29, 31 or 39 `global-metadata.dat` and reports assembly
+The command decodes a version 24, 27, 29, 31 or 39 `global-metadata.dat` and reports assembly
 images, type and method names, index ranges, header sections and SHA-256. It
 does not decrypt metadata or link names to native code addresses. MCP returns every row by
 default; `detail: "summary"` returns counts and pages rows on request. See [IL2CPP metadata](il2cpp-metadata.md).

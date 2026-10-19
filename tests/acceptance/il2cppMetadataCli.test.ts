@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "vitest";
 import { toolContract } from "../../src/contracts/toolContracts.js";
@@ -15,6 +15,14 @@ import {
   FIXTURE_METHODS,
   FIXTURE_TYPES,
 } from "../fixtures/il2cpp/metadata.js";
+import {
+  createElfFixture,
+  createIl2cppBinaryFixture,
+  createUniversalFixture,
+  FIXTURE_BINARY_BASE,
+  FIXTURE_METHOD_ADDRESSES,
+  FIXTURE_RETURN_TYPE_NAME,
+} from "../fixtures/il2cpp/binary.js";
 import { connectLocalToolsMcp } from "../fixtures/localToolsMcp.js";
 import { parseMcpToolError } from "../fixtures/mcpToolError.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
@@ -76,7 +84,17 @@ cliTest(
       types: 4,
       methods: 5,
       nested_types: 1,
+      fields: 2,
+      properties: 0,
+      events: 0,
+      parameters: 1,
+      string_literals: 2,
+      method_addresses: 0,
+      return_types: 0,
+      field_types: 0,
+      parameter_types: 0,
     });
+    expect(view.summary.binary).toBeNull();
     expect(view.summary.sections).toEqual(report.sections);
     expect(view.summary.index_widths).toEqual(report.index_widths);
 
@@ -117,7 +135,7 @@ cliTest(
     const { client, call } = await connectLocalToolsMcp();
     const fixture = createIl2cppMetadataFixture();
     const unsupported = Buffer.from(fixture.bytes);
-    unsupported.writeInt32LE(27, 4);
+    unsupported.writeInt32LE(26, 4);
     const corrupt = Buffer.from(fixture.bytes);
     corrupt.writeInt32LE(
       fixture.section("typeDefinitions").offset + 4,
@@ -125,7 +143,7 @@ cliTest(
     );
     for (const [name, bytes, expected] of [
       [
-        "v27.dat",
+        "v26.dat",
         unsupported,
         {
           code: "unsupported_target",
@@ -164,4 +182,153 @@ cliTest(
     await client.ping();
   },
   30000,
+);
+
+cliTest(
+  "links method addresses from a selected binary slice through CLI and MCP pages",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-binary-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "GameAssembly.dylib");
+    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(
+      binaryPath,
+      createUniversalFixture([
+        { cpu: 0x0100000c, bytes: createIl2cppBinaryFixture() },
+      ]),
+    );
+    const expected = FIXTURE_METHOD_ADDRESSES.map((address) =>
+      address === null
+        ? { address: null, rva: null }
+        : {
+            address: `0x${address.toString(16)}`,
+            rva: `0x${(address - FIXTURE_BINARY_BASE).toString(16)}`,
+          },
+    );
+    const result = await cli.run({
+      arguments: [
+        "inspect-il2cpp-metadata",
+        path,
+        "--binary",
+        binaryPath,
+        "--architecture",
+        "arm64",
+        "--json",
+      ],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const report = il2cppMetadataSchema.parse(
+      toolContract("inspect_il2cpp_metadata").outputSchema.parse(result.json)
+        .normalized_result,
+    );
+    expect(report.method_addresses).toEqual(expected);
+    expect(report.return_types.map((row) => row.name)).toEqual(
+      Array.from({ length: 5 }, () => FIXTURE_RETURN_TYPE_NAME),
+    );
+    expect(report.binary).toMatchObject({
+      format: "macho",
+      architecture: "arm64",
+      image_base: "0x100000000",
+    });
+
+    const { client, call } = await connectLocalToolsMcp();
+    const missing = await call("inspect_il2cpp_metadata", {
+      path,
+      binary_path: binaryPath,
+    });
+    expect(parseMcpToolError(missing).error).toMatchObject({
+      code: "unsupported_target",
+      message: expect.stringContaining("slice-selection-required"),
+    });
+    const summarized = await call("inspect_il2cpp_metadata", {
+      path,
+      binary_path: binaryPath,
+      binary_architecture: "arm64",
+    });
+    expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
+    const view = il2cppMetadataSummaryViewResultSchema.parse(
+      parseEvidence(summarized.structuredContent).normalized_result,
+    );
+    expect(view.summary.counts.method_addresses).toBe(5);
+    const page = await call("inspect_analysis_view", {
+      source: {
+        kind: "retained-evidence",
+        evidence_id: view.parent_evidence_id,
+      },
+      view: {
+        kind: "il2cpp-metadata",
+        collection: "method_addresses",
+        offset: 2,
+      },
+    });
+    const projected = analysisViewResultSchema.parse(
+      parseEvidence(page.structuredContent).normalized_result,
+    );
+    if (projected.kind !== "il2cpp-metadata")
+      throw new Error("Wrong IL2CPP page kind");
+    expect(projected.items).toEqual(expected.slice(2));
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "writes Ghidra function seeds for a linked ELF and refuses to overwrite them",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-seeds-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "libil2cpp.so");
+    const seeds = join(root, "seeds.tsv");
+    const shifted = join(root, "shifted.tsv");
+    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(binaryPath, createElfFixture(createIl2cppBinaryFixture()));
+    const run = (output: string, extra: readonly string[] = []) =>
+      cli.run({
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--ghidra-seeds",
+          output,
+          ...extra,
+          "--json",
+        ],
+      });
+
+    const linked = await run(seeds);
+    expect(linked.exitCode, linked.stderr).toBe(0);
+    // This ELF is linked at the fixture base, so Ghidra keeps that base.
+    expect(await readFile(seeds, "utf8")).toBe(
+      [
+        "0x100000200\tfunction\tGame.Player$$.ctor",
+        "0x100000210\tfunction\tGame.Player$$Update",
+        "0x100000220\tfunction\tGame.Player.Slot$$Add",
+        "0x100000230\tfunction\tSystem.Größe$$.ctor",
+        "",
+      ].join("\n"),
+    );
+
+    const moved = await run(shifted, ["--seed-base", "0x100000"]);
+    expect(moved.exitCode, moved.stderr).toBe(0);
+    expect((await readFile(shifted, "utf8")).split("\n")[0]).toBe(
+      "0x100200\tfunction\tGame.Player$$.ctor",
+    );
+
+    await writeFile(seeds, "kept\n");
+    const again = await run(seeds);
+    expect(again.exitCode).not.toBe(0);
+    expect(await readFile(seeds, "utf8")).toBe("kept\n");
+
+    const unlinked = await cli.run({
+      arguments: [
+        "inspect-il2cpp-metadata",
+        path,
+        "--ghidra-seeds",
+        join(root, "unlinked.tsv"),
+        "--json",
+      ],
+    });
+    expect(unlinked.exitCode).not.toBe(0);
+  },
 );

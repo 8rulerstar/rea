@@ -15,7 +15,7 @@ export const IL2CPP_TOOL_CONTRACTS = [
     ...toolContractMetadata("inspect_il2cpp_metadata"),
     kind: "artifact-provider",
     description:
-      "Inspect an explicit local Unity IL2CPP global-metadata.dat (metadata versions 29, 31 and 39) and return its assembly images, type definitions and method definitions by name, namespace, index range and count, plus header sections and serialized index widths. Type declaring_type comes from the nestedTypes section; row positions are metadata indices, except nested_type_start, which indexes the unreturned nestedTypes table (find nested types by declaring_type). By default returns every row inline. A large game returns megabytes of rows and can exceed the transport; detail summary retains the complete Evidence and returns identity, sections and counts, then page images/types/methods with inspect_analysis_view kind il2cpp-metadata and normalized_result.parent_evidence_id. Runs no Unity, IL2CPP binary or disassembler, does not decrypt, and does not recover native code addresses, fields, signatures or runtime behavior. Unrecognized magic and other versions are unsupported; damaged headers, overlapping sections, inconsistent record sizes, out-of-range indices, inconsistent nesting, method ownership or image ranges and invalid strings are rejected with a reason and no partial success. Resource guards bound files to 256 MiB and the complete report to 64 MiB.",
+      "Inspect an explicit local Unity IL2CPP global-metadata.dat (metadata versions 24, 27, 29, 31 and 39) and return its assembly images, type definitions, method definitions, field/property/event/parameter names with their owners and managed string literals by name, namespace, index range and count, plus header sections and serialized index widths. Type declaring_type comes from the nestedTypes section; row positions are metadata indices, except nested_type_start, which indexes the unreturned nestedTypes table (find nested types by declaring_type). By default returns every row inline. A large game returns megabytes of rows and can exceed the transport; detail summary retains the complete Evidence and returns identity, sections and counts, then page images/types/methods/fields/properties/events/parameters/string_literals/method_addresses/return_types/field_types/parameter_types with inspect_analysis_view kind il2cpp-metadata and normalized_result.parent_evidence_id. With binary_path naming the matching Mach-O GameAssembly.dylib (binary_architecture selects a universal slice), 64-bit PE GameAssembly.dll or 64-bit ELF libil2cpp.so (AArch64 or x86-64), it reads (never runs) the binary, locates the CodeRegistration code-generation modules by image name and method count, and returns binary (registration addresses) plus method_addresses (one {address, rva} row per method index, null when the module records no body) and return_types/field_types/parameter_types ({type, name} per method, field and parameter index, names rendered C#-like from the binary Il2CppType table); 32-bit images, Mach-O chained fixups and generic method instances are not linked. Runs no Unity, IL2CPP binary or disassembler, does not decrypt, and does not recover signatures beyond those type names or runtime behavior. Unrecognized magic and other versions are unsupported; damaged headers, overlapping sections, inconsistent record sizes, out-of-range indices, inconsistent nesting, method ownership or image ranges and invalid strings are rejected with a reason and no partial success. Resource guards bound files to 256 MiB and the complete report to 64 MiB.",
     inputSchema: inspectIl2cppMetadataInputSchema,
     outputSchema: evidenceResultOf(
       z.union([il2cppMetadataSchema, il2cppMetadataSummaryViewResultSchema]),
@@ -26,6 +26,15 @@ export const IL2CPP_TOOL_CONTRACTS = [
         input: {
           path: "/artifacts/Data/Managed/Metadata/global-metadata.dat",
           detail: "summary",
+        },
+      },
+      {
+        title: "Link method addresses from a universal macOS binary",
+        input: {
+          path: "/artifacts/Game.app/Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat",
+          binary_path:
+            "/artifacts/Game.app/Contents/Frameworks/GameAssembly.dylib",
+          binary_architecture: "arm64",
         },
       },
     ],
