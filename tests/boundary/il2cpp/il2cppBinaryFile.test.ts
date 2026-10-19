@@ -148,6 +148,21 @@ it("does not search for an empty image name", () => {
   ).toThrow("code-gen-modules-not-found");
 });
 
+it("refuses an image name repeated past the search bound", () => {
+  const fixture = createIl2cppBinaryFixture();
+  const flooded = Buffer.concat([
+    fixture,
+    Buffer.from("\0mscorlib.dll".repeat(4200) + "\0", "utf8"),
+  ]);
+  // The Mach-O segment covers the original size; widen it to the new tail.
+  flooded.writeBigUInt64LE(BigInt(flooded.length), 64);
+  flooded.writeBigUInt64LE(BigInt(flooded.length), 80);
+  expect(failure(flooded)).toEqual({
+    reason: "ambiguous-code-gen-module",
+    kind: "malformed",
+  });
+});
+
 it("finds image names padded with 0xFF as MSVC writes them", () => {
   expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
     link(createIl2cppBinaryFixture()),

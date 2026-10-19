@@ -1,6 +1,8 @@
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
-import { open, unlink } from "node:fs/promises";
+import { lstat, open, unlink } from "node:fs/promises";
+import { AnalysisInputError } from "../domain/analysisErrorCore.js";
+import { err } from "../domain/result.js";
 import {
   ghidraDefaultBase,
   il2cppGhidraSeeds,
@@ -35,8 +37,17 @@ const writeSeeds = async (
   try {
     await file.writeFile(seeds.text);
   } catch (cause) {
+    // Remove only the file this call created, not one renamed into its place.
+    const created = await file.stat().catch(() => undefined);
     await file.close().catch(() => undefined);
-    await unlink(path).catch(() => undefined);
+    const current = await lstat(path).catch(() => undefined);
+    if (
+      created !== undefined &&
+      current !== undefined &&
+      created.dev === current.dev &&
+      created.ino === current.ino
+    )
+      await unlink(path).catch(() => undefined);
     throw cause;
   }
   await file.close();
@@ -89,6 +100,29 @@ export const registerIl2cppCommands = (
           async () =>
             finishAnalysisCommand(
               async () => {
+                // Check before decoding so an existing seed file is reported
+                // as such instead of failing after the analysis finished.
+                const seedPath =
+                  options.ghidraSeeds === undefined
+                    ? undefined
+                    : absoluteCallerPath(options.ghidraSeeds);
+                if (
+                  seedPath !== undefined &&
+                  (await lstat(seedPath).catch(() => undefined)) !== undefined
+                )
+                  return err(
+                    new AnalysisInputError(
+                      "inspect_il2cpp_metadata",
+                      undefined,
+                      [
+                        {
+                          path: ["ghidra_seeds"],
+                          reason: "invalid_value",
+                          message: `--ghidra-seeds ${seedPath} already exists; seed files are created, never replaced.`,
+                        },
+                      ],
+                    ),
+                  );
                 const result = await service.inspect(
                   // One-shot CLI runs retain no Evidence for later views.
                   {
@@ -106,7 +140,7 @@ export const registerIl2cppCommands = (
                 if (result.ok && options.ghidraSeeds !== undefined)
                   await writeSeeds(
                     result.value.normalized_result,
-                    absoluteCallerPath(options.ghidraSeeds),
+                    seedPath!,
                     options.seedBase,
                   );
                 return result;

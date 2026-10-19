@@ -219,6 +219,10 @@ const isMapped = (image: NativeImage, address: bigint, size: number) => {
   }
 };
 
+// A real image name occurs a few times at most; a bound keeps a crafted image
+// from filling the address map.
+const NAME_OCCURRENCES = 4096;
+
 /** Bytes that can appear inside an assembly file name. */
 const isNameByte = (byte: number) =>
   (byte >= 0x30 && byte <= 0x39) ||
@@ -240,6 +244,7 @@ const nameAddresses = (
   names: readonly string[],
 ): Map<bigint, number> => {
   const found = new Map<bigint, number>();
+  const hits = names.map(() => 0);
   for (const [index, name] of names.entries()) {
     // An empty name would match every NUL in the image.
     if (name === "") continue;
@@ -254,8 +259,14 @@ const nameAddresses = (
         at >= 0;
         at = region.indexOf(needle, at + 1)
       )
-        if (at === 0 || !isNameByte(region[at - 1]!))
+        if (at === 0 || !isNameByte(region[at - 1]!)) {
           found.set(mapping.address + BigInt(at), index);
+          if (++hits[index]! > NAME_OCCURRENCES)
+            throw new Il2cppBinaryFormatFailure(
+              "ambiguous-code-gen-module",
+              `image name ${name} occurs more than ${NAME_OCCURRENCES} times`,
+            );
+        }
     }
   }
   return found;
