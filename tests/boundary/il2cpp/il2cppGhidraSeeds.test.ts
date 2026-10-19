@@ -1,10 +1,13 @@
 import { expect, it } from "vitest";
-import { parseGhidraSeeds } from "../../ghidra/GhidraAnalysisSeeds.js";
-import { ghidraDefaultBase, il2cppGhidraSeeds } from "./il2cppGhidraSeeds.js";
+import { parseGhidraSeeds } from "../../../src/ghidra/GhidraAnalysisSeeds.js";
+import {
+  ghidraDefaultBase,
+  il2cppGhidraSeeds,
+} from "../../../src/domain/il2cpp/il2cppGhidraSeeds.js";
 import {
   IL2CPP_METADATA_SECTION_NAMES,
   type Il2cppMetadata,
-} from "./il2cppMetadata.js";
+} from "../../../src/domain/il2cpp/il2cppMetadata.js";
 
 const type = (
   name: string,
