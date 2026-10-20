@@ -78,18 +78,25 @@ const failureForPrimary = (
       {},
       { cause },
     );
-  if (cause instanceof Il2cppBinaryFormatFailure)
+  if (
+    cause instanceof Il2cppBinaryFormatFailure ||
+    cause instanceof Il2cppMetadataFormatFailure
+  ) {
+    const binary = cause instanceof Il2cppBinaryFormatFailure;
     return cause.kind === "unsupported"
       ? new AnalysisUnsupportedTargetError(OPERATION, path, cause.message, {
           cause,
         })
       : new AnalysisInputError(OPERATION, { cause }, [
           {
-            path: [field],
+            path: [binary ? field : "path"],
             reason: "invalid_format",
-            message: `Selected binary ${path} does not link to the metadata: ${cause.message}`,
+            message: binary
+              ? `Selected binary ${path} does not link to the metadata: ${cause.message}`
+              : `Selected artifact ${path} is corrupt: ${cause.message}`,
           },
         ]);
+  }
   if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
     return new AnalysisArtifactChangedError(OPERATION, path, cause.message, {
       cause,
@@ -98,18 +105,6 @@ const failureForPrimary = (
     return new AnalysisCancelledError(OPERATION, {
       cause: artifactFileCancellationCause(cause),
     });
-  if (cause instanceof Il2cppMetadataFormatFailure)
-    return cause.kind === "unsupported"
-      ? new AnalysisUnsupportedTargetError(OPERATION, path, cause.message, {
-          cause,
-        })
-      : new AnalysisInputError(OPERATION, { cause }, [
-          {
-            path: ["path"],
-            reason: "invalid_format",
-            message: `Selected artifact ${path} is corrupt: ${cause.message}`,
-          },
-        ]);
   if (cause instanceof ArtifactReaderFailure) {
     if (cause.reason === "limit")
       return new AnalysisResourceConstraintError(
@@ -372,6 +367,18 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
       counts?: Il2cppMetadataRowCounts;
       binary?: Il2cppMetadata["artifact"];
     } = {};
+    const selectedBinarySource = () =>
+      input.binary_path === undefined
+        ? undefined
+        : {
+            path: input.binary_path,
+            ...(input.binary_architecture === undefined
+              ? {}
+              : { architecture: input.binary_architecture }),
+            ...(observed.binary === undefined
+              ? {}
+              : { artifact: observed.binary }),
+          };
     try {
       return await this.#resources.run(async () => {
         const snapshot = await this.#readArtifact(
@@ -473,15 +480,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             failure.partialObservation = metadataSourceEvidence(
               artifact,
               observed.counts,
-              {
-                path: binaryPath,
-                ...(input.binary_architecture === undefined
-                  ? {}
-                  : { architecture: input.binary_architecture }),
-                ...(observed.binary === undefined
-                  ? {}
-                  : { artifact: observed.binary }),
-              },
+              selectedBinarySource(),
               failure.partialObservation,
             );
             return err(failure);
@@ -533,17 +532,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
         failure.partialObservation = metadataSourceEvidence(
           observed.artifact,
           observed.counts,
-          input.binary_path === undefined
-            ? undefined
-            : {
-                path: input.binary_path,
-                ...(input.binary_architecture === undefined
-                  ? {}
-                  : { architecture: input.binary_architecture }),
-                ...(observed.binary === undefined
-                  ? {}
-                  : { artifact: observed.binary }),
-              },
+          selectedBinarySource(),
           failure.partialObservation,
         );
       return err(failure);

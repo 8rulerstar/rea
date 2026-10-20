@@ -1,3 +1,4 @@
+import { createEmptyIl2cppMetadataFixture } from "../../domain/il2cpp/il2cppMetadata.fixture.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { expect, it } from "vitest";
 import { Il2cppMetadataService } from "./Il2cppMetadataService.js";
@@ -7,10 +8,7 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
-import {
-  IL2CPP_METADATA_SECTION_NAMES,
-  type Il2cppMetadata,
-} from "../../domain/il2cpp/il2cppMetadata.js";
+import type { Il2cppMetadata } from "../../domain/il2cpp/il2cppMetadata.js";
 import { err, ok } from "../../domain/result.js";
 import { EvidenceFileError } from "../../domain/evidenceErrors.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
@@ -21,42 +19,7 @@ const identity = {
   name: "Source-owned IL2CPP reader seam",
   version: "1",
 };
-const report: Il2cppMetadata = {
-  artifact: {
-    path: "/artifacts/global-metadata.dat",
-    sha256: "a".repeat(64),
-    bytes: 1024,
-  },
-  magic: 0xfab11baf,
-  metadata_version: 39,
-  index_widths: {
-    type_definition: 1,
-    generic_container: 1,
-    parameter: 1,
-    type: 1,
-    type_width_source: "interface-offsets-record",
-  },
-  sections: IL2CPP_METADATA_SECTION_NAMES.map((name) => ({
-    name,
-    offset: 380,
-    size: 0,
-    count: 0,
-  })),
-  images: [],
-  types: [],
-  methods: [],
-  fields: [],
-  properties: [],
-  events: [],
-  binary: null,
-  method_addresses: [],
-  return_types: [],
-  field_types: [],
-  parameter_types: [],
-  parameters: [],
-  string_literals: [],
-  limitations: [],
-};
+const report = createEmptyIl2cppMetadataFixture();
 
 const serviceReturning = (value: Il2cppMetadata, calls = { count: 0 }) =>
   new Il2cppMetadataService({
@@ -77,8 +40,10 @@ it("rejects invalid paths and extra arguments before invoking the reader", async
     { path: report.artifact.path, detail: "rows" },
   ]) {
     const result = await service.inspect(input);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toBeInstanceOf(AnalysisInputError);
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.any(AnalysisInputError),
+    });
   }
   expect(calls.count).toBe(0);
 });

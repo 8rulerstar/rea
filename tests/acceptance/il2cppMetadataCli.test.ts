@@ -39,6 +39,16 @@ import { parseMcpToolError } from "../fixtures/mcpToolError.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 import { cliTest } from "../support/cli/cliFixture.js";
 
+const parseCliMetadata = (value: unknown) =>
+  il2cppMetadataSchema.parse(
+    toolContract("inspect_il2cpp_metadata").outputSchema.parse(value)
+      .normalized_result,
+  );
+const parseMetadataSummary = (value: unknown) =>
+  il2cppMetadataSummaryViewResultSchema.parse(
+    parseEvidence(value).normalized_result,
+  );
+
 cliTest(
   "returns identical complete inventories through CLI and MCP and pages a retained summary after removal",
   async ({ cli }) => {
@@ -82,18 +92,14 @@ cliTest(
     const omitted = await call("inspect_il2cpp_metadata", { path });
     expect(omitted.isError, JSON.stringify(omitted)).not.toBe(true);
     expect(
-      il2cppMetadataSummaryViewResultSchema.parse(
-        parseEvidence(omitted.structuredContent).normalized_result,
-      ).summary.counts.methods,
+      parseMetadataSummary(omitted.structuredContent).summary.counts.methods,
     ).toBe(FIXTURE_METHODS.length);
     const summarized = await call("inspect_il2cpp_metadata", {
       path,
       detail: "summary",
     });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
-    const view = il2cppMetadataSummaryViewResultSchema.parse(
-      parseEvidence(summarized.structuredContent).normalized_result,
-    );
+    const view = parseMetadataSummary(summarized.structuredContent);
     expect(view.summary.magic).toBe(report.magic);
     expect(view.summary.counts).toEqual({
       sections: 31,
@@ -299,9 +305,7 @@ it("queries compact retained metadata through the real SDK with exact row identi
     binary_path: binaryPath,
   });
   expect(response.isError).not.toBe(true);
-  const overview = il2cppMetadataSummaryViewResultSchema.parse(
-    parseEvidence(response.structuredContent).normalized_result,
-  );
+  const overview = parseMetadataSummary(response.structuredContent);
   expect(overview.summary.counts).toMatchObject({
     sections: 31,
     images: 2,
@@ -637,10 +641,7 @@ cliTest(
       ],
     });
     expect(result.exitCode, result.stderr).toBe(0);
-    const report = il2cppMetadataSchema.parse(
-      toolContract("inspect_il2cpp_metadata").outputSchema.parse(result.json)
-        .normalized_result,
-    );
+    const report = parseCliMetadata(result.json);
     expect(report.method_addresses).toEqual(expected);
     expect(report.return_types.map((row) => row.name)).toEqual(
       Array.from({ length: 5 }, () => FIXTURE_RETURN_TYPE_NAME),
@@ -667,9 +668,7 @@ cliTest(
       detail: "summary",
     });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
-    const view = il2cppMetadataSummaryViewResultSchema.parse(
-      parseEvidence(summarized.structuredContent).normalized_result,
-    );
+    const view = parseMetadataSummary(summarized.structuredContent);
     expect(view.summary.counts.method_addresses).toBe(5);
     expect(view.summary.counts.method_address_states).toEqual({
       code: 4,
@@ -727,10 +726,7 @@ cliTest(
       ],
     });
     expect(result.exitCode, result.stderr).toBe(0);
-    const report = il2cppMetadataSchema.parse(
-      toolContract("inspect_il2cpp_metadata").outputSchema.parse(result.json)
-        .normalized_result,
-    );
+    const report = parseCliMetadata(result.json);
     expect(report.binary?.code_gen_modules_field).toBeNull();
     expect(
       report.limitations.some((line) =>

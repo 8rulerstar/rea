@@ -279,6 +279,24 @@ it("refuses to choose among too many candidate module arrays", () => {
   expect(failure(crafted).reason).toBe("native-index-capacity");
 });
 
+it("retains overlapping fallback arrays when only the later window is referenced", () => {
+  const bytes = createIl2cppBinaryFixture({
+    codeRegistration: false,
+    codeReference: true,
+  });
+  bytes.writeUInt32LE(0x01000007, 4);
+  bytes.writeUInt32LE(3, 8);
+  // [B, A, B] contains both [B, A] and [A, B]; code references only [A, B].
+  bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x440n, 0x500);
+  bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x400n, 0x508);
+  bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x440n, 0x510);
+  bytes.writeInt32LE(0x508 - (0xc00 + 7), 0xc03);
+  const linked = link(bytes);
+  expect(linked.code_gen_modules_field).toBeNull();
+  expect(linked.code_gen_modules_array).toBe(FIXTURE_BINARY_BASE + 0x508n);
+  expect(linked.method_addresses).toEqual(expectedAddresses);
+});
+
 it("finds image names padded with 0xFF as MSVC writes them", () => {
   expect(link(createIl2cppBinaryFixture({ namePadding: 0xff }))).toEqual(
     link(createIl2cppBinaryFixture()),

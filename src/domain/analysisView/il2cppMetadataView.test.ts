@@ -1,6 +1,6 @@
+import { createEmptyIl2cppMetadataFixture } from "../il2cpp/il2cppMetadata.fixture.js";
 import { afterEach, expect, it, vi } from "vitest";
 import {
-  IL2CPP_METADATA_SECTION_NAMES,
   il2cppMetadataParentSchema,
   type Il2cppMetadata,
 } from "../il2cpp/il2cppMetadata.js";
@@ -14,26 +14,7 @@ afterEach(() => {
 });
 
 const report: Il2cppMetadata = {
-  artifact: {
-    path: "/artifacts/global-metadata.dat",
-    sha256: "a".repeat(64),
-    bytes: 1024,
-  },
-  magic: 0xfab11baf,
-  metadata_version: 39,
-  index_widths: {
-    type_definition: 1,
-    generic_container: 1,
-    parameter: 1,
-    type: 1,
-    type_width_source: "interface-offsets-record",
-  },
-  sections: IL2CPP_METADATA_SECTION_NAMES.map((name) => ({
-    name,
-    offset: 380,
-    size: 0,
-    count: 0,
-  })),
+  ...createEmptyIl2cppMetadataFixture(),
   images: [{ name: "A.dll", type_start: 0, type_count: 2 }],
   types: [
     {
@@ -76,6 +57,12 @@ const parent = (normalizedResult: unknown, sealedResult: boolean) => ({
   sealedResult,
   limitations: [],
 });
+
+const summarize = (source: ReturnType<typeof parent>) => {
+  const result = projectIl2cppMetadataView(source, { kind: "summary" });
+  if (!result.ok) throw result.error;
+  return result.value;
+};
 
 const page = {
   kind: "il2cpp-metadata",
@@ -132,9 +119,8 @@ it("preserves historical omission as unknown while keeping existing metadata que
   ])
     delete historical[key];
   const source = parent(freezeJsonSnapshot(historical), true);
-  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
-  if (!summary.ok) throw summary.error;
-  expect(summary.value).toMatchObject({
+  const summary = summarize(source);
+  expect(summary).toMatchObject({
     summary: {
       counts: { types: 2, methods: 1, fields: null, parameters: null },
     },
@@ -167,10 +153,9 @@ it("treats Evidence retained before binary linking as unknown, not unlinked", ()
   ])
     delete historical[key];
   const source = parent(freezeJsonSnapshot(historical), true);
-  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
-  if (!summary.ok) throw summary.error;
-  expect(summary.value).not.toHaveProperty("summary.binary");
-  expect(summary.value).toMatchObject({
+  const summary = summarize(source);
+  expect(summary).not.toHaveProperty("summary.binary");
+  expect(summary).toMatchObject({
     summary: {
       counts: {
         fields: 1,
@@ -183,6 +168,7 @@ it("treats Evidence retained before binary linking as unknown, not unlinked", ()
       expect.stringContaining("did not collect method_addresses"),
     ]),
   });
+  expect(projectIl2cppMetadataView(source, page).ok).toBe(true);
   const unavailable = projectIl2cppMetadataView(source, {
     kind: "il2cpp-metadata",
     collection: "method_addresses",
@@ -200,9 +186,18 @@ it("treats Evidence retained before binary linking as unknown, not unlinked", ()
       counts: {
         method_addresses: null,
         method_address_states: null,
+        return_types: null,
       },
     },
   });
+  expect(
+    projectIl2cppMetadataView(parent(report, false), {
+      kind: "il2cpp-metadata",
+      collection: "method_addresses",
+      offset: 0,
+      limit: 64,
+    }).ok,
+  ).toBe(false);
 });
 
 const linkedBinary = {
@@ -530,76 +525,19 @@ it.each([
   },
 );
 
-it("keeps pre-linking historical Evidence unknown and queryable", () => {
-  const historical = jsonObjectSchema.parse(report);
-  for (const key of [
-    "binary",
-    "method_addresses",
-    "return_types",
-    "field_types",
-    "parameter_types",
-  ])
-    delete historical[key];
-  const source = parent(freezeJsonSnapshot(historical), true);
-  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
-  if (!summary.ok) throw summary.error;
-  expect(summary.value).toMatchObject({
-    summary: {
-      counts: {
-        method_addresses: null,
-        method_address_states: null,
-        return_types: null,
-      },
-    },
-  });
-  expect(projectIl2cppMetadataView(source, page).ok).toBe(true);
-  expect(
-    projectIl2cppMetadataView(source, {
-      kind: "il2cpp-metadata",
-      collection: "method_addresses",
-      offset: 0,
-      limit: 1,
-    }).ok,
-  ).toBe(false);
-});
-
-it("does not report unrequested native tables as observed empty inventories", () => {
-  const source = parent(report, false);
-  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
-  if (!summary.ok) throw summary.error;
-  expect(summary.value).toMatchObject({
-    summary: {
-      counts: {
-        method_addresses: null,
-        method_address_states: null,
-        return_types: null,
-      },
-    },
-  });
-  expect(
-    projectIl2cppMetadataView(source, {
-      kind: "il2cpp-metadata",
-      collection: "method_addresses",
-      offset: 0,
-      limit: 64,
-    }).ok,
-  ).toBe(false);
-});
-
 it("keeps native summaries bounded while paging selected module facts", () => {
   const value = linkedReport(),
     source = parent(value, false);
-  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
-  if (!summary.ok) throw summary.error;
-  expect(summary.value).toMatchObject({
+  const summary = summarize(source);
+  expect(summary).toMatchObject({
     summary: {
       counts: { code_gen_modules: 1 },
       binary: { artifact: value.binary!.artifact },
     },
   });
-  expect(
-    "summary" in summary.value && summary.value.summary,
-  ).not.toHaveProperty("binary.code_gen_modules");
+  expect("summary" in summary && summary.summary).not.toHaveProperty(
+    "binary.code_gen_modules",
+  );
   const page = projectIl2cppMetadataView(source, {
     kind: "il2cpp-metadata",
     collection: "code_gen_modules",

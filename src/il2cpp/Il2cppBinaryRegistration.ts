@@ -236,32 +236,28 @@ function* findModuleArrayByCode(
   const arrays = new Set<bigint>();
   for (const mapping of image.container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
-    let runStart = -1;
-    const run = new Set<bigint>();
+    let runStart = start;
+    const lastPosition = new Map<bigint, number>();
     for (let at = start; at + 8 <= mapping.size; at += 8) {
       if ((at & 0xffff) < 8) yield;
       const value = image.bytes.readBigUInt64LE(mapping.offset + at);
-      if (expected.has(value) && !run.has(value)) {
-        if (runStart < 0) runStart = at;
-        run.add(value);
-        if (run.size === expected.size) {
-          arrays.add(mapping.address + BigInt(runStart));
-          // Bound retained candidates; exceeding capacity does not prove absence.
-          if (arrays.size > MODULE_ARRAY_CANDIDATES)
-            throw new Il2cppBinaryFormatFailure(
-              "native-index-capacity",
-              `module-array index exceeds ${MODULE_ARRAY_CANDIDATES} entries`,
-            );
-          runStart = -1;
-          run.clear();
-        }
-      } else {
-        runStart = -1;
-        run.clear();
-        if (expected.has(value)) {
-          runStart = at;
-          run.add(value);
-        }
+      if (!expected.has(value)) {
+        runStart = at + 8;
+        lastPosition.clear();
+        continue;
+      }
+      const previous = lastPosition.get(value);
+      if (previous !== undefined && previous >= runStart)
+        runStart = previous + 8;
+      lastPosition.set(value, at);
+      if (at - runStart === (expected.size - 1) * 8) {
+        arrays.add(mapping.address + BigInt(runStart));
+        // Retain overlapping windows; at most one position per expected module.
+        if (arrays.size > MODULE_ARRAY_CANDIDATES)
+          throw new Il2cppBinaryFormatFailure(
+            "native-index-capacity",
+            `module-array index exceeds ${MODULE_ARRAY_CANDIDATES} entries`,
+          );
       }
     }
   }

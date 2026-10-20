@@ -111,29 +111,19 @@ export class Il2cppMetadataService {
           cause: input.error,
         }),
       );
-    if (!isAbsolute(input.data.path))
-      return err(
-        new AnalysisInputError(OPERATION, undefined, [
-          {
-            path: ["path"],
-            reason: "invalid_format",
-            message: "Expected an absolute filesystem path on this host.",
-          },
-        ]),
-      );
-    if (
-      input.data.binary_path !== undefined &&
-      !isAbsolute(input.data.binary_path)
-    )
-      return err(
-        new AnalysisInputError(OPERATION, undefined, [
-          {
-            path: ["binary_path"],
-            reason: "invalid_format",
-            message: "Expected an absolute filesystem path on this host.",
-          },
-        ]),
-      );
+    for (const field of ["path", "binary_path"] as const) {
+      const value = input.data[field];
+      if (value !== undefined && !isAbsolute(value))
+        return err(
+          new AnalysisInputError(OPERATION, undefined, [
+            {
+              path: [field],
+              reason: "invalid_format",
+              message: "Expected an absolute filesystem path on this host.",
+            },
+          ]),
+        );
+    }
     if (
       input.data.binary_architecture !== undefined &&
       input.data.binary_path === undefined
