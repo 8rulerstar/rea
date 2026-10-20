@@ -106,6 +106,14 @@ An observed metadata header with supported raw version 29, 31 or 39 offers an
 native library was found. This probe does not establish full metadata validity
 or correspondence to a native binary. See [IL2CPP metadata](il2cpp-metadata.md).
 
+When a Unity Mono reference witness was observed in a managed directory,
+`Assembly-CSharp.dll` and `Assembly-CSharp-firstpass.dll` directly in that
+directory also receive an `inspect_managed_members` follow-up, listed before the
+`inspect_managed_artifact` probes. Only these Unity-predefined script assembly
+names are recognized; assembly definition outputs are project-named and remain
+among the ordinary managed probes. The probe does not establish that the
+assembly references UnityEngine or contains the game's own code.
+
 Candidates are derived or inferred from these facts and do not prove loading or
 execution. BepInEx, MelonLoader, Easy Anti-Cheat and BattlEye labels identify
 path conventions only; runtime presence stays unknown. No bypass is provided.
