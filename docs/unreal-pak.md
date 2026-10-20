@@ -81,9 +81,9 @@ writes the complete Evidence to a new file and returns the summary.
   counts are reported and its references are checked. The header entry count,
   the path hash count, the directory index file count and the decoded entries
   must all agree.
-- **Integrity.** The index, path hash index and full directory index bytes must
-  match the SHA-1 recorded for them, and every entry's offset plus stored size
-  must end before the index. The per-entry SHA-1 of file data is reported, not
+- **Integrity.** The index, path hash index and full directory index bytes are
+  checked against the SHA-1 recorded for them; a mismatch is an issue, not a
+  rejection. Every entry's offset plus stored size must end before the index. The per-entry SHA-1 of file data is reported, not
   checked, because file data is not read. Footer fields (compression names, the
   key GUID and the flags) have no recorded hash and are reported as stored.
 - **Version 12.** Reported as layout `v12`; its bytes are arranged like the
@@ -97,15 +97,38 @@ writes the complete Evidence to a new file and returns the summary.
   uncompressed size.
 - **Compression names.** `compression_method` 0 means stored, with
   `compression_name: null`. In version 8+ any other value counts from 1 into the
-  footer table (`compression_methods[method - 1]`), and a method naming an empty
-  or missing slot is rejected. Before version 8, from the legacy
+  footer table (`compression_methods[method - 1]`); a method naming an empty
+  or missing slot keeps the entry with `compression_name: null` and an issue. Before version 8, from the legacy
   flag values (1 `Zlib`, 2 `Gzip`, 4 `Custom`); other legacy values keep their
   raw `compression_method` with `compression_name: null`. Names identify
   methods; no data is decompressed, so they are not codec verification.
 - **Encrypted index.** Reported with `index.state: "encrypted"`, the footer
   facts and no entries. No key is accepted and nothing is decrypted.
 
+## Issues
+
+Two facts the pak records separately can disagree while the structure stays
+readable. Decoding then continues, only the affected fact becomes null, and
+`issues` records each contradiction once with its `kind`, the file `offset` of
+the record that shows it, and a `message`:
+
+| Kind                       | Offset                                 | Effect                                                                |
+| -------------------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `region-hash-mismatch`     | Start of the region                    | The region's bytes are decoded unverified.                            |
+| `duplicate-path`           | The repeated path name or path hash    | Every entry is kept in index order; a path no longer names one entry. |
+| `entry-count-mismatch`     | The index header entry count           | `index.entry_count` is null; each listing keeps its own count.        |
+| `unknown-compression-slot` | The entry record naming the empty slot | That entry's `compression_name` is null.                              |
+
+The summary counts issues, and `inspect_analysis_view` collection `issues`
+selects them by `indices`, `kinds` and `fields`, each row with its source
+`index`. An empty list means every checked redundant fact agreed, not that the
+file data is intact.
+
 ## Failures
+
+Structure that cannot be trusted for further reads is rejected with a reason
+and no partial success: offsets and sizes outside the file, truncated records,
+references that name no record, and counts above the resource limits.
 
 | Reason                         | Kind        | Meaning                                                                                |
 | ------------------------------ | ----------- | -------------------------------------------------------------------------------------- |
@@ -117,10 +140,6 @@ writes the complete Evidence to a new file and returns the summary.
 | `invalid-flag`                 | corrupt     | A boolean field is neither 0 nor 1.                                                    |
 | `index-trailing-bytes`         | corrupt     | The index or a listing region has bytes after its last record.                         |
 | `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record start.                                  |
-| `duplicate-path`               | corrupt     | A listing names one path, or the path hash index one hash, twice.                      |
-| `entry-count-mismatch`         | corrupt     | The header entry count disagrees with a listing or the decoded entries.                |
-| `unknown-compression-slot`     | corrupt     | A version 8+ entry names an empty or missing compression slot.                         |
-| `region-hash-mismatch`         | corrupt     | An index region does not match its recorded SHA-1.                                     |
 | `entry-out-of-bounds`          | corrupt     | An entry's stored bytes would end past the data area.                                  |
 | `region-too-large`             | resource    | An index region exceeds 256 MiB.                                                       |
 | `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                         |
