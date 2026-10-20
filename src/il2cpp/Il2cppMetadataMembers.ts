@@ -5,23 +5,26 @@ import type {
 import {
   checkRange,
   Il2cppMetadataFormatFailure,
-  readIndex,
-  type MetadataTables,
-} from "./Il2cppMetadataFile.js";
+} from "./Il2cppMetadataFormat.js";
+import type { MetadataTables } from "./Il2cppMetadataFile.js";
 
 type Members = Pick<
   Il2cppMetadata,
   "fields" | "properties" | "events" | "parameters" | "string_literals"
 >;
-
-interface Range {
+export interface MetadataOwnerRange {
   readonly start: number;
   readonly count: number;
 }
+export interface MetadataMemberOwners {
+  readonly fields: readonly MetadataOwnerRange[];
+  readonly properties: readonly MetadataOwnerRange[];
+  readonly events: readonly MetadataOwnerRange[];
+  readonly parameters: readonly MetadataOwnerRange[];
+}
 
-/** Entries in a member section, checked against its record size. */
 const entries = (
-  { indexing }: MetadataTables,
+  indexing: MetadataTables["indexing"],
   section: Il2cppMetadataSection,
   recordBytes: number,
 ) => {
@@ -35,17 +38,66 @@ const entries = (
   return count;
 };
 
-/** Owner of each row from the owners' ranges; unclaimed rows keep -1. */
-const claim = (ranges: readonly Range[], total: number, label: string) => {
+/** Own member record widths and validate all counts before any row allocation. */
+export const readIl2cppMemberTables = ({
+  widths,
+  indexing,
+  section,
+}: Pick<MetadataTables, "widths" | "indexing" | "section">) => {
+  const recordBytes = {
+    fields: 8 + widths.type,
+    properties: 20,
+    events: 20 + widths.type,
+    parameters: 8 + widths.type,
+    stringLiterals: indexing === "counted" ? 4 : 8,
+  };
+  const literalRecords = entries(
+    indexing,
+    section("stringLiterals"),
+    recordBytes.stringLiterals,
+  );
+  return {
+    recordBytes,
+    literalRecords,
+    counts: {
+      fields: entries(indexing, section("fields"), recordBytes.fields),
+      properties: entries(
+        indexing,
+        section("properties"),
+        recordBytes.properties,
+      ),
+      events: entries(indexing, section("events"), recordBytes.events),
+      parameters: entries(
+        indexing,
+        section("parameters"),
+        recordBytes.parameters,
+      ),
+      string_literals:
+        indexing === "counted"
+          ? Math.max(literalRecords - 1, 0)
+          : literalRecords,
+    },
+  };
+};
+
+/** Owners come from already parsed type/method facts, never a second raw-table interpretation. */
+function* claim(
+  ranges: readonly MetadataOwnerRange[],
+  total: number,
+  label: string,
+): Generator<void, Int32Array> {
   const owners = new Int32Array(total).fill(-1);
+  let work = 0;
   for (const [owner, range] of ranges.entries()) {
+    if (++work % 256 === 0) yield;
     checkRange(
       `${label} range of owner ${owner}`,
       range.start,
       range.count,
       total,
     );
-    for (let row = range.start; row < range.start + range.count; row += 1) {
+    for (let row = range.start; row < range.start + range.count; row++) {
+      if (++work % 256 === 0) yield;
       if (owners[row] !== -1)
         throw new Il2cppMetadataFormatFailure(
           "declaring-type-mismatch",
@@ -55,82 +107,33 @@ const claim = (ranges: readonly Range[], total: number, label: string) => {
     }
   }
   return owners;
-};
+}
 
-const typeMemberRanges = (tables: MetadataTables, typeTotal: number) => {
-  const { bytes, section, widths, recordBytes } = tables;
-  const typeDefinitions = section("typeDefinitions");
-  const fields: Range[] = [];
-  const properties: Range[] = [];
-  const events: Range[] = [];
-  for (let index = 0; index < typeTotal; index += 1) {
-    const at = typeDefinitions.offset + index * recordBytes.typeDefinitions;
-    // Same start and count blocks the type reader uses.
-    const starts =
-      at +
-      12 +
-      tables.typeDefinitionTypeIndices * widths.type +
-      widths.generic_container;
-    const countsAt = starts + 32;
-    fields.push({
-      start: bytes.readInt32LE(starts),
-      count: bytes.readUInt16LE(countsAt + 4),
-    });
-    events.push({
-      start: bytes.readInt32LE(starts + 8),
-      count: bytes.readUInt16LE(countsAt + 6),
-    });
-    properties.push({
-      start: bytes.readInt32LE(starts + 12),
-      count: bytes.readUInt16LE(countsAt + 2),
-    });
-  }
-  return { fields, properties, events };
-};
-
-const methodParameterRanges = (tables: MetadataTables, methodTotal: number) => {
-  const { bytes, section, widths, recordBytes } = tables;
-  const methods = section("methods");
-  return Array.from({ length: methodTotal }, (_, index) => {
-    const at = methods.offset + index * recordBytes.methods;
-    // Name, declaring type, return type and the optional return token.
-    const parameterStart =
-      at +
-      8 +
-      widths.type_definition +
-      widths.type +
-      (tables.methodReturnParameterToken ? 4 : 0) -
-      4;
-    return {
-      start: readIndex(bytes, parameterStart, widths.parameter),
-      count: bytes.readUInt16LE(at + recordBytes.methods - 2),
-    };
-  });
-};
-
-/** Rows between cooperative yields, matching the metadata row readers. */
-const BATCH = 256;
-
-/** Names in a member section, each paired with its owner. */
-function* readNamed(
+function* readNamed<
+  T extends { name: string } & Record<string, string | number>,
+>(
   tables: MetadataTables,
   name: "fields" | "properties" | "events" | "parameters",
-  recordBytes: number,
-  ranges: readonly Range[],
-): Generator<void, { name: string; owner: number }[]> {
-  const section = tables.section(name);
-  const total = entries(tables, section, recordBytes);
-  const owners = claim(ranges, total, name);
-  const rows: { name: string; owner: number }[] = [];
-  for (let index = 0; index < total; index += 1) {
-    if (index % BATCH === 0) yield;
-    rows.push({
-      name: tables.readString(
-        tables.bytes.readInt32LE(section.offset + index * recordBytes),
+  ranges: readonly MetadataOwnerRange[],
+  makeRow: (name: string, owner: number) => T,
+): Generator<void, T[]> {
+  const section = tables.section(name),
+    total = tables.members.counts[name];
+  const owners = yield* claim(ranges, total, name),
+    rows: T[] = [];
+  for (let index = 0; index < total; index++) {
+    if (index % 256 === 0) yield;
+    const row = makeRow(
+      tables.readString(
+        tables.bytes.readInt32LE(
+          section.offset + index * tables.members.recordBytes[name],
+        ),
         `${name} ${index} name`,
       ),
-      owner: owners[index]!,
-    });
+      owners[index]!,
+    );
+    tables.onRow?.(row);
+    rows.push(row);
   }
   return rows;
 }
@@ -138,23 +141,25 @@ function* readNamed(
 function* readStringLiterals(
   tables: MetadataTables,
 ): Generator<void, Members["string_literals"]> {
-  const { bytes, section, indexing } = tables;
-  const literals = section("stringLiterals");
-  const data = section("stringLiteralData");
+  const { bytes, section, indexing, members } = tables;
+  const literals = section("stringLiterals"),
+    data = section("stringLiteralData");
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  // Version 39 stores only start offsets and ends with a sentinel record;
-  // earlier versions store (length, offset) pairs.
-  const recordBytes = indexing === "counted" ? 4 : 8;
-  const records = entries(tables, literals, recordBytes);
-  const total = indexing === "counted" ? Math.max(records - 1, 0) : records;
+  // Repeated spans reuse their decoded text for this immutable file snapshot.
+  const decoded = new Map<string, Members["string_literals"][number]>();
   const rows: Members["string_literals"] = [];
-  for (let index = 0; index < total; index += 1) {
-    if (index % BATCH === 0) yield;
-    const at = literals.offset + index * recordBytes;
-    const start =
-      indexing === "counted"
-        ? bytes.readInt32LE(at)
-        : bytes.readInt32LE(at + 4);
+  if (indexing === "counted" && members.literalRecords === 1) {
+    const sentinel = bytes.readInt32LE(literals.offset);
+    if (sentinel < 0 || sentinel > data.size)
+      throw new Il2cppMetadataFormatFailure(
+        "index-out-of-range",
+        `empty string literal sentinel ${sentinel} is outside the ${data.size}-byte literal data`,
+      );
+  }
+  for (let index = 0; index < members.counts.string_literals; index++) {
+    if (index % 256 === 0) yield;
+    const at = literals.offset + index * members.recordBytes.stringLiterals;
+    const start = bytes.readInt32LE(at + (indexing === "counted" ? 0 : 4));
     const length =
       indexing === "counted"
         ? bytes.readInt32LE(at + 4) - start
@@ -164,55 +169,53 @@ function* readStringLiterals(
         "index-out-of-range",
         `string literal ${index} [${start}, ${start + length}) is outside the ${data.size}-byte literal data`,
       );
-    const value = bytes.subarray(
-      data.offset + start,
-      data.offset + start + length,
-    );
-    try {
-      rows.push({ value: decoder.decode(value), value_base64: null });
-    } catch {
-      rows.push({ value: null, value_base64: value.toString("base64") });
+    const key = `${start}:${length}`;
+    let literal = decoded.get(key);
+    if (literal === undefined) {
+      // Strict UTF-8 round trips preserve at least these bytes; base64 is larger.
+      // Refuse impossible output before allocating either representation.
+      tables.beforeText?.(length);
+      const value = bytes.subarray(
+        data.offset + start,
+        data.offset + start + length,
+      );
+      try {
+        literal = { value: decoder.decode(value), value_base64: null };
+      } catch {
+        tables.beforeText?.(4 * Math.ceil(length / 3));
+        literal = { value: null, value_base64: value.toString("base64") };
+      }
+      decoded.set(key, literal);
     }
+    tables.onRow?.(literal);
+    rows.push({ ...literal });
   }
   return rows;
 }
 
-/** Field, property, event and parameter names and managed string literals, yielding between row batches. */
+/** Decode each fact directly into its final row shape, yielding through ownership and content. */
 export function* readIl2cppMembers(
   tables: MetadataTables,
-  typeTotal: number,
-  methodTotal: number,
+  owners: MetadataMemberOwners,
 ): Generator<void, Members> {
-  const T = tables.widths.type;
-  const ranges = typeMemberRanges(tables, typeTotal);
-  const owned = (row: { name: string; owner: number }) => ({
-    name: row.name,
-    declaring_type: row.owner,
+  const member = (name: string, declaring_type: number) => ({
+    name,
+    declaring_type,
   });
-  yield;
-  const fields = (yield* readNamed(tables, "fields", 8 + T, ranges.fields)).map(
-    owned,
-  );
-  const properties = (yield* readNamed(
+  const fields = yield* readNamed(tables, "fields", owners.fields, member);
+  const properties = yield* readNamed(
     tables,
     "properties",
-    20,
-    ranges.properties,
-  )).map(owned);
-  const events = (yield* readNamed(
-    tables,
-    "events",
-    20 + T,
-    ranges.events,
-  )).map(owned);
-  const parameterRanges = methodParameterRanges(tables, methodTotal);
-  yield;
-  const parameters = (yield* readNamed(
+    owners.properties,
+    member,
+  );
+  const events = yield* readNamed(tables, "events", owners.events, member);
+  const parameters = yield* readNamed(
     tables,
     "parameters",
-    8 + T,
-    parameterRanges,
-  )).map((row) => ({ name: row.name, method: row.owner }));
+    owners.parameters,
+    (name, method) => ({ name, method }),
+  );
   return {
     fields,
     properties,

@@ -93,7 +93,7 @@ export const inspectIl2cppMetadataInputSchema = z.strictObject({
     .enum(["complete", "summary"])
     .default("summary")
     .describe(
-      "summary (default) retains complete Evidence and returns identity and collection counts; complete returns every image, type and method row inline",
+      "summary (default) retains complete Evidence and returns identity and collection counts; complete returns every image, type, method, member, parameter and string-literal row inline",
     ),
 });
 
@@ -201,31 +201,81 @@ export const il2cppMetadataObjectSchema = z.strictObject({
 });
 
 /** Complete name and count inventory of one decoded global-metadata.dat file. */
-export const il2cppMetadataSchema = il2cppMetadataObjectSchema.superRefine(
-  (report, context) => {
-    const names = il2cppMetadataSectionNames(report.metadata_version);
-    if (report.sections.length !== names.length)
+export const il2cppMetadataMemberCollections = [
+  "fields",
+  "properties",
+  "events",
+  "parameters",
+  "string_literals",
+] as const;
+
+/** Historical reports retain omission instead of inventing empty member inventories. */
+const il2cppMetadataParentObjectSchema = il2cppMetadataObjectSchema.partial({
+  fields: true,
+  properties: true,
+  events: true,
+  parameters: true,
+  string_literals: true,
+});
+
+const validateMetadataFacts = (
+  report: z.infer<typeof il2cppMetadataParentObjectSchema>,
+  context: z.RefinementCtx,
+): void => {
+  const names = il2cppMetadataSectionNames(report.metadata_version);
+  if (report.sections.length !== names.length)
+    context.addIssue({
+      code: "custom",
+      path: ["sections"],
+      message: `Version ${report.metadata_version} headers have ${names.length} sections.`,
+    });
+  report.sections.forEach((section, index) => {
+    if (section.name !== names[index])
       context.addIssue({
         code: "custom",
-        path: ["sections"],
-        message: `Version ${report.metadata_version} headers have ${names.length} sections.`,
+        path: ["sections", index, "name"],
+        message: "Sections must follow header order.",
       });
-    report.sections.forEach((section, index) => {
-      if (section.name !== names[index])
+    if (section.offset + section.size > report.artifact.bytes)
+      context.addIssue({
+        code: "custom",
+        path: ["sections", index],
+        message: "Section range is outside the selected artifact.",
+      });
+  });
+  for (const collection of ["fields", "properties", "events"] as const)
+    report[collection]?.forEach((row, index) => {
+      if (row.declaring_type >= report.types.length)
         context.addIssue({
           code: "custom",
-          path: ["sections", index, "name"],
-          message: "Sections must follow header order.",
-        });
-      if (section.offset + section.size > report.artifact.bytes)
-        context.addIssue({
-          code: "custom",
-          path: ["sections", index],
-          message: "Section range is outside the selected artifact.",
+          path: [collection, index, "declaring_type"],
+          message: "Member owner is outside the retained type definitions.",
         });
     });
-  },
+  report.parameters?.forEach((row, index) => {
+    if (row.method >= report.methods.length)
+      context.addIssue({
+        code: "custom",
+        path: ["parameters", index, "method"],
+        message: "Parameter owner is outside the retained method definitions.",
+      });
+  });
+  report.string_literals?.forEach((row, index) => {
+    if ((row.value === null) === (row.value_base64 === null))
+      context.addIssue({
+        code: "custom",
+        path: ["string_literals", index],
+        message:
+          "A literal must retain exactly one UTF-8 or byte-exact base64 representation.",
+      });
+  });
+};
+
+export const il2cppMetadataSchema = il2cppMetadataObjectSchema.superRefine(
+  validateMetadataFacts,
 );
+export const il2cppMetadataParentSchema =
+  il2cppMetadataParentObjectSchema.superRefine(validateMetadataFacts);
 
 export type InspectIl2cppMetadataInput = z.infer<
   typeof inspectIl2cppMetadataInputSchema

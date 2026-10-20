@@ -11,7 +11,8 @@ import {
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
   il2cppMetadataObjectSchema,
-  il2cppMetadataSchema,
+  il2cppMetadataParentSchema,
+  il2cppMetadataMemberCollections,
   il2cppMetadataTypeSchema,
 } from "../il2cpp/il2cppMetadata.js";
 import { err, ok, type Result } from "../result.js";
@@ -32,11 +33,11 @@ const countsSchema = z.strictObject({
   types: z.number().int().nonnegative(),
   methods: z.number().int().nonnegative(),
   nested_types: z.number().int().nonnegative(),
-  fields: z.number().int().nonnegative(),
-  properties: z.number().int().nonnegative(),
-  events: z.number().int().nonnegative(),
-  parameters: z.number().int().nonnegative(),
-  string_literals: z.number().int().nonnegative(),
+  fields: z.number().int().nonnegative().nullable(),
+  properties: z.number().int().nonnegative().nullable(),
+  events: z.number().int().nonnegative().nullable(),
+  parameters: z.number().int().nonnegative().nullable(),
+  string_literals: z.number().int().nonnegative().nullable(),
 });
 
 export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
@@ -119,6 +120,7 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
     z.strictObject({
       ...page,
       collection: z.literal("parameters"),
+      method_indices: z.array(indexSchema).optional(),
       fields: z.array(parameterRowSchema.keyof()).optional(),
     }),
     z.strictObject({
@@ -144,9 +146,9 @@ export const il2cppMetadataViewContextSchema = z.strictObject({
   counts: countsSchema,
 });
 
-type Report = z.infer<typeof il2cppMetadataSchema>;
+type Report = z.infer<typeof il2cppMetadataParentSchema>;
 type Request = z.infer<typeof il2cppMetadataViewRequestSchema>;
-type Row = Report[Request["collection"]][number];
+type Row = NonNullable<Report[Request["collection"]]>[number];
 interface CheckedReport {
   readonly report: Report;
   readonly counts: z.infer<typeof countsSchema>;
@@ -167,7 +169,7 @@ const parseMetadataReport = (
     isImmutableJsonSnapshot(key);
   const cached = reusable ? checkedReports.get(key) : undefined;
   if (cached !== undefined) return ok(cached);
-  const parsed = parseAnalysisViewResult(il2cppMetadataSchema, parent);
+  const parsed = parseAnalysisViewResult(il2cppMetadataParentSchema, parent);
   if (!parsed.ok) return parsed;
   // This schema has no coercions/transforms; the authenticated owner value is
   // equivalent to the validated clone and remains immutable across pages.
@@ -183,11 +185,11 @@ const parseMetadataReport = (
         (count, type) => count + Number(type.declaring_type !== -1),
         0,
       ),
-      fields: report.fields.length,
-      properties: report.properties.length,
-      events: report.events.length,
-      parameters: report.parameters.length,
-      string_literals: report.string_literals.length,
+      fields: report.fields?.length ?? null,
+      properties: report.properties?.length ?? null,
+      events: report.events?.length ?? null,
+      parameters: report.parameters?.length ?? null,
+      string_literals: report.string_literals?.length ?? null,
     },
   };
   if (reusable) checkedReports.set(key, checked);
@@ -229,6 +231,10 @@ const selection = (view: Request, report: Report) => {
     !("declaring_types" in view) || view.declaring_types === undefined
       ? undefined
       : new Set(view.declaring_types);
+  const methods =
+    view.collection === "parameters" && view.method_indices !== undefined
+      ? new Set(view.method_indices)
+      : undefined;
   const namespaces =
     view.collection !== "types" || view.namespaces === undefined
       ? undefined
@@ -271,6 +277,11 @@ const selection = (view: Request, report: Report) => {
     if (
       namespaces !== undefined &&
       (!("namespace" in row) || !namespaces.has(row.namespace))
+    )
+      return false;
+    if (
+      methods !== undefined &&
+      (!("method" in row) || !methods.has(row.method))
     )
       return false;
     if (imageIndices === undefined) return true;
@@ -351,6 +362,12 @@ export const projectIl2cppMetadataView = (
     artifact: { path: report.artifact.path, sha256: report.artifact.sha256 },
     limitations: [...parent.limitations],
     unknowns: [
+      ...il2cppMetadataMemberCollections
+        .filter((name) => report[name] === undefined)
+        .map(
+          (name) =>
+            `Retained Evidence did not collect ${name}; its count is unknown. Reinspect the metadata to acquire these facts.`,
+        ),
       "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown.",
       ...(parent.subject == null
         ? [
@@ -368,6 +385,16 @@ export const projectIl2cppMetadataView = (
       coverage: completeWithinViewCoverage(1, 1),
     });
   const rows = allRows[view.collection];
+  if (rows === undefined)
+    return err(
+      analysisViewInputError([
+        {
+          path: ["view", "collection"],
+          reason: "invalid_value",
+          message: `Retained Evidence did not collect ${view.collection}; inspect the metadata again to acquire these facts.`,
+        },
+      ]),
+    );
   const matches = selection(view, report);
   const selectedFields =
     view.fields === undefined ? undefined : new Set<string>(view.fields);

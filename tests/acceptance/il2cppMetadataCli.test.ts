@@ -16,7 +16,9 @@ import {
   analysisViewResultSchema,
   il2cppMetadataSummaryViewResultSchema,
 } from "../../src/domain/analysisView/analysisView.js";
-import { parseEvidence } from "../../src/domain/evidence.js";
+import { createEvidence, parseEvidence } from "../../src/domain/evidence.js";
+import { createEvidenceBundle } from "../../src/domain/evidenceBundle.js";
+import { jsonObjectSchema } from "../../src/domain/jsonValue.js";
 import { il2cppMetadataSchema } from "../../src/domain/il2cpp/il2cppMetadata.js";
 import {
   createIl2cppMetadataFixture,
@@ -104,6 +106,11 @@ cliTest(
       "images",
       "types",
       "methods",
+      "fields",
+      "properties",
+      "events",
+      "parameters",
+      "string_literals",
     ] as const) {
       const rows: unknown[] = [];
       let offset = 0;
@@ -292,6 +299,23 @@ it("queries compact retained metadata through the real SDK with exact row identi
     coverage: { total: 2, exhausted: true, next_offset: null },
   });
   expect(
+    await selected({
+      collection: "parameters",
+      method_indices: [2, 2, 99],
+      fields: ["name", "method"],
+    }),
+  ).toMatchObject({
+    items: [{ index: 0, name: "amount", method: 2 }],
+    coverage: { total: 1, exhausted: true },
+  });
+  expect(
+    await selected({
+      collection: "parameters",
+      method_indices: [],
+      fields: [],
+    }),
+  ).toMatchObject({ items: [], coverage: { total: 0, exhausted: true } });
+  expect(
     (await selected({ collection: "methods", indices: [2, 0], fields: [] }))
       .items,
   ).toEqual([{ index: 0 }, { index: 2 }]);
@@ -309,6 +333,83 @@ it("queries compact retained metadata through the real SDK with exact row identi
   });
   expect(parseMcpToolError(invalid).error.code).toBe("invalid_request");
   await client.ping();
+}, 30000);
+
+it("imports historical metadata Evidence with unavailable member collections without inventing empty results", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-history-"),
+    path = join(root, "global-metadata.dat");
+  await writeFile(path, createIl2cppMetadataFixture({ version: 29 }).bytes);
+  const { call } = await connectLocalToolsMcp();
+  const fresh = await call("inspect_il2cpp_metadata", {
+    path,
+    detail: "complete",
+  });
+  expect(fresh.isError, JSON.stringify(fresh)).not.toBe(true);
+  const original = parseEvidence(fresh.structuredContent),
+    legacy = jsonObjectSchema.parse(original.normalized_result);
+  for (const key of [
+    "fields",
+    "properties",
+    "events",
+    "parameters",
+    "string_literals",
+  ])
+    delete legacy[key];
+  const historical = createEvidence(
+    {
+      path,
+      sha256: original.subject!.digest.sha256,
+      format: "file",
+    },
+    original.provider,
+    {
+      operation: "inspect_il2cpp_metadata",
+      parameters: { path },
+      result: legacy,
+      limitations: original.limitations,
+      locations: original.locations,
+    },
+  );
+  const bundle = join(root, "historical.json");
+  await writeFile(bundle, JSON.stringify(createEvidenceBundle([historical])));
+  await unlink(path);
+  const imported = await call("import_evidence_bundle", { path: bundle });
+  expect(imported.isError, JSON.stringify(imported)).not.toBe(true);
+  const source = {
+    kind: "retained-evidence",
+    evidence_id: historical.evidence_id,
+  };
+  const summary = await call("inspect_analysis_view", {
+    source,
+    view: { kind: "summary" },
+  });
+  expect(summary.isError, JSON.stringify(summary)).not.toBe(true);
+  expect(
+    parseEvidence(summary.structuredContent).normalized_result,
+  ).toMatchObject({
+    summary: { counts: { methods: 5, fields: null, parameters: null } },
+    unknowns: expect.arrayContaining([
+      expect.stringContaining("did not collect parameters"),
+    ]),
+  });
+  const types = await call("inspect_analysis_view", {
+    source,
+    view: {
+      kind: "il2cpp-metadata",
+      collection: "types",
+      indices: [0],
+      fields: ["name"],
+    },
+  });
+  expect(types.isError).not.toBe(true);
+  expect(
+    parseEvidence(types.structuredContent).normalized_result,
+  ).toMatchObject({ items: [{ index: 0, name: "Player" }] });
+  const unavailable = await call("inspect_analysis_view", {
+    source,
+    view: { kind: "il2cpp-metadata", collection: "parameters" },
+  });
+  expect(parseMcpToolError(unavailable).error.code).toBe("invalid_request");
 }, 30000);
 
 cliTest(

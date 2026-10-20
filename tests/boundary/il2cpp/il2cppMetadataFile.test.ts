@@ -1,10 +1,13 @@
+import {
+  Il2cppMetadataFormatFailure,
+  type Il2cppMetadataFailureReason,
+} from "../../../src/il2cpp/Il2cppMetadataFormat.js";
 import { describe, expect, it } from "vitest";
 import {
   il2cppIndexWidth,
   il2cppMetadataRecordBytes,
-  Il2cppMetadataFormatFailure,
   readIl2cppMetadata,
-  type Il2cppMetadataFailureReason,
+  readIl2cppMetadataSteps,
 } from "../../../src/il2cpp/Il2cppMetadataFile.js";
 import {
   createIl2cppMetadataFixture,
@@ -50,6 +53,47 @@ const mutated = (
 };
 
 describe("IL2CPP global-metadata version 39", () => {
+  it("yields through a large owner range before emitting its first parameter fact", () => {
+    const fixture = createIl2cppMetadataFixture({
+      wide: { fillerTypes: 0, genericContainers: 0, parameters: 65_000 },
+    });
+    const bytes = Buffer.from(fixture.bytes),
+      total = fixture.section("parameters").count!;
+    bytes.writeUInt16LE(
+      total,
+      fixture.record("methods", 2) + fixture.recordBytes.methods - 2,
+    );
+    let firstParameter = false,
+      yieldsBeforeParameter = 0;
+    const steps = readIl2cppMetadataSteps(bytes, {
+      onRow: (row) => {
+        if ("method" in row) firstParameter = true;
+      },
+    });
+    for (;;) {
+      const step = steps.next();
+      if (step.done) break;
+      if (!firstParameter) yieldsBeforeParameter++;
+    }
+    expect(firstParameter).toBe(true);
+    expect(yieldsBeforeParameter).toBeGreaterThan(200);
+  });
+  it.each([-1, 0x7fffffff])(
+    "rejects an invalid empty-literal sentinel %i",
+    (sentinel) => {
+      rejects(
+        mutated((fixture, bytes) => {
+          bytes.writeInt32LE(4, fixture.header("stringLiterals", "size"));
+          bytes.writeInt32LE(1, fixture.header("stringLiterals", "count"));
+          bytes.writeInt32LE(
+            sentinel,
+            fixture.section("stringLiterals").offset,
+          );
+        }),
+        "index-out-of-range",
+      );
+    },
+  );
   it.each([1, 2, 4] as const)(
     "decodes names, ranges and nesting with a %i-byte TypeIndex in about 1 KiB",
     (typeIndexWidth) => {

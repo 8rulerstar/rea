@@ -1,4 +1,8 @@
 import {
+  checkRange,
+  Il2cppMetadataFormatFailure,
+} from "./Il2cppMetadataFormat.js";
+import {
   IL2CPP_METADATA_MAGIC,
   IL2CPP_METADATA_VERSIONS,
   il2cppMetadataSectionNames,
@@ -6,49 +10,13 @@ import {
   type Il2cppMetadataSection,
   type IL2cppMetadataSectionName,
 } from "../domain/il2cpp/il2cppMetadata.js";
-import { readIl2cppMembers } from "./Il2cppMetadataMembers.js";
+import {
+  readIl2cppMembers,
+  readIl2cppMemberTables,
+  type MetadataOwnerRange,
+} from "./Il2cppMetadataMembers.js";
 
 const NESTED_TYPE_ENTRY_BYTES = 4;
-
-/** Stable machine-readable reason for each rejected input. */
-export const IL2CPP_METADATA_FAILURE_REASONS = {
-  unsupported: ["unrecognized-magic", "unsupported-version"],
-  corrupt: [
-    "truncated-header",
-    "unexpected-header-size",
-    "section-out-of-bounds",
-    "section-overlap",
-    "record-size-mismatch",
-    "type-index-width",
-    "index-out-of-range",
-    "nested-type-conflict",
-    "declaring-type-mismatch",
-    "image-range-overlap",
-    "invalid-string",
-  ],
-} as const;
-export type Il2cppMetadataFailureKind =
-  keyof typeof IL2CPP_METADATA_FAILURE_REASONS;
-export type Il2cppMetadataFailureReason =
-  (typeof IL2CPP_METADATA_FAILURE_REASONS)[Il2cppMetadataFailureKind][number];
-
-/** Distinguish inputs outside decoder coverage from damaged metadata. */
-export class Il2cppMetadataFormatFailure extends Error {
-  readonly kind: Il2cppMetadataFailureKind;
-  constructor(
-    readonly reason: Il2cppMetadataFailureReason,
-    message: string,
-    options?: ErrorOptions,
-  ) {
-    super(`${reason}: ${message}`, options);
-    this.name = "Il2cppMetadataFormatFailure";
-    this.kind = (
-      IL2CPP_METADATA_FAILURE_REASONS.unsupported as readonly string[]
-    ).includes(reason)
-      ? "unsupported"
-      : "corrupt";
-  }
-}
 
 type SectionName = IL2cppMetadataSectionName;
 type IndexWidth = 1 | 2 | 4;
@@ -363,27 +331,17 @@ const recordCounts = (
   };
 };
 
-export const checkRange = (
-  label: string,
-  start: number,
-  length: number,
-  total: number,
-) => {
-  if (length === 0 && start >= -1 && start <= total) return;
-  if (start < 0 || start + length > total)
-    throw new Il2cppMetadataFormatFailure(
-      "index-out-of-range",
-      `${label} range [${start}, ${start + length}) is outside the ${total} available entries`,
-    );
-};
-
 /**
  * Decode NUL-terminated UTF-8 names once each from the strings section. An
  * index must start a string, so a shifted section or a pointer into another
  * name fails instead of returning a different name, and total decoding stays
  * bounded by the section size.
  */
-const createStringReader = (bytes: Buffer, strings: Il2cppMetadataSection) => {
+const createStringReader = (
+  bytes: Buffer,
+  strings: Il2cppMetadataSection,
+  beforeText?: (bytes: number) => void,
+) => {
   const stringEnd = strings.offset + strings.size;
   const pool = bytes.subarray(strings.offset, stringEnd);
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -402,6 +360,7 @@ const createStringReader = (bytes: Buffer, strings: Il2cppMetadataSection) => {
         "invalid-string",
         `${label} string index ${index} starts inside another string`,
       );
+    beforeText?.(end - index);
     let value: string;
     try {
       value = decoder.decode(pool.subarray(index, end));
@@ -428,6 +387,9 @@ export interface MetadataTables {
   readonly indexing: "fixed" | "counted";
   readonly methodReturnParameterToken: boolean;
   readonly readString: ReturnType<typeof createStringReader>;
+  readonly members: ReturnType<typeof readIl2cppMemberTables>;
+  readonly beforeText: Il2cppMetadataReadOptions["beforeText"];
+  readonly onRow: Il2cppMetadataReadOptions["onRow"];
 }
 
 function* readImages({
@@ -437,6 +399,7 @@ function* readImages({
   recordBytes: sizes,
   counts,
   readString,
+  onRow,
 }: MetadataTables): Generator<void, Il2cppMetadataDecoded["images"]> {
   const images = section("images");
   const typeTotal = counts.typeDefinitions;
@@ -456,6 +419,7 @@ function* readImages({
       image.type_count,
       typeTotal,
     );
+    onRow?.(image);
     result.push(image);
   }
   return result;
@@ -531,14 +495,27 @@ function* rejectNestingCycles(types: Il2cppMetadataDecoded["types"]) {
   }
 }
 
-function* readTypes(
-  tables: MetadataTables,
-): Generator<void, Il2cppMetadataDecoded["types"]> {
+function* readTypes(tables: MetadataTables): Generator<
+  void,
+  {
+    types: Il2cppMetadataDecoded["types"];
+    memberRanges: {
+      fields: MetadataOwnerRange[];
+      properties: MetadataOwnerRange[];
+      events: MetadataOwnerRange[];
+    };
+  }
+> {
   const { bytes, section, widths, recordBytes: sizes, counts } = tables;
   const { readString, typeDefinitionTypeIndices } = tables;
   const typeDefinitions = section("typeDefinitions");
   const methodTotal = counts.methods;
   const types: Il2cppMetadataDecoded["types"] = [];
+  const memberRanges = {
+    fields: [] as MetadataOwnerRange[],
+    properties: [] as MetadataOwnerRange[],
+    events: [] as MetadataOwnerRange[],
+  };
   for (let index = 0; index < counts.typeDefinitions; index++) {
     if (index % 256 === 0) yield;
     const at = typeDefinitions.offset + index * sizes.typeDefinitions;
@@ -568,10 +545,23 @@ function* readTypes(
       type.method_count,
       methodTotal,
     );
+    memberRanges.fields.push({
+      start: bytes.readInt32LE(starts),
+      count: bytes.readUInt16LE(countsAt + 4),
+    });
+    memberRanges.events.push({
+      start: bytes.readInt32LE(starts + 8),
+      count: bytes.readUInt16LE(countsAt + 6),
+    });
+    memberRanges.properties.push({
+      start: bytes.readInt32LE(starts + 12),
+      count: bytes.readUInt16LE(countsAt + 2),
+    });
+    tables.onRow?.(type);
     types.push(type);
   }
   yield* assignNesting(tables, types);
-  return types;
+  return { types, memberRanges };
 }
 
 function* readMethods({
@@ -581,10 +571,19 @@ function* readMethods({
   recordBytes: sizes,
   counts,
   readString,
-}: MetadataTables): Generator<void, Il2cppMetadataDecoded["methods"]> {
+  methodReturnParameterToken,
+  onRow,
+}: MetadataTables): Generator<
+  void,
+  {
+    methods: Il2cppMetadataDecoded["methods"];
+    parameterRanges: MetadataOwnerRange[];
+  }
+> {
   const methods = section("methods");
   const typeTotal = counts.typeDefinitions;
   const result: Il2cppMetadataDecoded["methods"] = [];
+  const parameterRanges: MetadataOwnerRange[] = [];
   for (let index = 0; index < counts.methods; index++) {
     if (index % 256 === 0) yield;
     const at = methods.offset + index * sizes.methods;
@@ -597,9 +596,22 @@ function* readMethods({
         "index-out-of-range",
         `method ${index} declares type ${method.declaring_type} outside the ${typeTotal} type definitions`,
       );
+    parameterRanges.push({
+      start: readIndex(
+        bytes,
+        at +
+          4 +
+          widths.type_definition +
+          widths.type +
+          (methodReturnParameterToken ? 4 : 0),
+        widths.parameter,
+      ),
+      count: bytes.readUInt16LE(at + sizes.methods - 2),
+    });
+    onRow?.(method);
     result.push(method);
   }
-  return result;
+  return { methods: result, parameterRanges };
 }
 
 /**
@@ -670,11 +682,22 @@ export interface Il2cppMetadataRowCounts {
   readonly images: number;
   readonly types: number;
   readonly methods: number;
+  readonly fields: number;
+  readonly properties: number;
+  readonly events: number;
+  readonly parameters: number;
+  readonly string_literals: number;
 }
 
 export interface Il2cppMetadataReadOptions {
   /** Called before any row is decoded; may throw to refuse the file. */
   readonly beforeRows?: (counts: Il2cppMetadataRowCounts) => void;
+  /** Guard raw text before allocating its decoded or base64 representation. */
+  readonly beforeText?: (bytes: number) => void;
+  /** Admit each fact before retention, including repeated strings. */
+  readonly onRow?: (
+    row: Readonly<Record<string, string | number | null>>,
+  ) => void;
 }
 
 /** Decode image, type, method and member names and string literals without native binaries or decryption. */
@@ -699,24 +722,35 @@ export function* readIl2cppMetadataSteps(
     typeDefinitionTypeIndices: layout.typeDefinitionTypeIndices,
     indexing: layout.indexing,
     methodReturnParameterToken: layout.methodReturnParameterToken,
-    readString: createStringReader(bytes, section("strings")),
+    readString: createStringReader(
+      bytes,
+      section("strings"),
+      options.beforeText,
+    ),
+    members: readIl2cppMemberTables({
+      widths,
+      indexing: layout.indexing,
+      section,
+    }),
+    beforeText: options.beforeText,
+    onRow: options.onRow,
   };
   options.beforeRows?.({
     images: tables.counts.images,
     types: tables.counts.typeDefinitions,
     methods: tables.counts.methods,
+    ...tables.members.counts,
   });
   yield;
   const images = yield* readImages(tables);
   yield* checkImageRanges(images);
-  const types = yield* readTypes(tables);
-  const methods = yield* readMethods(tables);
+  const { types, memberRanges } = yield* readTypes(tables);
+  const { methods, parameterRanges } = yield* readMethods(tables);
   yield* checkMethodOwners(types, methods);
-  const members = yield* readIl2cppMembers(
-    tables,
-    types.length,
-    methods.length,
-  );
+  const members = yield* readIl2cppMembers(tables, {
+    ...memberRanges,
+    parameters: parameterRanges,
+  });
   return {
     magic,
     metadata_version: version,

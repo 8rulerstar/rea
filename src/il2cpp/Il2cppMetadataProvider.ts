@@ -1,3 +1,4 @@
+import { Il2cppMetadataFormatFailure } from "./Il2cppMetadataFormat.js";
 import { setImmediate } from "node:timers/promises";
 import {
   readStableArtifact,
@@ -17,7 +18,7 @@ import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type { Il2cppMetadataPort } from "../application/il2cpp/Il2cppMetadataPort.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { createEvidence } from "../domain/evidence.js";
-import { jsonStringByteLength } from "../domain/jsonStringByteLength.js";
+import { createIl2cppMetadataAdmission } from "./Il2cppMetadataAdmission.js";
 import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import {
   AnalysisAccessDeniedError,
@@ -37,9 +38,7 @@ import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
-  Il2cppMetadataFormatFailure,
   readIl2cppMetadataSteps,
-  type Il2cppMetadataDecoded,
   type Il2cppMetadataRowCounts,
 } from "./Il2cppMetadataFile.js";
 
@@ -53,79 +52,6 @@ const OPERATION = "inspect_il2cpp_metadata";
 const INPUT_BYTES = 256 * 1024 * 1024;
 // A 12.9 MB Unity 6000.4 file with 112,232 methods serializes to 7.8 MB.
 const OUTPUT_BYTES = 64 * 1024 * 1024;
-// The smallest JSON a row can take: empty names and one-digit numbers.
-const EMPTY_NAME = JSON.stringify("").length;
-
-/** JSON characters of one row besides its strings, with one-digit numbers. */
-const rowOverhead = (row: Record<string, string | number>) =>
-  JSON.stringify(row).length -
-  2 * Object.values(row).filter((value) => typeof value === "string").length;
-const IMAGE_ROW = rowOverhead({ name: "", type_start: 0, type_count: 0 });
-const TYPE_ROW = rowOverhead({
-  name: "",
-  namespace: "",
-  method_start: 0,
-  method_count: 0,
-  nested_type_start: 0,
-  nested_type_count: 0,
-  declaring_type: 0,
-});
-const METHOD_ROW = rowOverhead({ name: "", declaring_type: 0 });
-const MEMBER_ROW = METHOD_ROW;
-const PARAMETER_ROW = rowOverhead({ name: "", method: 0 });
-// Literals carry `null` for the unused form instead of a string.
-const LITERAL_ROW =
-  JSON.stringify({ value: null, value_base64: null }).length - 4;
-
-/**
- * A lower bound on the serialized rows. Rows share decoded names, so the
- * report can be far larger than the file; refusing from this bound avoids
- * building a string the budget would reject anyway. Once the bound passes
- * `limit` it returns early, so no single name is escaped past the budget.
- */
-const serializedRowsLowerBound = (
-  decoded: Il2cppMetadataDecoded,
-  limit: number,
-) => {
-  const lengths = new Map<string, number>();
-  let total = 0;
-  const text = (value: string) => {
-    let length = lengths.get(value);
-    if (length === undefined) {
-      // UTF-8 bytes, the unit the final report budget is checked in.
-      length = jsonStringByteLength(value, limit - total);
-      lengths.set(value, length);
-    }
-    return length;
-  };
-  for (const image of decoded.images) {
-    total += IMAGE_ROW + text(image.name);
-    if (total > limit) return total;
-  }
-  for (const type of decoded.types) {
-    total += TYPE_ROW + text(type.name) + text(type.namespace);
-    if (total > limit) return total;
-  }
-  for (const method of decoded.methods) {
-    total += METHOD_ROW + text(method.name);
-    if (total > limit) return total;
-  }
-  for (const members of [decoded.fields, decoded.properties, decoded.events])
-    for (const member of members) {
-      total += MEMBER_ROW + text(member.name);
-      if (total > limit) return total;
-    }
-  for (const parameter of decoded.parameters) {
-    total += PARAMETER_ROW + text(parameter.name);
-    if (total > limit) return total;
-  }
-  for (const literal of decoded.string_literals) {
-    total += LITERAL_ROW + text(literal.value ?? literal.value_base64 ?? "");
-    if (total > limit) return total;
-  }
-  return total;
-};
-
 const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
   if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
@@ -225,12 +151,6 @@ const reportLimit = (path: string, maximumBytes: number) =>
     `Complete IL2CPP metadata for ${path} exceeds the retained report budget; no complete inventory is retained.`,
     { maximum_report_bytes: maximumBytes },
   );
-
-/** Lower bound from row counts alone, so oversized files fail before rows are allocated. */
-const countLowerBound = ({ images, types, methods }: Il2cppMetadataRowCounts) =>
-  images * (IMAGE_ROW + EMPTY_NAME) +
-  types * (TYPE_ROW + 2 * EMPTY_NAME) +
-  methods * (METHOD_ROW + EMPTY_NAME);
 
 const sourceArtifact = (path: string, snapshot: StableArtifactSnapshot) => ({
   path,
@@ -357,11 +277,14 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
         observed.artifact = artifact;
         assertArtifactReadActive(options?.signal);
         const limit = this.outputBytes;
+        const admission = createIl2cppMetadataAdmission(limit, () => {
+          throw reportLimit(input.path, limit);
+        });
         const steps = readIl2cppMetadataSteps(snapshot.bytes, {
+          ...admission,
           beforeRows: (counts) => {
             observed.counts = counts;
-            if (countLowerBound(counts) > limit)
-              throw reportLimit(input.path, limit);
+            admission.beforeRows(counts);
           },
         });
         let step = steps.next();
@@ -371,8 +294,6 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           step = steps.next();
         }
         const decoded = step.value;
-        if (serializedRowsLowerBound(decoded, limit) > limit)
-          throw reportLimit(input.path, limit);
         const report = {
           ...decoded,
           artifact,
