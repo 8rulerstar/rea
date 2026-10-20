@@ -75,6 +75,13 @@ export const projectDesktopApplication = (
       );
   }
   for (const file of managed)
+    if (has(file, "unity-il2cpp-backup-convention"))
+      probe(
+        "inspect_managed_members",
+        file,
+        'Inventory types, members and user strings of this predefined script assembly in a Unity IL2CPP backup folder; its correspondence to the shipped native code is unknown. Start with detail "summary" and page rows through inspect_analysis_view.',
+      );
+  for (const file of managed)
     probe(
       "inspect_managed_artifact",
       file,

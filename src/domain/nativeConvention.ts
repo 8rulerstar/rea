@@ -50,8 +50,13 @@ export const isSwiftRuntimeLibrary = (path: string): boolean =>
     .split("/")
     .some((segment) => /^libswift.+\.dylib$/u.test(foldSegment(segment)));
 
+/** Unity names the pre-IL2CPP managed backup `<Product>_BackUpThisFolder_ButDontShipItWithYourGame`. */
+const UNITY_IL2CPP_BACKUP_SUFFIX =
+  "_backupthisfolder_butdontshipitwithyourgame";
+
 /** Parse desktop layout conventions once while preserving original path segments. */
-export const desktopPathConventions = (path: string) => {
+/** `rootName` is the admitted root directory name; `.` denotes that root in returned directories. */
+export const desktopPathConventions = (path: string, rootName?: string) => {
   const segments = path.split("/");
   const folded = segments.map(foldSegment);
   let unityManagedDirectory: string | null = null;
@@ -72,8 +77,30 @@ export const desktopPathConventions = (path: string) => {
       unityManagedIndex = index + 1;
     }
   }
+  // The admitted root may itself be the backup folder, so its name precedes the relative segments.
+  const rooted =
+    rootName === undefined ? folded : [foldSegment(rootName), ...folded];
+  const shift = rooted.length - folded.length;
+  let unityIl2cppBackupDirectory: string | null = null;
+  let unityIl2cppBackupIndex = -1;
+  for (let index = 0; index + 1 < rooted.length; index++) {
+    const segment = rooted[index] ?? "";
+    if (
+      segment.length > UNITY_IL2CPP_BACKUP_SUFFIX.length &&
+      segment.endsWith(UNITY_IL2CPP_BACKUP_SUFFIX)
+    ) {
+      unityIl2cppBackupDirectory =
+        index < shift ? "." : segments.slice(0, index - shift + 1).join("/");
+      unityIl2cppBackupIndex = index - shift;
+    }
+  }
   const name = folded.at(-1) ?? "";
   return {
+    unityIl2cppBackupDirectory,
+    unityIl2cppBackupAssembly:
+      unityIl2cppBackupIndex === segments.length - 3 &&
+      folded[unityIl2cppBackupIndex + 1] === "managed" &&
+      UNITY_PREDEFINED_ASSEMBLIES.has(name),
     unityManagedDirectory,
     unityPredefinedAssembly:
       unityManagedIndex === segments.length - 2 &&

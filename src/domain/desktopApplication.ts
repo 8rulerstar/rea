@@ -79,6 +79,11 @@ const desktopFactSchema = z.discriminatedUnion("kind", [
     value: z.string(),
   }),
   z.strictObject({
+    kind: z.literal("unity-il2cpp-backup-convention"),
+    offset: z.null(),
+    value: z.strictObject({ backup_directory: z.string() }),
+  }),
+  z.strictObject({
     kind: z.literal("electron-asar-convention"),
     offset: z.null(),
     value: z.string(),
