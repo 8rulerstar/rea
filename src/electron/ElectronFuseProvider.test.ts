@@ -594,6 +594,10 @@ it("rejects a sparse artifact over 1 GiB before scanning", async () => {
     expect(projectAnalysisError(result.error)).toMatchObject({
       code: "resource_constraint",
       details: { reported_limits: { maximum_input_bytes: 1024 * 1024 * 1024 } },
+      remediation: {
+        action:
+          "Select a suitable stable artifact within the reported input byte allowance. Do not truncate required bytes; retrying the unchanged oversized input will fail again.",
+      },
     });
   }
 });
