@@ -153,9 +153,10 @@ for a blank Mac project (Oodle, 1,722 entries, 10,473,434 bytes, SHA-256
 verifier passed, repak 0.2.3 listed the same 1,722 paths, and CUE4Parse matched
 every entry offset, stored size, uncompressed size, block count and encryption
 flag. CUE4Parse replaces a stored block size of 0 with the uncompressed size, so
-16 block sizes differ by that substitution only. Separately, 46 generated paks (versions 1 to 11 with no compression, Zlib,
-Gzip, LZ4 and Zstd) matched the entry offsets, sizes, block counts, block sizes
-and encryption flags that repak read from them.
+the 350 entries stored with block size 0 differ by that substitution only.
+Separately, 46 generated paks (versions 1 to 11 with no compression, Zlib, Gzip,
+LZ4 and Zstd) matched the entry offsets, sizes, block counts, block sizes and
+encryption flags that repak read from them.
 
 These checks do not establish coverage of paks from other engine releases,
 platforms or game-specific forks, of encrypted indexes with real keys, or of
