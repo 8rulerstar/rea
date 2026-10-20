@@ -53,12 +53,19 @@ export const projectDesktopApplication = (
   );
   const mono = managed.filter((file) => has(file, "unity-assembly-reference"));
   const monoDirectories = new Set(
-    mono.map((file) => desktopPathConventions(file.path).unityManagedDirectory),
+    mono.flatMap((file) =>
+      file.facts.flatMap((fact) =>
+        fact.kind === "unity-assembly-reference"
+          ? [fact.value.managed_directory]
+          : [],
+      ),
+    ),
   );
   for (const file of managed) {
     const conventions = desktopPathConventions(file.path);
     if (
       conventions.unityPredefinedAssembly &&
+      conventions.unityManagedDirectory !== null &&
       monoDirectories.has(conventions.unityManagedDirectory)
     )
       probe(
