@@ -366,6 +366,11 @@ it("orders member probes for Unity predefined script assemblies before every man
   expect(
     rows.filter(([operation]) => operation === "inspect_managed_artifact"),
   ).toHaveLength(7);
+  for (const probe of report.next_probes)
+    if (probe.operation === "inspect_managed_members")
+      expect(probe.rationale).toContain(
+        'Start with detail "summary" and page rows through inspect_analysis_view.',
+      );
 });
 
 it("retains complete observations through cancellation during directory finalization", async () => {

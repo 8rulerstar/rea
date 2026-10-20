@@ -71,7 +71,7 @@ export const projectDesktopApplication = (
       probe(
         "inspect_managed_members",
         file,
-        "Inventory types, members and user strings of this Unity predefined script assembly; its references and contents are unverified.",
+        'Inventory types, members and user strings of this Unity predefined script assembly; its references and contents are unverified. Start with detail "summary" and page rows through inspect_analysis_view.',
       );
   }
   for (const file of managed)
