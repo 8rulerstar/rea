@@ -186,7 +186,7 @@ message names one reason:
 
 | Reason                    | Meaning                                                                                                          |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `truncated-header`        | The file is shorter than the header.                                                                             |
+| `truncated-header`        | The file is shorter than the header, including a recognized magic whose 4-byte version field is incomplete.      |
 | `unexpected-header-size`  | `stringLiterals.offset` is not the header size: 264 bytes for version 24, 256 for 27, 29 and 31, 380 for 39.     |
 | `section-out-of-bounds`   | A section extends beyond the file, or a non-empty section starts inside the header.                              |
 | `section-overlap`         | Two sections overlap. Zero-size sections are exempt and gaps are allowed.                                        |

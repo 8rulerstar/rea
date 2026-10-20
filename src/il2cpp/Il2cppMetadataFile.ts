@@ -136,10 +136,17 @@ export const readIndex = (bytes: Buffer, offset: number, width: IndexWidth) => {
 
 const readHeader = (bytes: Buffer) => {
   const magic = bytes.length < 4 ? null : bytes.readUInt32LE(0);
-  if (bytes.length < 8 || magic !== IL2CPP_METADATA_MAGIC)
+  if (magic !== IL2CPP_METADATA_MAGIC)
     throw new Il2cppMetadataFormatFailure(
       "unrecognized-magic",
       "the file does not start with the IL2CPP global-metadata magic 0xFAB11BAF; encrypted or non-metadata inputs are not decoded",
+    );
+  // A recognized magic without a complete version field is truncated; the
+  // version, and so the header size, stays unknown.
+  if (bytes.length < 8)
+    throw new Il2cppMetadataFormatFailure(
+      "truncated-header",
+      `the file has ${bytes.length} bytes, ending inside the 4-byte metadata version field; the version and header size are unknown`,
     );
   const version = bytes.readInt32LE(4);
   if (!isSupportedVersion(version))

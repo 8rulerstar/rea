@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   AnalysisCancelledError,
+  AnalysisInputError,
   AnalysisResourceConstraintError,
 } from "../../../src/domain/analysisErrorCore.js";
 import { Il2cppMetadataProvider } from "../../../src/il2cpp/Il2cppMetadataProvider.js";
@@ -368,6 +369,35 @@ it.each([false, true])(
     }
   },
 );
+
+it("reports a recognized magic without a complete version as an input error", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-short-version-");
+  const path = join(root, "short.dat");
+  await writeFile(path, Buffer.from([0xaf, 0x1b, 0xb1, 0xfa, 39, 0, 0]));
+  const provider = new Il2cppMetadataProvider();
+  try {
+    const result = await provider.inspect({ path });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected truncated metadata");
+    expect(result.error).toBeInstanceOf(AnalysisInputError);
+    if (!(result.error instanceof AnalysisInputError))
+      throw new Error("Expected an input error");
+    expect(result.error.issues).toEqual([
+      expect.objectContaining({ path: ["path"], reason: "invalid_format" }),
+    ]);
+    expect(result.error.issues[0]?.message).toContain(
+      "truncated-header: the file has 7 bytes",
+    );
+    expect(result.error.partialObservation).toMatchObject({
+      normalized_result: {
+        artifact: { path, bytes: 7 },
+        inventory_status: "not-returned-as-complete",
+      },
+    });
+  } finally {
+    await provider.close();
+  }
+});
 
 it("retains the exact empty source observation without claiming a decoded inventory", async () => {
   const root = await createTestTempDirectory("rea-il2cpp-empty-");

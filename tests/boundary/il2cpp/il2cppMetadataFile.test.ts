@@ -169,6 +169,35 @@ describe("rejected IL2CPP global-metadata", () => {
     );
   });
 
+  it("rejects a recognized magic with an incomplete version as truncated", () => {
+    const magic = createIl2cppMetadataFixture().bytes.subarray(0, 4);
+    for (const length of [4, 5, 6, 7]) {
+      const bytes = Buffer.concat([magic, Buffer.alloc(length - 4, 0x27)]);
+      rejects(bytes, "truncated-header");
+      expect(failure(bytes).message).toContain(
+        `the file has ${length} bytes, ending inside the 4-byte metadata version field`,
+      );
+    }
+    // Eight bytes complete the version, so its own classification applies.
+    const supported = Buffer.alloc(8);
+    supported.writeUInt32LE(0xfab11baf, 0);
+    supported.writeInt32LE(39, 4);
+    rejects(supported, "truncated-header");
+    expect(failure(supported).message).toContain("380-byte version 39 header");
+    supported.writeInt32LE(27, 4);
+    rejects(supported, "truncated-header");
+    expect(failure(supported).message).toContain("256-byte version 27 header");
+    supported.writeInt32LE(30, 4);
+    rejects(supported, "unsupported-version", "unsupported");
+    // Fewer than four bytes, or a different magic, cannot establish metadata.
+    rejects(magic.subarray(0, 3), "unrecognized-magic", "unsupported");
+    rejects(
+      Buffer.from([0xaf, 0x1b, 0xb1, 0xfb, 39, 0, 0]),
+      "unrecognized-magic",
+      "unsupported",
+    );
+  });
+
   it("rejects a truncated header and an unexpected header size", () => {
     rejects(
       createIl2cppMetadataFixture().bytes.subarray(0, 200),
