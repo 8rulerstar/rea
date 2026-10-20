@@ -36,7 +36,10 @@ cliTest(
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-il2cpp-metadata-");
     const path = join(root, "global-metadata.dat");
-    const { bytes } = createIl2cppMetadataFixture({ typeIndexWidth: 2 });
+    const { bytes } = createIl2cppMetadataFixture({
+      typeIndexWidth: 2,
+      propertiesAndEvents: true,
+    });
     await writeFile(path, bytes);
     const result = await cli.run({
       arguments: ["inspect-il2cpp-metadata", path, "--json"],
@@ -91,8 +94,8 @@ cliTest(
       methods: 5,
       nested_types: 1,
       fields: 2,
-      properties: 0,
-      events: 0,
+      properties: 3,
+      events: 2,
       parameters: 1,
       string_literals: 2,
     });

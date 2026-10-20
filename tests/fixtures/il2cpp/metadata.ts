@@ -18,6 +18,8 @@ export interface Il2cppMetadataFixtureOptions {
   readonly nestingCycle?: boolean;
   /** Append an image with no types, whose start is the -1 sentinel at the narrow width. */
   readonly emptyImage?: boolean;
+  /** Nonempty property/event tables with deliberately different owner ranges. */
+  readonly propertiesAndEvents?: boolean;
   /** Metadata version; 29 and 31 use fixed 4-byte indices and no header counts. */
   readonly version?: 24 | 27 | 29 | 31 | 39;
   /**
@@ -88,6 +90,17 @@ export const FIXTURE_METHODS = [
 export const FIXTURE_FIELDS = [
   { name: "slot", declaring_type: 0 },
   { name: "Count", declaring_type: 1 },
+] as const;
+
+export const FIXTURE_PROPERTIES = [
+  { name: "IsActive", declaring_type: 0 },
+  { name: "DisplayName", declaring_type: 0 },
+  { name: "Capacity", declaring_type: 3 },
+] as const;
+
+export const FIXTURE_EVENTS = [
+  { name: "Changed", declaring_type: 1 },
+  { name: "Completed", declaring_type: 3 },
 ] as const;
 
 /** The one parameter, owned by method 2 (`Add`). */
@@ -236,17 +249,46 @@ const encodeMethods = (
   return methods;
 };
 
-/** Field, parameter and string literal sections for the fixture rows. */
-const encodeMembers = (
-  T: Width,
-  fixed: boolean,
-  intern: (value: string) => number,
-) => {
+/** Named member, parameter and string literal sections for the fixture rows. */
+const encodeMembers = ({
+  T,
+  fixed,
+  intern,
+  named,
+}: {
+  readonly T: Width;
+  readonly fixed: boolean;
+  readonly intern: (value: string) => number;
+  readonly named: {
+    readonly properties: readonly { name: string }[];
+    readonly events: readonly { name: string }[];
+  };
+}) => {
   // Field records: name, type index, token. Parameters: name, token, type.
   const fields = Buffer.alloc(FIXTURE_FIELDS.length * (8 + T));
   FIXTURE_FIELDS.forEach((field, index) => {
     fields.writeInt32LE(intern(field.name), index * (8 + T));
     writeIndex(fields, index * (8 + T) + 4, T, 0);
+  });
+  // Property: name, get, set, flags, token. Event: name, TypeIndex,
+  // add/remove/raise MethodIndex values, token. Method indices stay int32.
+  const properties = Buffer.alloc(named.properties.length * 20);
+  named.properties.forEach((property, index) => {
+    const at = index * 20;
+    properties.writeInt32LE(intern(property.name), at);
+    properties.writeInt32LE(0, at + 4);
+    properties.writeInt32LE(1, at + 8);
+    properties.writeUInt32LE(0x17000001 + index, at + 16);
+  });
+  const events = Buffer.alloc(named.events.length * (20 + T));
+  named.events.forEach((event, index) => {
+    const at = index * (20 + T);
+    events.writeInt32LE(intern(event.name), at);
+    writeIndex(events, at + 4, T, 0x2a);
+    events.writeInt32LE(1, at + 4 + T);
+    events.writeInt32LE(2, at + 8 + T);
+    events.writeInt32LE(3, at + 12 + T);
+    events.writeUInt32LE(0x14000001 + index, at + 16 + T);
   });
   const parameterRows = Buffer.alloc(FIXTURE_PARAMETERS.length * (8 + T));
   FIXTURE_PARAMETERS.forEach((parameter, index) => {
@@ -278,6 +320,8 @@ const encodeMembers = (
 
   return {
     fields,
+    properties,
+    events,
     parameterRows,
     literals,
     literalData,
@@ -331,6 +375,79 @@ const paddedRows = (
   count,
 });
 
+/** Encode the type record and its distinct member ranges in one place. */
+const encodeTypes = ({
+  typeRows,
+  recordSize,
+  T,
+  G,
+  typeIndexFields,
+  named,
+  intern,
+}: {
+  readonly typeRows: ReturnType<typeof fixtureRows>["types"];
+  readonly recordSize: number;
+  readonly T: Width;
+  readonly G: Width;
+  readonly typeIndexFields: number;
+  readonly named: {
+    readonly properties: readonly { declaring_type: number }[];
+    readonly events: readonly { declaring_type: number }[];
+  };
+  readonly intern: (value: string) => number;
+}) => {
+  const types = Buffer.alloc(typeRows.length * recordSize);
+  typeRows.forEach((type, index) => {
+    let at = index * recordSize;
+    types.writeInt32LE(intern(type.name), at);
+    types.writeInt32LE(intern(type.namespace), at + 4);
+    at += 8;
+    // byval, native declaring and parent TypeIndex values are deliberately
+    // unrelated to nesting; the reader must use nestedTypes instead.
+    for (let field = 0; field < typeIndexFields; field += 1, at += T)
+      writeIndex(types, at, T, 0x2a);
+    writeIndex(types, at, G, -1);
+    at += G + 4;
+    const fieldStart = FIXTURE_FIELDS.findIndex(
+      (field) => field.declaring_type === index,
+    );
+    const fieldCount = FIXTURE_FIELDS.filter(
+      (field) => field.declaring_type === index,
+    ).length;
+    const starts = [
+      fieldStart,
+      type.method_start,
+      named.events.findIndex((event) => event.declaring_type === index),
+      named.properties.findIndex(
+        (property) => property.declaring_type === index,
+      ),
+      type.nested_type_start,
+    ];
+    starts.forEach((value, field) => types.writeInt32LE(value, at + field * 4));
+    types.writeInt32LE(-1, at + 20);
+    types.writeInt32LE(-1, at + 24);
+    types.writeInt32LE(-1, at + 28);
+    at += 32;
+    types.writeUInt16LE(type.method_count, at);
+    types.writeUInt16LE(
+      named.properties.filter((property) => property.declaring_type === index)
+        .length,
+      at + 2,
+    );
+    types.writeUInt16LE(fieldCount, at + 4);
+    types.writeUInt16LE(
+      named.events.filter((event) => event.declaring_type === index).length,
+      at + 6,
+    );
+    types.writeUInt16LE(type.nested_type_count, at + 8);
+    at += 16;
+    types.writeUInt32LE(0, at);
+    types.writeUInt32LE(0x02000001 + index, at + 4);
+  });
+
+  return types;
+};
+
 /** Lay sections out in header order; empty sections share the next offset. */
 export const createIl2cppMetadataFixture = (
   options: Il2cppMetadataFixtureOptions = {},
@@ -339,6 +456,10 @@ export const createIl2cppMetadataFixture = (
   const fixed = version !== 39;
   const T: Width = fixed ? 4 : (options.typeIndexWidth ?? 1);
   const rows = fixtureRows(options);
+  const named = {
+    properties: options.propertiesAndEvents ? FIXTURE_PROPERTIES : [],
+    events: options.propertiesAndEvents ? FIXTURE_EVENTS : [],
+  };
   const genericContainers = options.wide?.genericContainers ?? 0;
   const parameterCount = Math.max(
     options.wide?.parameters ?? 0,
@@ -385,42 +506,14 @@ export const createIl2cppMetadataFixture = (
   for (const row of [...FIXTURE_FIELDS, ...FIXTURE_PARAMETERS])
     intern(row.name);
 
-  const types = Buffer.alloc(typeRows.length * recordBytes.typeDefinitions);
-  typeRows.forEach((type, index) => {
-    let at = index * recordBytes.typeDefinitions;
-    types.writeInt32LE(intern(type.name), at);
-    types.writeInt32LE(intern(type.namespace), at + 4);
-    at += 8;
-    // byval, native declaring and parent TypeIndex values are deliberately
-    // unrelated to nesting; the reader must use nestedTypes instead.
-    for (let field = 0; field < typeIndexFields; field += 1, at += T)
-      writeIndex(types, at, T, 0x2a);
-    writeIndex(types, at, G, -1);
-    at += G + 4;
-    const fieldStart = FIXTURE_FIELDS.findIndex(
-      (field) => field.declaring_type === index,
-    );
-    const fieldCount = FIXTURE_FIELDS.filter(
-      (field) => field.declaring_type === index,
-    ).length;
-    const starts = [
-      fieldStart,
-      type.method_start,
-      -1,
-      -1,
-      type.nested_type_start,
-    ];
-    starts.forEach((value, field) => types.writeInt32LE(value, at + field * 4));
-    types.writeInt32LE(-1, at + 20);
-    types.writeInt32LE(-1, at + 24);
-    types.writeInt32LE(-1, at + 28);
-    at += 32;
-    types.writeUInt16LE(type.method_count, at);
-    types.writeUInt16LE(fieldCount, at + 4);
-    types.writeUInt16LE(type.nested_type_count, at + 8);
-    at += 16;
-    types.writeUInt32LE(0, at);
-    types.writeUInt32LE(0x02000001 + index, at + 4);
+  const types = encodeTypes({
+    typeRows,
+    recordSize: recordBytes.typeDefinitions,
+    T,
+    G,
+    typeIndexFields,
+    named,
+    intern,
   });
 
   const images = Buffer.alloc(imageRows.length * recordBytes.images);
@@ -443,8 +536,15 @@ export const createIl2cppMetadataFixture = (
     intern,
   );
 
-  const { fields, parameterRows, literals, literalData, literalRecords } =
-    encodeMembers(T, fixed, intern);
+  const {
+    fields,
+    properties,
+    events,
+    parameterRows,
+    literals,
+    literalData,
+    literalRecords,
+  } = encodeMembers({ T, fixed, intern, named });
 
   const nested = Buffer.alloc(nestedTypeEntries.length * 4);
   nestedTypeEntries.forEach((value, index) =>
@@ -464,6 +564,8 @@ export const createIl2cppMetadataFixture = (
     // Wide-index padding rows are zero-filled and owned by no method.
     ["parameters", paddedRows(parameterRows, parameterCount, 8 + T)],
     ["fields", { bytes: fields, count: FIXTURE_FIELDS.length }],
+    ["properties", { bytes: properties, count: named.properties.length }],
+    ["events", { bytes: events, count: named.events.length }],
     ["methods", { bytes: methods, count: rows.methods.length }],
     ...zeroFilledSection("genericContainers", genericContainers, 16),
     ["nestedTypes", { bytes: nested, count: nestedTypeEntries.length }],

@@ -15,6 +15,8 @@ import {
   fixtureImages,
   FIXTURE_METHODS,
   FIXTURE_FIELDS,
+  FIXTURE_PROPERTIES,
+  FIXTURE_EVENTS,
   FIXTURE_PARAMETERS,
   FIXTURE_STRING_LITERALS,
   FIXTURE_TYPES,
@@ -594,6 +596,30 @@ describe("IL2CPP narrow index sentinels", () => {
 });
 
 describe("IL2CPP metadata members and string literals", () => {
+  it.each([
+    { version: 24, typeIndexWidth: 4 },
+    { version: 27, typeIndexWidth: 4 },
+    { version: 29, typeIndexWidth: 4 },
+    { version: 31, typeIndexWidth: 4 },
+    { version: 39, typeIndexWidth: 1 },
+    { version: 39, typeIndexWidth: 2 },
+    { version: 39, typeIndexWidth: 4 },
+  ] as const)(
+    "decodes nonempty properties and events with distinct owners: %j",
+    (options) => {
+      const fixture = createIl2cppMetadataFixture({
+        ...options,
+        propertiesAndEvents: true,
+      });
+      const decoded = readIl2cppMetadata(fixture.bytes);
+      expect(decoded.properties).toEqual(FIXTURE_PROPERTIES);
+      expect(decoded.events).toEqual(FIXTURE_EVENTS);
+      expect(fixture.section("properties").size).toBe(3 * 20);
+      expect(fixture.section("events").size).toBe(
+        2 * (20 + options.typeIndexWidth),
+      );
+    },
+  );
   it.each([29, 31, 39] as const)(
     "pairs version %i members with their owners and keeps undecodable literals as bytes",
     (version) => {
