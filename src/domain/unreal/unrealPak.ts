@@ -19,8 +19,6 @@ export const UNREAL_PAK_FOOTER_LAYOUTS = [
   "v1",
 ] as const;
 
-export const UNREAL_PAK_COLLECTIONS = ["entries"] as const;
-
 const count = z.number().int().nonnegative();
 const offset = z.number().int().nonnegative();
 const hex = (bytes: number) =>
@@ -84,6 +82,21 @@ export const unrealPakEntrySchema = z.strictObject({
   record: z.enum(["full", "encoded"]),
 });
 
+/** Contradictions that keep decoding: the affected derived fact is null or unverified. */
+export const UNREAL_PAK_ISSUE_KINDS = [
+  "region-hash-mismatch",
+  "duplicate-path",
+  "entry-count-mismatch",
+  "unknown-compression-slot",
+] as const;
+
+/** One contradiction between redundant facts, at the file offset that records it. */
+export const unrealPakIssueSchema = z.strictObject({
+  kind: z.enum(UNREAL_PAK_ISSUE_KINDS),
+  offset,
+  message: z.string(),
+});
+
 const directoryIndexSchema = z.strictObject({
   region: regionSchema,
   directories: count,
@@ -103,7 +116,8 @@ export const unrealPakIndexSchema = z.discriminatedUnion("state", [
   z.strictObject({
     state: z.literal("decoded"),
     mount_point: z.string(),
-    entry_count: count,
+    /** null when the header count and the listings disagree (see issues). */
+    entry_count: count.nullable(),
     path_hash_seed: hex(8).nullable(),
     path_hash_index: pathHashIndexSchema.nullable(),
     full_directory_index: directoryIndexSchema.nullable(),
@@ -120,12 +134,15 @@ export const unrealPakSchema = z.strictObject({
   footer: unrealPakFooterSchema,
   index: unrealPakIndexSchema,
   entries: z.array(unrealPakEntrySchema),
+  /** Contradictions found while decoding; empty when every redundant fact agreed. */
+  issues: z.array(unrealPakIssueSchema),
   limitations: z.array(z.string()),
 });
 
 export type UnrealPak = z.infer<typeof unrealPakSchema>;
 export type UnrealPakEntry = z.infer<typeof unrealPakEntrySchema>;
 export type UnrealPakFooter = z.infer<typeof unrealPakFooterSchema>;
+export type UnrealPakIssue = z.infer<typeof unrealPakIssueSchema>;
 export type UnrealPakProviderInput = Omit<
   z.infer<typeof inspectUnrealPakInputSchema>,
   "detail"

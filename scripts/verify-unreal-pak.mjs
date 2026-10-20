@@ -87,7 +87,8 @@ try {
       console.log("[ok] CLI/MCP complete Evidence parity");
     }
     if (report.index.state === "decoded") {
-      assert.equal(report.entries.length, report.index.entry_count);
+      if (report.index.entry_count !== null)
+        assert.equal(report.entries.length, report.index.entry_count);
       for (const entry of report.entries)
         assert.ok(
           entry.offset + entry.size <= report.footer.index.offset ||
@@ -102,6 +103,9 @@ try {
       await call(operation, { path, detail: "summary" }),
     ).normalized_result;
     assert.equal(summary.summary.counts.entries, report.entries.length);
+    assert.equal(summary.summary.counts.issues, report.issues.length);
+    for (const issue of report.issues)
+      console.log(`[issue] ${issue.kind} at ${issue.offset}: ${issue.message}`);
     const page = analysisViewResultSchema.parse(
       (
         await call("inspect_analysis_view", {
@@ -123,7 +127,7 @@ try {
       "Input pak must remain unchanged",
     );
     console.log(
-      `[ok] summary and page parity; pak layout ${report.footer.layout}, ${report.entries.length} entries; complete Evidence ${Buffer.byteLength(stdout)} bytes, summary ${Buffer.byteLength(JSON.stringify(summary))} bytes; CLI ${cliMs} ms`,
+      `[ok] summary and page parity; pak layout ${report.footer.layout}, ${report.entries.length} entries, ${report.issues.length} issues; complete Evidence ${Buffer.byteLength(stdout)} bytes, summary ${Buffer.byteLength(JSON.stringify(summary))} bytes; CLI ${cliMs} ms`,
     );
   }
 } finally {

@@ -4,6 +4,7 @@ import {
   type UnrealPak,
   type UnrealPakEntry,
   type UnrealPakFooter,
+  type UnrealPakIssue,
 } from "../domain/unreal/unrealPak.js";
 
 export const UNREAL_PAK_MAGIC = 0x5a6f12e1;
@@ -18,10 +19,6 @@ export const UNREAL_PAK_FAILURE_REASONS = {
     "invalid-flag",
     "index-trailing-bytes",
     "entry-reference-out-of-range",
-    "duplicate-path",
-    "entry-count-mismatch",
-    "unknown-compression-slot",
-    "region-hash-mismatch",
     "entry-out-of-bounds",
   ],
   resource: ["region-too-large", "too-many-entries", "paths-too-large"],
@@ -122,12 +119,34 @@ const LEGACY_COMPRESSION = new Map([
 ]);
 
 /** Bounds-checked little-endian reads over one in-memory region. */
+/**
+ * Contradictions between redundant facts that leave the structure readable.
+ * Each is recorded once at its file offset, and decoding continues.
+ */
+class IssueSink {
+  readonly issues: UnrealPakIssue[] = [];
+  readonly #seen = new Set<string>();
+  report(kind: UnrealPakIssue["kind"], offset: number, message: string) {
+    const key = `${kind}:${offset}`;
+    if (this.#seen.has(key)) return;
+    this.#seen.add(key);
+    this.issues.push({ kind, offset, message });
+  }
+}
+
 class Cursor {
   position = 0;
   constructor(
     readonly bytes: Buffer,
     readonly label: string,
+    /** File offset of bytes[0], so issues name file offsets. */
+    readonly base: number,
+    readonly sink: IssueSink,
   ) {}
+  /** File offset of the current position. */
+  get at() {
+    return this.base + this.position;
+  }
 
   private take(length: number): number {
     const at = this.position;
@@ -258,7 +277,13 @@ const readFooter = async (
       (layoutShape.encryptedFlag ? 1 : 0);
     if (tail.readUInt32LE(magicAt) !== UNREAL_PAK_MAGIC) continue;
     if (tail.readUInt32LE(magicAt + 4) !== layoutShape.version) continue;
-    const cursor = new Cursor(tail.subarray(start), "footer");
+    // The footer has no redundant facts, so its sink is never read.
+    const cursor = new Cursor(
+      tail.subarray(start),
+      "footer",
+      source.size - tailLength + start,
+      new IssueSink(),
+    );
     const keyGuid = layoutShape.keyGuid ? cursor.hex(16) : null;
     const indexEncrypted = layoutShape.encryptedFlag
       ? cursor.bool("index encryption flag")
@@ -327,15 +352,17 @@ const readRegion = async (
   limits: UnrealPakLimits,
   label: string,
   end: number,
-): Promise<Buffer> => {
+  sink: IssueSink,
+): Promise<Cursor> => {
   checkRegion(region, limits, label, end);
   const bytes = await source.read(region.offset, region.size);
   if (createHash("sha1").update(bytes).digest("hex") !== region.sha1)
-    throw new UnrealPakFormatFailure(
+    sink.report(
       "region-hash-mismatch",
+      region.offset,
       `${label} bytes do not match the SHA-1 recorded for them`,
     );
-  return bytes;
+  return new Cursor(bytes, label, region.offset, sink);
 };
 
 /** Count path characters against the limit before a path is built. */
@@ -366,15 +393,21 @@ const checkPlacement = (entries: readonly UnrealPakEntry[], end: number) => {
 const compressionName = (
   footer: UnrealPakFooter,
   method: number,
+  cursor: Cursor,
+  record: number,
 ): string | null => {
   if (method === 0) return null;
   if (footer.version < 8) return LEGACY_COMPRESSION.get(method) ?? null;
   const name = footer.compression_methods[method - 1];
-  if (name === undefined || name === null)
-    throw new UnrealPakFormatFailure(
+  if (name === undefined || name === null) {
+    // The footer table and the entry disagree; only the name is unknown.
+    cursor.sink.report(
       "unknown-compression-slot",
-      `an entry names compression slot ${method}, which the footer leaves ${name === null ? "empty" : "undefined"}`,
+      record,
+      `the entry names compression slot ${method}, which the footer leaves ${name === null ? "empty" : "undefined"}`,
     );
+    return null;
+  }
   return name;
 };
 
@@ -385,6 +418,7 @@ const readFullEntry = (
   path: string | null,
   pathHash: string | null,
 ): UnrealPakEntry => {
+  const record = cursor.at;
   const offset = cursor.u64();
   const size = cursor.u64();
   const uncompressed = cursor.u64();
@@ -410,7 +444,7 @@ const readFullEntry = (
     size,
     uncompressed_size: uncompressed,
     compression_method: method,
-    compression_name: compressionName(footer, method),
+    compression_name: compressionName(footer, method, cursor, record),
     compression_blocks: blocks,
     compression_block_size: blockSize,
     encrypted: (flags & 1) !== 0,
@@ -427,6 +461,7 @@ const readEncodedEntry = (
   path: string | null,
   pathHash: string | null,
 ): UnrealPakEntry => {
+  const record = cursor.at;
   const bits = cursor.u32();
   const method = (bits >>> 23) & 0x3f;
   const encrypted = (bits & (1 << 22)) !== 0;
@@ -454,7 +489,7 @@ const readEncodedEntry = (
     size,
     uncompressed_size: uncompressed,
     compression_method: method,
-    compression_name: compressionName(footer, method),
+    compression_name: compressionName(footer, method, cursor, record),
     compression_blocks: blocks,
     compression_block_size: blockSize,
     encrypted,
@@ -515,6 +550,7 @@ const readDirectoryListing = async (
     const fileCount = cursor.u32();
     checkEntryCount(listed.length + fileCount, limits, cursor.label);
     for (let f = 0; f < fileCount; f++) {
+      const record = cursor.at;
       const name =
         footer.version >= 12
           ? cursor.utf8Name("file name")
@@ -522,9 +558,10 @@ const readDirectoryListing = async (
       spendPath(budget, limits, directory.length + name.length, cursor.label);
       const path = joinPath(directory, name);
       if (seen.has(path))
-        throw new UnrealPakFormatFailure(
+        cursor.sink.report(
           "duplicate-path",
-          `${cursor.label} lists ${path} twice`,
+          record,
+          `${cursor.label} lists ${path} again`,
         );
       seen.add(path);
       listed.push([path, cursor.i32()]);
@@ -556,16 +593,22 @@ export const readUnrealPak = async (
   if (footer.index_encrypted === true) {
     // The encrypted index is not read, but its declared region must still fit.
     checkRegion(footer.index, limits, "index", dataEnd);
-    return { footer, index: { state: "encrypted" }, entries: [] };
+    return { footer, index: { state: "encrypted" }, entries: [], issues: [] };
   }
-  const index = new Cursor(
-    await readRegion(source, footer.index, limits, "index", dataEnd),
+  const sink = new IssueSink();
+  const index = await readRegion(
+    source,
+    footer.index,
+    limits,
     "index",
+    dataEnd,
+    sink,
   );
   const mountPoint = index.string("mount point");
   // The mount point is returned text too, so it shares the path budget.
   const budget = { used: 0 };
   spendPath(budget, limits, mountPoint.length, "index mount point");
+  const entryCountAt = index.at;
   const entryCount = index.u32();
   checkEntryCount(entryCount, limits, "index");
   const pace = pacer(limits);
@@ -574,13 +617,11 @@ export const readUnrealPak = async (
     const entries: UnrealPakEntry[] = [];
     const seen = new Set<string>();
     for (let at = 0; at < entryCount; at++) {
+      const record = index.at;
       const path = index.string("entry path");
       spendPath(budget, limits, path.length, "index");
       if (seen.has(path))
-        throw new UnrealPakFormatFailure(
-          "duplicate-path",
-          `index lists ${path} twice`,
-        );
+        sink.report("duplicate-path", record, `index lists ${path} again`);
       seen.add(path);
       entries.push(readFullEntry(index, footer, path, null));
       await pace();
@@ -598,6 +639,7 @@ export const readUnrealPak = async (
         full_directory_index: null,
       },
       entries,
+      issues: sink.issues,
     };
   }
 
@@ -620,6 +662,7 @@ export const readUnrealPak = async (
       "truncated-record",
       `index declares ${encodedSize} encoded entry bytes past its end`,
     );
+  const encodedBase = index.at;
   const encoded = index.bytes.subarray(
     index.position,
     index.position + encodedSize,
@@ -627,7 +670,7 @@ export const readUnrealPak = async (
   index.position += encodedSize;
   // Walk the encoded records so references can only name a record start.
   const recordStarts = new Set<number>();
-  const walk = new Cursor(encoded, "encoded entries");
+  const walk = new Cursor(encoded, "encoded entries", encodedBase, sink);
   while (walk.position < encoded.length) {
     checkCountLimit(recordStarts.size + 1, limits, "encoded entries");
     recordStarts.add(walk.position);
@@ -636,11 +679,15 @@ export const readUnrealPak = async (
   }
   const fullCount = index.u32();
   checkEntryCount(fullCount, limits, "non-encoded entry list");
-  const fullEntries: Buffer[] = [];
+  const fullEntries: { bytes: Buffer; base: number }[] = [];
   for (let at = 0; at < fullCount; at++) {
     const start = index.position;
+    const base = index.at;
     readFullEntry(index, footer, null, null);
-    fullEntries.push(index.bytes.subarray(start, index.position));
+    fullEntries.push({
+      bytes: index.bytes.subarray(start, index.position),
+      base,
+    });
     await pace();
   }
   finished(index);
@@ -656,7 +703,7 @@ export const readUnrealPak = async (
           "entry-reference-out-of-range",
           `entry reference ${reference} is not the start of an encoded entry`,
         );
-      const cursor = new Cursor(encoded, "encoded entries");
+      const cursor = new Cursor(encoded, "encoded entries", encodedBase, sink);
       cursor.position = reference;
       return readEncodedEntry(cursor, footer, path, hash);
     }
@@ -667,7 +714,7 @@ export const readUnrealPak = async (
         `entry reference ${reference} names no non-encoded entry`,
       );
     return readFullEntry(
-      new Cursor(record, "non-encoded entry"),
+      new Cursor(record.bytes, "non-encoded entry", record.base, sink),
       footer,
       path,
       hash,
@@ -678,26 +725,26 @@ export const readUnrealPak = async (
   let directoryIndex = null;
   let pathHashIndex = null;
   if (pathHashRegion !== null) {
-    const phi = new Cursor(
-      await readRegion(
-        source,
-        pathHashRegion,
-        limits,
-        "path hash index",
-        dataEnd,
-      ),
+    const phi = await readRegion(
+      source,
+      pathHashRegion,
+      limits,
       "path hash index",
+      dataEnd,
+      sink,
     );
     const phiCount = phi.u32();
     checkEntryCount(phiCount, limits, "path hash index");
     const hashed: [string, number][] = [];
     const seenHashes = new Set<string>();
     for (let at = 0; at < phiCount; at++) {
+      const record = phi.at;
       const hash = phi.u64Hex();
       if (seenHashes.has(hash))
-        throw new UnrealPakFormatFailure(
+        sink.report(
           "duplicate-path",
-          `path hash index lists hash ${hash} twice`,
+          record,
+          `path hash index lists hash ${hash} again`,
         );
       seenHashes.add(hash);
       hashed.push([hash, phi.i32()]);
@@ -734,15 +781,13 @@ export const readUnrealPak = async (
       for (const entry of fromHashes) entries.push(entry);
   }
   if (directoryRegion !== null) {
-    const fdi = new Cursor(
-      await readRegion(
-        source,
-        directoryRegion,
-        limits,
-        "full directory index",
-        dataEnd,
-      ),
+    const fdi = await readRegion(
+      source,
+      directoryRegion,
+      limits,
       "full directory index",
+      dataEnd,
+      sink,
     );
     const { directories, listed } = await readDirectoryListing(
       fdi,
@@ -771,23 +816,29 @@ export const readUnrealPak = async (
     ["full directory index", directoryIndex?.files],
     ["decoded entry list", entries.length],
   ] as const;
+  // Disagreeing counts leave each listing readable; only the count is unknown.
+  let countsAgree = true;
   for (const [label, listedCount] of listed)
-    if (listedCount !== undefined && listedCount !== entryCount)
-      throw new UnrealPakFormatFailure(
+    if (listedCount !== undefined && listedCount !== entryCount) {
+      countsAgree = false;
+      sink.report(
         "entry-count-mismatch",
+        entryCountAt,
         `the index declares ${entryCount} entries but the ${label} holds ${listedCount}`,
       );
+    }
   checkPlacement(entries, footer.index.offset);
   return {
     footer,
     index: {
       state: "decoded",
       mount_point: mountPoint,
-      entry_count: entryCount,
+      entry_count: countsAgree ? entryCount : null,
       path_hash_seed: seed,
       path_hash_index: pathHashIndex,
       full_directory_index: directoryIndex,
     },
     entries,
+    issues: sink.issues,
   };
 };

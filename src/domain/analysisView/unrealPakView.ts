@@ -2,8 +2,9 @@ import { analysisViewInputError } from "./analysisViewErrors.js";
 import { z } from "zod";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import {
-  UNREAL_PAK_COLLECTIONS,
+  UNREAL_PAK_ISSUE_KINDS,
   unrealPakEntrySchema,
+  unrealPakIssueSchema,
   unrealPakSchema,
 } from "../unreal/unrealPak.js";
 import { err, ok, type Result } from "../result.js";
@@ -28,30 +29,44 @@ const countsSchema = z.strictObject({
   encrypted: count,
   deleted: count,
   without_path: count,
+  issues: count,
 });
 
 /** Footer and index facts with entry counts instead of entries. */
 export const unrealPakSummarySchema = unrealPakSchema
-  .omit({ entries: true })
+  .omit({ entries: true, issues: true })
   .extend({ counts: countsSchema });
 
 const indexSchema = z.number().int().nonnegative();
 const entryRowSchema = unrealPakEntrySchema.extend({ index: indexSchema });
-
-/** Filters intersect; pages use index order and always retain the source entry index. */
-export const unrealPakViewRequestSchema = z.strictObject({
+const issueRowSchema = unrealPakIssueSchema.extend({ index: indexSchema });
+const page = {
   kind: z.literal("unreal-pak"),
-  collection: z.enum(UNREAL_PAK_COLLECTIONS),
   indices: z.array(indexSchema).optional(),
-  paths: z.array(z.string()).optional(),
-  fields: z.array(entryRowSchema.keyof()).optional(),
   offset: indexSchema.default(0),
   limit: z.number().int().positive().default(64),
-});
+};
 
-export const unrealPakViewItemsSchema = z.array(
-  entryRowSchema.partial().required({ index: true }),
-);
+/** Filters intersect; pages use source order and always retain the source row index. */
+export const unrealPakViewRequestSchema = z.discriminatedUnion("collection", [
+  z.strictObject({
+    ...page,
+    collection: z.literal("entries"),
+    paths: z.array(z.string()).optional(),
+    fields: z.array(entryRowSchema.keyof()).optional(),
+  }),
+  z.strictObject({
+    ...page,
+    collection: z.literal("issues"),
+    kinds: z.array(z.enum(UNREAL_PAK_ISSUE_KINDS)).optional(),
+    fields: z.array(issueRowSchema.keyof()).optional(),
+  }),
+]);
+
+export const unrealPakViewItemsSchema = z.union([
+  z.array(entryRowSchema.partial().required({ index: true })),
+  z.array(issueRowSchema.partial().required({ index: true })),
+]);
 
 export const unrealPakViewContextSchema = z.strictObject({
   footer_layout: unrealPakSchema.shape.footer.shape.layout,
@@ -98,6 +113,7 @@ const parsePakReport = (
       encrypted: tally((entry) => entry.encrypted),
       deleted: tally((entry) => entry.deleted),
       without_path: tally((entry) => entry.path === null),
+      issues: report.issues.length,
     },
   };
   if (reusable) checkedReports.set(key, checked);
@@ -138,7 +154,7 @@ export const projectUnrealPakView = (
         },
       ]),
     );
-  const { entries, ...identity } = report;
+  const { entries, issues, ...identity } = report;
   const shared = {
     parent_evidence_id: parent.evidenceId,
     parent_operation: "inspect_unreal_pak" as const,
@@ -165,26 +181,36 @@ export const projectUnrealPakView = (
       summary: { ...identity, counts },
       coverage: completeWithinViewCoverage(1, 1),
     });
-  const paths = view.paths === undefined ? undefined : new Set(view.paths);
+  const rows: readonly Readonly<Record<string, unknown>>[] =
+    view.collection === "entries" ? entries : issues;
+  const keep: (row: Readonly<Record<string, unknown>>) => boolean = (() => {
+    if (view.collection === "entries") {
+      const paths = view.paths === undefined ? undefined : new Set(view.paths);
+      return (row) =>
+        paths === undefined ||
+        (typeof row.path === "string" && paths.has(row.path));
+    }
+    const kinds = view.kinds === undefined ? undefined : new Set(view.kinds);
+    return (row) => kinds === undefined || kinds.has(row.kind as never);
+  })();
   const fields =
     view.fields === undefined ? undefined : new Set<string>(view.fields);
   const selected =
     view.indices === undefined
-      ? entries.keys()
+      ? rows.keys()
       : [...new Set(view.indices)]
           .sort((a, b) => a - b)
-          .filter((index) => index < entries.length);
-  const items: z.infer<typeof unrealPakViewItemsSchema> = [];
+          .filter((index) => index < rows.length);
+  const items: Record<string, unknown>[] = [];
   let total = 0;
   for (const index of selected) {
-    const entry = entries[index]!;
-    if (paths !== undefined && (entry.path === null || !paths.has(entry.path)))
-      continue;
+    const row = rows[index]!;
+    if (!keep(row)) continue;
     if (total >= view.offset && items.length < view.limit) {
       const item: Record<string, unknown> = { index };
-      for (const [key, value] of Object.entries(entry))
+      for (const [key, value] of Object.entries(row))
         if (fields === undefined || fields.has(key)) item[key] = value;
-      items.push(item as (typeof items)[number]);
+      items.push(item);
     }
     total++;
   }
@@ -192,7 +218,7 @@ export const projectUnrealPakView = (
     kind: "unreal-pak",
     view,
     ...shared,
-    items,
+    items: items as z.infer<typeof unrealPakViewItemsSchema>,
     footer_layout: identity.footer.layout,
     counts,
     coverage: pageViewCoverage(view.offset, items.length, total),

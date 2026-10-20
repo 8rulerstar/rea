@@ -66,6 +66,7 @@ cliTest(
       encrypted: 0,
       deleted: 0,
       without_path: 0,
+      issues: 0,
     });
     expect(view.summary.footer).toEqual(report.footer);
 
@@ -153,12 +154,9 @@ cliTest(
     const root = await createTestTempDirectory("rea-unreal-pak-fail-");
     const { client, call } = await connectLocalToolsMcp();
     const frozen = createPakFixture({ layout: "v9", frozenIndex: true }).bytes;
-    const duplicate = createPakFixture({
+    const outside = createPakFixture({
       layout: "v8b",
-      files: [
-        { path: "A/x", size: 1 },
-        { path: "A/x", size: 1 },
-      ],
+      lastOffsetShift: 1 << 20,
     }).bytes;
     for (const [name, bytes, expected] of [
       [
@@ -171,8 +169,8 @@ cliTest(
         },
       ],
       [
-        "duplicate.pak",
-        duplicate,
+        "outside.pak",
+        outside,
         {
           code: "invalid_request",
           details: {
@@ -181,7 +179,7 @@ cliTest(
               {
                 path: ["path"],
                 reason: "invalid_format",
-                message: expect.stringContaining("duplicate-path"),
+                message: expect.stringContaining("entry-out-of-bounds"),
               },
             ],
           },
@@ -296,6 +294,78 @@ cliTest(
       items: [{ index: 1, path: files[1]!.path }],
       parent_evidence_id: evidence.evidence_id,
     });
+  },
+  30000,
+);
+
+cliTest(
+  "reports contradicting pak facts as offset-backed issues through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-unreal-pak-issues-");
+    const path = join(root, "counted.pak");
+    await writeFile(
+      path,
+      createPakFixture({
+        layout: "v11",
+        declaredEntries: 5,
+        files: [
+          { path: "A/x", size: 1 },
+          { path: "A/x", size: 2 },
+          { path: "B/y", size: 3 },
+        ],
+      }).bytes,
+    );
+    const result = await cli.run({
+      arguments: ["inspect-unreal-pak", path, "--json"],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const report = unrealPakSchema.parse(
+      toolContract("inspect_unreal_pak").outputSchema.parse(result.json)
+        .normalized_result,
+    );
+    expect(report.index).toMatchObject({ entry_count: null });
+    expect(report.entries.map((entry) => entry.path)).toEqual([
+      "A/x",
+      "A/x",
+      "B/y",
+    ]);
+    expect(report.issues.map((issue) => issue.kind).sort()).toEqual([
+      "duplicate-path",
+      "duplicate-path",
+      "entry-count-mismatch",
+    ]);
+
+    const { client, call } = await connectLocalToolsMcp();
+    const summarized = await call("inspect_unreal_pak", { path });
+    const view = unrealPakSummaryViewResultSchema.parse(
+      parseEvidence(summarized.structuredContent).normalized_result,
+    );
+    expect(view.summary.counts.issues).toBe(3);
+    const page = await call("inspect_analysis_view", {
+      source: {
+        kind: "retained-evidence",
+        evidence_id: view.parent_evidence_id,
+      },
+      view: {
+        kind: "unreal-pak",
+        collection: "issues",
+        kinds: ["entry-count-mismatch"],
+        fields: ["offset"],
+      },
+    });
+    expect(page.isError, JSON.stringify(page)).not.toBe(true);
+    const mismatch = report.issues.findIndex(
+      (issue) => issue.kind === "entry-count-mismatch",
+    );
+    expect(
+      analysisViewResultSchema.parse(
+        parseEvidence(page.structuredContent).normalized_result,
+      ),
+    ).toMatchObject({
+      items: [{ index: mismatch, offset: report.issues[mismatch]!.offset }],
+      coverage: { total: 1 },
+    });
+    await client.ping();
   },
   30000,
 );

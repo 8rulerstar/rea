@@ -88,6 +88,8 @@ describe("Unreal pak footers and indexes", () => {
           (entry) => entry.record === (version >= 10 ? "encoded" : "full"),
         ),
       ).toBe(true);
+      // Every redundant fact agrees in a well-formed pak.
+      expect(pak.issues).toEqual([]);
     },
   );
 
@@ -224,19 +226,45 @@ describe("rejected Unreal pak files", () => {
     expect((await failure(bytes)).kind).toBe("corrupt");
   });
 
-  it("rejects duplicate legacy paths", async () => {
-    const bytes = createPakFixture({
-      layout: "v8b",
-      files: [
-        { path: "A/x", size: 1 },
-        { path: "A/x", size: 1 },
-      ],
-    }).bytes;
-    expect(await failure(bytes)).toEqual({
-      reason: "duplicate-path",
-      kind: "corrupt",
-    });
-  });
+  it.each(["v8b", "v11"] as const)(
+    "keeps both %s entries of a duplicated path and records the second",
+    async (layout) => {
+      const pak = await read(
+        createPakFixture({
+          layout,
+          files: [
+            { path: "A/x", size: 1 },
+            { path: "A/x", size: 2 },
+          ],
+        }).bytes,
+      );
+      expect(pak.entries.map((entry) => [entry.path, entry.size])).toEqual([
+        ["A/x", 1],
+        ["A/x", 2],
+      ]);
+      if (pak.index.state !== "decoded") throw new Error("expected an index");
+      expect(pak.index.entry_count).toBe(2);
+      const duplicates = pak.issues.filter(
+        (issue) => issue.kind === "duplicate-path",
+      );
+      // v11 repeats the path in the full directory index and its hash in
+      // the path hash index; each is recorded where the repeat sits.
+      const regions =
+        pak.index.state === "decoded" && layout === "v11"
+          ? [
+              pak.index.path_hash_index!.region,
+              pak.index.full_directory_index!.region,
+            ]
+          : [pak.footer.index];
+      expect(duplicates).toHaveLength(regions.length);
+      regions.forEach((region, at) => {
+        const issue = duplicates[at]!;
+        expect(issue.offset).toBeGreaterThan(region.offset);
+        expect(issue.offset).toBeLessThan(region.offset + region.size);
+      });
+      expect(duplicates.at(-1)!.message).toContain("A/x");
+    },
+  );
 
   it("refuses an index region above the limit before reading it", async () => {
     expect(
@@ -267,12 +295,24 @@ describe("rejected Unreal pak files", () => {
 });
 
 describe("inconsistent Unreal pak indexes", () => {
-  it("rejects a header entry count the listings do not match", async () => {
-    expect(
-      await failure(
-        createPakFixture({ layout: "v11", declaredEntries: 5 }).bytes,
-      ),
-    ).toEqual({ reason: "entry-count-mismatch", kind: "corrupt" });
+  it("nulls a header entry count the listings contradict and keeps the entries", async () => {
+    const { bytes, files, indexOffset } = createPakFixture({
+      layout: "v11",
+      declaredEntries: 5,
+    });
+    const pak = await read(bytes);
+    if (pak.index.state !== "decoded") throw new Error("expected an index");
+    expect(pak.index.entry_count).toBeNull();
+    expect(pak.entries.map((entry) => entry.path)).toEqual(
+      files.map((file) => file.path),
+    );
+    const mismatches = pak.issues.filter(
+      (issue) => issue.kind === "entry-count-mismatch",
+    );
+    // One issue at the header count, naming both disagreeing listings.
+    expect(mismatches).toHaveLength(1);
+    expect(mismatches[0]!.offset).toBeGreaterThan(indexOffset);
+    expect(mismatches[0]!.message).toContain("declares 5 entries");
   });
 
   it.each(["pathHashTrailer", "directoryTrailer"] as const)(
@@ -286,20 +326,6 @@ describe("inconsistent Unreal pak indexes", () => {
       ).toEqual({ reason: "index-trailing-bytes", kind: "corrupt" });
     },
   );
-
-  it("rejects a directory index that lists one path twice", async () => {
-    const bytes = createPakFixture({
-      layout: "v11",
-      files: [
-        { path: "A/x", size: 1 },
-        { path: "A/x", size: 1 },
-      ],
-    }).bytes;
-    expect(await failure(bytes)).toEqual({
-      reason: "duplicate-path",
-      kind: "corrupt",
-    });
-  });
 
   it("rejects a version 10+ reference past the encoded entries", async () => {
     expect(
@@ -334,34 +360,54 @@ describe("inconsistent Unreal pak indexes", () => {
     },
   );
 
-  it("rejects an entry naming an empty compression slot", async () => {
+  it("nulls the compression name of an entry naming an empty slot", async () => {
     const { bytes } = createPakFixture({ layout: "v11" });
     // The five 32-byte compression names end the footer; clear slot 1 (Zlib).
     bytes.fill(0, bytes.length - 160, bytes.length - 128);
-    expect(await failure(bytes)).toEqual({
-      reason: "unknown-compression-slot",
-      kind: "corrupt",
-    });
+    const pak = await read(bytes);
+    const compressed = pak.entries.filter(
+      (entry) => entry.compression_method === 1,
+    );
+    expect(compressed).toHaveLength(1);
+    expect(compressed[0]!.compression_name).toBeNull();
+    // Stored entries are untouched by the empty slot.
+    expect(
+      pak.entries.filter((entry) => entry.compression_method === 0),
+    ).toHaveLength(2);
+    // Resolved through two listings, the record is reported once.
+    expect(pak.issues).toEqual([
+      {
+        kind: "unknown-compression-slot",
+        offset: expect.any(Number),
+        message: expect.stringContaining("slot 1"),
+      },
+    ]);
   });
 
   it.each(["index", "path hash index", "full directory index"] as const)(
-    "rejects %s bytes that do not match their recorded SHA-1",
+    "records a %s whose bytes do not match its recorded SHA-1 and keeps decoding",
     async (region) => {
-      const { bytes, indexOffset } = createPakFixture({ layout: "v11" });
-      const pak = await read(Buffer.from(bytes));
-      if (pak.index.state !== "decoded") throw new Error("expected an index");
-      const at =
+      const { bytes } = createPakFixture({ layout: "v11" });
+      const clean = await read(Buffer.from(bytes));
+      if (clean.index.state !== "decoded") throw new Error("expected an index");
+      const recorded =
         region === "index"
-          ? indexOffset
+          ? clean.footer.index
           : region === "path hash index"
-            ? pak.index.path_hash_index!.region.offset
-            : pak.index.full_directory_index!.region.offset;
-      // Flip the last byte of the region's first u32 count or mount length.
-      bytes[at + 3]! ^= 0x80;
-      expect(await failure(bytes)).toEqual({
-        reason: "region-hash-mismatch",
-        kind: "corrupt",
+            ? clean.index.path_hash_index!.region
+            : clean.index.full_directory_index!.region;
+      // Corrupt the recorded hash, not the bytes, so the structure stays readable.
+      const at = bytes.lastIndexOf(Buffer.from(recorded.sha1, "hex"));
+      bytes[at]! ^= 0xff;
+      const pak = await read(bytes);
+      expect(pak.entries).toEqual(clean.entries);
+      expect(pak.issues).toContainEqual({
+        kind: "region-hash-mismatch",
+        offset: recorded.offset,
+        message: expect.stringContaining(region),
       });
+      // A hash stored inside the index also changes the index bytes.
+      expect(pak.issues).toHaveLength(region === "index" ? 1 : 2);
     },
   );
 
