@@ -55,6 +55,7 @@ export const desktopPathConventions = (path: string) => {
   const segments = path.split("/");
   const folded = segments.map(foldSegment);
   let unityManagedDirectory: string | null = null;
+  let unityManagedIndex = -1;
   for (let index = 0; index + 2 < folded.length; index++) {
     const segment = folded[index];
     const namedDataDirectory =
@@ -66,15 +67,16 @@ export const desktopPathConventions = (path: string) => {
     if (
       (namedDataDirectory || bundleDataDirectory) &&
       folded[index + 1] === "managed"
-    )
+    ) {
       unityManagedDirectory = segments.slice(0, index + 2).join("/");
+      unityManagedIndex = index + 1;
+    }
   }
   const name = folded.at(-1) ?? "";
   return {
     unityManagedDirectory,
     unityPredefinedAssembly:
-      unityManagedDirectory !== null &&
-      unityManagedDirectory.split("/").length === segments.length - 1 &&
+      unityManagedIndex === segments.length - 2 &&
       UNITY_PREDEFINED_ASSEMBLIES.has(name),
     il2cppLibrary: DESKTOP_IL2CPP_LIBRARIES.has(name),
     electronArchive:
