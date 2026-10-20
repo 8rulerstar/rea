@@ -2,7 +2,10 @@ import { symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnrealPakService } from "../../../src/application/unreal/UnrealPakService.js";
-import { AnalysisResourceConstraintError } from "../../../src/domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisResourceConstraintError,
+} from "../../../src/domain/analysisErrorCore.js";
 import { UnrealPakProvider } from "../../../src/unreal/UnrealPakProvider.js";
 import { createPakFixture } from "../../fixtures/unreal/pak.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -112,4 +115,35 @@ it("refuses relative paths and unretained summaries before reading", async () =>
   const complete = await service.inspect({ path });
   expect(complete.ok && complete.value.operation).toBe("inspect_unreal_pak");
   await service.close();
+});
+
+it("keeps the decoded report when cancellation arrives after a complete read", async () => {
+  const { path } = await writePak(
+    "late.pak",
+    createPakFixture({ layout: "v11" }).bytes,
+  );
+  const provider = new UnrealPakProvider();
+  const controller = new AbortController();
+  const reason = new Error("late cancellation");
+  const service = new UnrealPakService({
+    identity: provider.identity,
+    inspect: async (input, options) => {
+      const inspected = await provider.inspect(input, options);
+      controller.abort(reason);
+      return inspected;
+    },
+  });
+  const result = await service.inspect(
+    { path, detail: "complete" },
+    { signal: controller.signal },
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+  expect(result.error.cause).toBe(reason);
+  expect(result.error.partialObservation).toMatchObject({
+    operation: "inspect_unreal_pak",
+    normalized_result: { artifact: { path }, footer: { layout: "v11" } },
+  });
+  await provider.close();
 });

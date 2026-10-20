@@ -58,7 +58,9 @@ export class UnrealPakService {
     retention: AnalysisViewRetention = NO_RETENTION,
   ): Promise<Result<Evidence, AnalysisError>> {
     if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
+      return err(
+        new AnalysisCancelledError(OPERATION, { cause: options.signal.reason }),
+      );
     const input = inspectUnrealPakInputSchema.safeParse(rawInput);
     if (!input.success)
       return err(
@@ -83,8 +85,6 @@ export class UnrealPakService {
     }
     const inspected = await this.provider.inspect(providerInput, options);
     if (!inspected.ok) return inspected;
-    if (options?.signal?.aborted)
-      return err(new AnalysisCancelledError(OPERATION));
     const report = unrealPakSchema.safeParse(inspected.value);
     if (!report.success || report.data.artifact.path !== providerInput.path)
       return err(
@@ -119,6 +119,14 @@ export class UnrealPakService {
         ],
       },
     );
+    // Cancellation after a complete read keeps the decoded facts.
+    if (options?.signal?.aborted)
+      return err(
+        new AnalysisCancelledError(OPERATION, {
+          cause: options.signal.reason,
+          partialObservation: evidence,
+        }),
+      );
     return detail === "summary"
       ? summarizeRetainedAnalysis(evidence, retention)
       : ok(evidence);
