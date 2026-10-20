@@ -17,6 +17,8 @@ export const FIXTURE_METHOD_ADDRESSES = [
 export interface Il2cppBinaryFixtureOptions {
   /** methodPointerCount written for Assembly-CSharp.dll; 3 matches the metadata. */
   readonly firstModuleCount?: number;
+  /** Exact module names, including names shared by different metadata images. */
+  readonly imageNames?: readonly [string, string];
   /** Write a second record that also matches Assembly-CSharp.dll. */
   readonly duplicateModule?: boolean;
   /** Add an LC_DYLD_CHAINED_FIXUPS load command. */
@@ -77,7 +79,7 @@ export const createIl2cppBinaryFixture = (
     bytes.writeUInt32LE(0x80000034, 104);
     bytes.writeUInt32LE(16, 108);
   }
-  const names = ["Assembly-CSharp.dll", "mscorlib.dll"];
+  const names = options.imageNames ?? ["Assembly-CSharp.dll", "mscorlib.dll"];
   const nameAt: number[] = [];
   let cursor = STRINGS;
   for (const name of names) {
@@ -277,9 +279,9 @@ export const createElfFixture = (
   file.writeUInt16LE(64, 52);
   file.writeUInt16LE(56, 54);
   file.writeUInt16LE(withDynamic ? 2 : 1, 56);
-  // PT_LOAD maps the whole file read-write at the fixture base.
+  // Synthetic PT_LOAD maps code and relocation data read-write-execute.
   file.writeUInt32LE(1, 64);
-  file.writeUInt32LE(6, 68);
+  file.writeUInt32LE(7, 68);
   file.writeBigUInt64LE(FIXTURE_BINARY_BASE, 80);
   file.writeBigUInt64LE(FIXTURE_BINARY_BASE, 88);
   file.writeBigUInt64LE(BigInt(file.length), 96);

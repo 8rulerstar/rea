@@ -58,7 +58,7 @@ the original rows without reopening or decoding the file:
 
 Collections are `sections`, `images`, `types`, `methods`, `fields`,
 `properties`, `events`, `parameters`, `string_literals`, `method_addresses`,
-`return_types`, `field_types` and `parameter_types`. Every returned row includes
+`return_types`, `field_types`, `parameter_types` and `code_gen_modules`. Every returned row includes
 its source `index`, scoped by artifact SHA-256 and collection. All collections
 accept batch `indices` and `fields`; collections whose rows have a `name` also
 accept exact `names`. Types also accept `image_indices`, `namespaces` and
@@ -197,7 +197,7 @@ keeps the value in `R_AARCH64_RELATIVE` or `R_X86_64_RELATIVE` relocations
 (`DT_RELA`). The reader writes those values into a private copy before
 searching it, so addresses are the link-time addresses and RVAs are relative to
 the first loaded segment. Android packed
-relocations (`DT_ANDROID_RELA`) are refused.
+relocations (`DT_ANDROID_RELA`) are refused. No target code is executed.
 
 The binary's `Il2CppCodeRegistration` points to one `Il2CppCodeGenModule` per
 assembly image. Each module record starts with its module name, its method
@@ -208,19 +208,12 @@ whose count equals the image's method count. It then requires exactly one
 symbols are needed, so stripped builds work. A method's token row id selects its
 slot in the module's method pointer array.
 
-Name strings may be padded with NUL or, as MSVC writes them, with `0xFF`; a
-name byte directly before a match means it is the tail of a longer name and is
-not used. Some x86-64 builds keep no static CodeRegistration: in a Linux
-`GameAssembly.so` from Unity 2023.2.13f1 the compiler folded the module array
-and its count into the one loop that walks it, so no data word points at the
-array (Il2CppDumper fails to link that file). When no CodeRegistration pair is
-found on x86-64, the reader looks for pointer arrays listing exactly the located
-modules and accepts one only if exactly one such array is the target of a
-RIP-relative `lea` or `mov`; `code_gen_modules_field` is then `null`. Otherwise
-the result stays `code-registration-not-found`. On that Linux build all 42,605
-linked addresses are function starts in its `.eh_frame_hdr` table.
+Module records establish names through their declared NUL-terminated string pointers. NUL/0xFF padding, spaces, Unicode and suffix-shared storage are supported. A pointer to a longer string does not match just its suffix; a pointer directly into a shared suffix may name it. Exact reversed UTF-8 matching avoids rescanning the file for every name and retains duplicate-name owners until module records resolve them. A contributor investigated a Linux
+`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64, the reader searches executable ranges for bytes consistent with RIP-relative LEA/MOV references to module-array candidates. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`.
 
-Checked builds: macOS arm64 and x86_64 slices from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
+The binary/metadata pair is caller-selected. Name/count/token agreement is structural evidence, not a cryptographic same-build proof. File-offset locations refer to the primary metadata artifact; linked virtual addresses refer to `binary.artifact`. Both SHA-256 identities remain available in compact native pages as `artifact` and `binary_source`.
+
+Contributor-reported verification (not all rerun by the follow-up): macOS arm64 and x86_64 slices from Unity 2021.3.45f2, 2022.3.30f1, 2022.3.62f3 and
 6000.0.84f1 against dSYM symbols; Android arm64 and x86-64 from 2022.3.62f3
 against `libil2cpp.sym.so`; Windows x64 from 2023.2.13f1 (metadata version 29,
 the MIT-licensed game Between Two Worlds 1.0.5, `GameAssembly.dll` SHA-256
@@ -244,9 +237,9 @@ The result adds:
   `code_gen_modules` (`image`, record `address`, `method_pointer_count`);
 - `method_addresses`: one row per method index with `state`, `address` and
   `rva` (address minus `image_base`), both hexadecimal strings. `state` is
-  `code` when the module slot holds an address, `no-body` when the slot is zero,
+  `code` when the module slot holds an unambiguously mapped executable address, `no-body` when an observed slot is zero,
   as for abstract, extern and most generic methods, and `unknown` when no type
-  range in any image holds the method, so no module slot was read for it.
+  range in any image holds the method or a symbol relocation leaves its slot unresolved.
   `address` and `rva` are `null` unless `state` is `code`. The summary counts
   each state in `counts.method_address_states`. Ghidra seeds are written only
   for `code` rows.
@@ -266,7 +259,7 @@ the single place whose `fieldOffsetsCount` and `typeDefinitionsSizesCount` both
 equal the metadata type-definition count and whose type table is file mapped.
 
 Without `binary_path`, `binary` is `null` and the four binary collections are
-empty.
+empty in the complete producer report to indicate unrequested observations. Their summary counts, including state counts, are `null`, and native page requests report unavailable observations. This does not establish an empty native inventory. Missing native fields in historical Evidence remain unknown too.
 
 For metadata version 27, type names are `null` and only type indices are
 reported: versions 27.0 to 27.2 share that header number but place the
@@ -275,23 +268,46 @@ Il2CppType byref flag in different bits, so a rendered name could gain or lose
 
 The builds checked are listed after the module search rules above.
 
-| Reason                            | Category    | Meaning                                                                                                            |
-| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section).                  |
-| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                                                        |
-| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.                                         |
-| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.                              |
-| `malformed-container`             | input error | The container headers are damaged.                                                                                 |
-| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                                              |
-| `ambiguous-code-gen-module`       | input error | More than one record matches an image, or image names occur more than 4,096 times each or 65,536 times in all.     |
-| `code-registration-not-found`     | input error | No single module table lists exactly the located records, and on x86-64 no single instruction loads such an array. |
-| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                                              |
-| `invalid-method-pointer`          | input error | A pointer slot or a method address is not file mapped.                                                             |
-| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                                  |
-| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.                            |
+| Reason                            | Category    | Meaning                                                                                           |
+| --------------------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `unsupported-container`           | unsupported | Not a 64-bit little-endian Mach-O, PE or ELF image (ELF: AArch64 or x86-64 with dynamic section). |
+| `slice-selection-required`        | unsupported | A universal Mach-O was given without `binary_architecture`.                                       |
+| `slice-not-found`                 | unsupported | The requested slice is absent, or a thin binary was given an architecture.                        |
+| `unsupported-pointer-encoding`    | unsupported | Mach-O chained fixups or Android packed (APS2) ELF relocations; pointers not decoded.             |
+| `malformed-container`             | input error | The container headers are damaged.                                                                |
+| `code-gen-modules-not-found`      | input error | An image has no module record; often a binary from a different build.                             |
+| `ambiguous-code-gen-module`       | input error | More than one module record matches an image.                                                     |
+| `code-registration-not-found`     | input error | No unique module table or executable-byte array candidate was resolved.                           |
+| `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                             |
+| `invalid-method-pointer`          | input error | A slot is unavailable or its nonzero address lacks unambiguous executable file coverage.          |
+| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                 |
+| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.           |
 
-Binary failures report `binary_path` as the input field. There is no partial
-linking: any failure returns no addresses. The binary is bounded to 1 GiB.
+Format and selection failures name `binary_path`; capacity refusals remain typed resource errors. Failed linking preserves the metadata source identity, validated counts, selected binary path/architecture and its SHA-256 when observed, plus prior producer observations. It never publishes an incomplete native table as complete. The binary input is bounded to1GiB.
+
+Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to65,536 entries/nodes and fallback module-array candidates to64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a64MiB UTF-8 cache-workspace guard, separate from the64MiB encoded-report admission, and64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
+
+ELF RELATIVE writes into zero-fill are kept as a private virtual-pointer overlay. Unresolved supported-width symbol relocations, including RELA PLT entries, remain unknown; stored zeros never establish no-body. COPY, TLS descriptor, REL, packed APS2 and other unsupported relocation encodings fail closed. Input bytes are unchanged.
+
+Native address queries batch exact64-bit hexadecimal `addresses` and `states` (`code`, `no-body`, `unknown`), intersecting indices and pagination. Numerically equal address spellings match; original row indices and every shared-body alternative survive:
+
+```json
+{
+  "source": {
+    "kind": "retained-evidence",
+    "evidence_id": "<parent_evidence_id>"
+  },
+  "view": {
+    "kind": "il2cpp-metadata",
+    "collection": "method_addresses",
+    "addresses": ["0x180c56ed0"],
+    "states": ["code"],
+    "fields": ["address", "rva"],
+    "offset": 0,
+    "limit": 64
+  }
+}
+```
 
 ## Ghidra function names
 
@@ -313,7 +329,7 @@ for Mach-O and PE; `--seed-base 0x...` overrides it for a different import. When
 identical code folding gives several methods one address, the first method names
 the function and a `# folded <address> <kept> also <names>` comment line after
 the seeds lists the others, so the kept name is visibly one of several. Ghidra still names a seeded function that is a thunk after its
-target. The file is created and never overwritten.
+target. The file is atomically published with exclusive creation; an existing destination is never replaced. Failed staging retains its cleanup owner for retry. Source digest and link/seed-base comments make the mapping inspectable. Unknown slots are skipped separately from observed no-body slots. `--seed-base` requires `--ghidra-seeds`; overflowing rebased addresses and names/outputs beyond the existing Ghidra protocol limits (2,000 name characters,32MiB file,1,000,000 entries) are refused before publication. The CLI and reusable service use one formatter and owned output workflow; ordinary MCP inspection remains read-only.
 
 ## Failures
 
@@ -393,3 +409,10 @@ An independent byte-layout oracle matched all 36 images, 2,468 types and 12,409
 methods. Corresponding managed DLLs independently matched names and ownership
 for 35 images, 2,463 types and 12,406 methods; the generated image has no matching
 DLL. This does not establish real-producer coverage for versions 29 or 39.
+
+Compact native summaries omit the `binary.code_gen_modules` table and keep its
+count in `counts.code_gen_modules`. Query `collection: "code_gen_modules"`
+with batch `image_indices` or source `indices`, selected `fields` and pagination.
+Module row `index` is its retained collection position; `image` joins the
+metadata image collection. Scalar registration facts and both source identities
+remain inline. Complete Evidence retains the original full table.

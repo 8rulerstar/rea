@@ -98,7 +98,7 @@ export const inspectIl2cppMetadataInputSchema = z.strictObject({
   binary_path: localPathStringSchema
     .optional()
     .describe(
-      "Absolute path to the matching native IL2CPP binary (Mach-O GameAssembly.dylib or PE GameAssembly.dll) to link methods to code addresses; read only, never executed",
+      "Absolute path to the caller-selected matching 64-bit IL2CPP binary (Mach-O GameAssembly.dylib, PE GameAssembly.dll or ELF libil2cpp.so); static reading, never executed",
     ),
   binary_architecture: z
     .enum(["arm64", "amd64"])
@@ -178,13 +178,14 @@ export const il2cppMetadataStringLiteralSchema = z.strictObject({
 });
 
 /** Hexadecimal virtual address or offset, such as 0x153584. */
-const hexAddress = z.string().regex(/^0x[0-9a-f]+$/u);
+const addressPattern = /^0x[0-9a-f]{1,16}$/u;
+export const il2cppAddressSchema = z.string().regex(addressPattern);
 
 /**
  * How the binary answered for one method: `code` has an address, `no-body` is a
  * module slot that records no code (abstract, extern or generic methods), and
  * `unknown` means no code-generation module claims the method, so the binary
- * was not asked and its code remains unknown.
+ * was not asked, or a relocation cannot resolve its slot; code remains unknown.
  */
 export const IL2CPP_METHOD_ADDRESS_STATES = [
   "code",
@@ -196,8 +197,8 @@ export const IL2CPP_METHOD_ADDRESS_STATES = [
 export const il2cppMethodAddressSchema = z.strictObject({
   state: z.enum(IL2CPP_METHOD_ADDRESS_STATES),
   /** Null unless state is code. */
-  address: hexAddress.nullable(),
-  rva: hexAddress.nullable(),
+  address: il2cppAddressSchema.nullable(),
+  rva: il2cppAddressSchema.nullable(),
 });
 
 /** Index into the binary Il2CppType table and its C#-like display name. */
@@ -210,7 +211,7 @@ export const il2cppTypeReferenceSchema = z.strictObject({
 /** Code-generation module record located for one metadata image. */
 export const il2cppCodeGenModuleSchema = z.strictObject({
   image: count,
-  address: hexAddress,
+  address: il2cppAddressSchema,
   method_pointer_count: count,
 });
 
@@ -223,18 +224,18 @@ export const il2cppBinaryLinkSchema = z.strictObject({
   }),
   format: z.enum(["elf", "macho", "pe"]),
   architecture: z.string(),
-  image_base: hexAddress,
+  image_base: il2cppAddressSchema,
   /**
    * CodeRegistration's codeGenModulesCount field, followed by the module array
-   * pointer; null when the build keeps no static CodeRegistration and the array
-   * was found through the instruction that loads it.
+   * pointer; null when no static pair was resolved and executable byte-pattern
+   * candidates identified the array without verified instruction boundaries.
    */
-  code_gen_modules_field: hexAddress.nullable(),
+  code_gen_modules_field: il2cppAddressSchema.nullable(),
   /** The code-generation module pointer array. */
-  code_gen_modules_array: hexAddress,
+  code_gen_modules_array: il2cppAddressSchema,
   code_gen_modules: z.array(il2cppCodeGenModuleSchema),
   /** MetadataRegistration's typesCount field, followed by the types pointer. */
-  types_field: hexAddress,
+  types_field: il2cppAddressSchema,
   types_count: count,
 });
 
@@ -336,6 +337,44 @@ const validateMetadataFacts = (
         message: "Section range is outside the selected artifact.",
       });
   });
+  if (report.binary != null)
+    for (const collection of [
+      "return_types",
+      "field_types",
+      "parameter_types",
+    ] as const)
+      report[collection]?.forEach((row, index) => {
+        if (
+          row.type >= report.binary!.types_count ||
+          (row.type === -1 && row.name !== null)
+        )
+          context.addIssue({
+            code: "custom",
+            path: [collection, index],
+            message:
+              "Type reference is outside the linked type table or names an unavailable type.",
+          });
+      });
+  report.method_addresses?.forEach((row, index) => {
+    if (
+      row.state === "code"
+        ? row.address === null ||
+          row.rva === null ||
+          report.binary == null ||
+          (addressPattern.test(row.address) &&
+            addressPattern.test(row.rva) &&
+            addressPattern.test(report.binary.image_base) &&
+            BigInt(row.address) !==
+              BigInt(report.binary.image_base) + BigInt(row.rva))
+        : row.address !== null || row.rva !== null
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["method_addresses", index],
+        message:
+          "Only a code row carries an address and RVA; both are then present.",
+      });
+  });
   for (const collection of ["fields", "properties", "events"] as const)
     report[collection]?.forEach((row, index) => {
       if (row.declaring_type >= report.types.length)
@@ -370,24 +409,15 @@ const validateMetadataFacts = (
       continue;
     }
     const owners = linkedRows[collection];
-    if (rows === undefined || owners === undefined) continue;
-    const expected = report.binary === null ? 0 : owners.length;
-    if (rows.length !== expected)
+    if (rows === undefined) continue;
+    const expected = report.binary === null ? 0 : owners?.length;
+    if (expected === undefined || rows.length !== expected)
       context.addIssue({
         code: "custom",
         path: [collection],
         message: `A linked binary needs one ${collection} row per metadata row; none without one.`,
       });
   }
-  report.method_addresses?.forEach((row, index) => {
-    if ((row.state === "code") !== (row.address !== null && row.rva !== null))
-      context.addIssue({
-        code: "custom",
-        path: ["method_addresses", index],
-        message:
-          "Only a code row carries an address and RVA; both are then present.",
-      });
-  });
   report.string_literals?.forEach((row, index) => {
     if ((row.value === null) === (row.value_base64 === null))
       context.addIssue({
@@ -414,3 +444,5 @@ export type Il2cppMetadataProviderInput = Omit<
 >;
 export type Il2cppMetadataSection = z.infer<typeof il2cppMetadataSectionSchema>;
 export type Il2cppMetadata = z.infer<typeof il2cppMetadataSchema>;
+
+export type Il2cppMethodAddress = z.infer<typeof il2cppMethodAddressSchema>;

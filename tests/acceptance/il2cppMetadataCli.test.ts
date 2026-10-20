@@ -106,11 +106,12 @@ cliTest(
       events: 2,
       parameters: 1,
       string_literals: 2,
-      method_addresses: 0,
-      method_address_states: { code: 0, no_body: 0, unknown: 0 },
-      return_types: 0,
-      field_types: 0,
-      parameter_types: 0,
+      code_gen_modules: null,
+      method_addresses: null,
+      method_address_states: null,
+      return_types: null,
+      field_types: null,
+      parameter_types: null,
     });
     expect(view.summary).not.toHaveProperty("sections");
     expect(view.summary.binary).toBeNull();
@@ -214,11 +215,70 @@ cliTest(
   30000,
 );
 
+const metadataPageReader =
+  (
+    call: Awaited<ReturnType<typeof connectLocalToolsMcp>>["call"],
+    context: { parentId: string; sha256: string },
+  ) =>
+  async (view: Record<string, unknown>) => {
+    const result = await call("inspect_analysis_view", {
+      source: { kind: "retained-evidence", evidence_id: context.parentId },
+      view: { kind: "il2cpp-metadata", ...view },
+    });
+    expect(result.isError).not.toBe(true);
+    const evidence = parseEvidence(result.structuredContent);
+    expect(evidence.evidence_links).toContain(context.parentId);
+    const payload = analysisViewResultSchema.parse(evidence.normalized_result);
+    if (payload.kind !== "il2cpp-metadata")
+      throw new Error("Wrong collection response");
+    expect(payload.artifact.sha256).toBe(context.sha256);
+    return payload;
+  };
+
+const assertRetainedNativeSelections = async (
+  selected: ReturnType<typeof metadataPageReader>,
+  binaryPath: string,
+  binaryBytes: Buffer,
+) => {
+  expect(
+    await selected({
+      collection: "code_gen_modules",
+      image_indices: [0],
+      fields: ["image"],
+      limit: 1,
+    }),
+  ).toMatchObject({
+    items: [{ index: 0, image: 0 }],
+    coverage: { total: 1, exhausted: true },
+  });
+  const native = await selected({
+    collection: "method_addresses",
+    addresses: ["0x0000000100000200", "0x100000220"],
+    states: ["code"],
+    fields: ["rva"],
+    offset: 1,
+    limit: 1,
+  });
+  expect(native).toMatchObject({
+    items: [{ index: 2, rva: "0x220" }],
+    binary_source: {
+      artifact: {
+        path: binaryPath,
+        sha256: createHash("sha256").update(binaryBytes).digest("hex"),
+      },
+    },
+    coverage: { total: 2, exhausted: true },
+  });
+};
+
 it("queries compact retained metadata through the real SDK with exact row identities and fields", async () => {
   const root = await createTestTempDirectory("rea-il2cpp-sdk-selection-");
   const path = join(root, "global-metadata.dat");
   const fixture = createIl2cppMetadataFixture({ version: 31 });
   await writeFile(path, fixture.bytes);
+  const binaryPath = join(root, "GameAssembly.dylib");
+  const binaryBytes = createIl2cppBinaryFixture();
+  await writeFile(binaryPath, binaryBytes);
   const { client, call } = await connectLocalToolsMcp();
   const directory = await call("inspect_desktop_application", { path: root });
   const directoryView = analysisViewResultSchema.parse(
@@ -234,7 +294,10 @@ it("queries compact retained metadata through the real SDK with exact row identi
   if (probe === undefined)
     throw new Error("Missing IL2CPP metadata next operation");
   expect(probe.path).toBe(await realpath(path));
-  const response = await call(probe.operation, { path: probe.path });
+  const response = await call(probe.operation, {
+    path: probe.path,
+    binary_path: binaryPath,
+  });
   expect(response.isError).not.toBe(true);
   const overview = il2cppMetadataSummaryViewResultSchema.parse(
     parseEvidence(response.structuredContent).normalized_result,
@@ -248,27 +311,15 @@ it("queries compact retained metadata through the real SDK with exact row identi
   });
   expect(overview.summary).not.toHaveProperty("sections");
   expect(overview.summary).not.toHaveProperty("methods");
-  await unlink(path);
+  await Promise.all([unlink(path), unlink(binaryPath)]);
   const source = {
     kind: "retained-evidence",
     evidence_id: overview.parent_evidence_id,
   };
-  const selected = async (view: Record<string, unknown>) => {
-    const result = await call("inspect_analysis_view", {
-      source,
-      view: { kind: "il2cpp-metadata", ...view },
-    });
-    expect(result.isError).not.toBe(true);
-    const evidence = parseEvidence(result.structuredContent);
-    expect(evidence.evidence_links).toContain(overview.parent_evidence_id);
-    const payload = analysisViewResultSchema.parse(evidence.normalized_result);
-    if (payload.kind !== "il2cpp-metadata")
-      throw new Error("Wrong collection response");
-    expect(payload.artifact.sha256).toBe(
-      createHash("sha256").update(fixture.bytes).digest("hex"),
-    );
-    return payload;
-  };
+  const selected = metadataPageReader(call, {
+    parentId: overview.parent_evidence_id,
+    sha256: createHash("sha256").update(fixture.bytes).digest("hex"),
+  });
   expect(
     (
       await selected({
@@ -340,6 +391,7 @@ it("queries compact retained metadata through the real SDK with exact row identi
     items: [],
     coverage: { total: 0, exhausted: true },
   });
+  await assertRetainedNativeSelections(selected, binaryPath, binaryBytes);
   const invalid = await call("inspect_analysis_view", {
     source,
     view: {
@@ -682,7 +734,7 @@ cliTest(
     expect(report.binary?.code_gen_modules_field).toBeNull();
     expect(
       report.limitations.some((line) =>
-        line.includes("no static CodeRegistration"),
+        line.includes("static CodeRegistration pair was not resolved"),
       ),
     ).toBe(true);
   },
@@ -715,6 +767,9 @@ cliTest(
 
     const linked = await run(seeds);
     expect(linked.exitCode, linked.stderr).toBe(0);
+    const linkedFacts = il2cppMetadataSchema.parse(
+      parseEvidence(linked.json).normalized_result,
+    );
     // This ELF is linked at the fixture base, so Ghidra keeps that base.
     expect(await readFile(seeds, "utf8")).toBe(
       [
@@ -722,6 +777,10 @@ cliTest(
         "0x100000210\tfunction\tGame.Player$$Update",
         "0x100000220\tfunction\tGame.Player.Slot$$Add",
         "0x100000230\tfunction\tSystem.Größe$$.ctor",
+        `# metadata_sha256 ${linkedFacts.artifact.sha256}`,
+        `# binary_sha256 ${linkedFacts.binary!.artifact.sha256}`,
+        "# link_base 0x100000000",
+        "# seed_base 0x100000000",
         "",
       ].join("\n"),
     );

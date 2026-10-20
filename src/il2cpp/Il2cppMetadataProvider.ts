@@ -1,4 +1,7 @@
+import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import { Il2cppMetadataFormatFailure } from "./Il2cppMetadataFormat.js";
+import type { AnalysisPartialObservation } from "../domain/analysisErrorBase.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
 import { setImmediate } from "node:timers/promises";
 import {
   readStableArtifact,
@@ -39,10 +42,10 @@ import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   readIl2cppMetadataForLinkingSteps,
+  readIl2cppMetadataSteps,
   type Il2cppMetadataRowCounts,
 } from "./Il2cppMetadataFile.js";
 import {
-  Il2cppBinaryFormatFailure,
   linkIl2cppBinarySteps,
   type Il2cppBinaryLink,
 } from "./Il2cppBinaryFile.js";
@@ -67,6 +70,14 @@ const failureForPrimary = (
   maximum = INPUT_BYTES,
 ): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
+  if (cause instanceof Il2cppBinaryFormatFailure && cause.kind === "capacity")
+    return new AnalysisResourceConstraintError(
+      OPERATION,
+      cause.reason === "native-type-text-capacity" ? "memory" : "capacity",
+      cause.message,
+      {},
+      { cause },
+    );
   if (cause instanceof Il2cppBinaryFormatFailure)
     return cause.kind === "unsupported"
       ? new AnalysisUnsupportedTargetError(OPERATION, path, cause.message, {
@@ -208,18 +219,10 @@ const binaryReport = (
     types_field: hex(link.types_field),
     types_count: link.types_count,
   },
-  return_types: [...link.return_types],
-  field_types: [...link.field_types],
-  parameter_types: [...link.parameter_types],
-  method_addresses: link.method_addresses.map((address) =>
-    typeof address === "bigint"
-      ? {
-          state: "code" as const,
-          address: hex(address),
-          rva: hex(address - link.image_base),
-        }
-      : { state: address, address: null, rva: null },
-  ),
+  return_types: link.return_types,
+  field_types: link.field_types,
+  parameter_types: link.parameter_types,
+  method_addresses: link.method_addresses,
 });
 
 const reportLimit = (path: string, maximumBytes: number) =>
@@ -240,6 +243,14 @@ const sourceArtifact = (path: string, snapshot: StableArtifactSnapshot) => ({
 const metadataSourceEvidence = (
   artifact: Il2cppMetadata["artifact"],
   counts: Il2cppMetadataRowCounts | undefined,
+  binary:
+    | {
+        path: string;
+        architecture?: string;
+        artifact?: Il2cppMetadata["artifact"];
+      }
+    | undefined = undefined,
+  previous?: AnalysisPartialObservation,
 ) =>
   createEvidence(
     {
@@ -251,10 +262,41 @@ const metadataSourceEvidence = (
     {
       operation: "observe_il2cpp_metadata_source",
       predicateType: "rea.il2cpp-metadata-source",
-      parameters: { path: artifact.path },
+      parameters: {
+        path: artifact.path,
+        ...(binary === undefined
+          ? {}
+          : {
+              binary_path: binary.path,
+              ...(binary.architecture === undefined
+                ? {}
+                : { binary_architecture: binary.architecture }),
+            }),
+      },
       result: {
         artifact,
         inventory_status: "not-returned-as-complete",
+        ...(binary === undefined
+          ? {}
+          : {
+              selected_binary: {
+                path: binary.path,
+                identity_status:
+                  binary.artifact === undefined ? "unavailable" : "observed",
+                ...(binary.artifact === undefined
+                  ? {}
+                  : {
+                      sha256: binary.artifact.sha256,
+                      bytes: binary.artifact.bytes,
+                    }),
+                ...(binary.architecture === undefined
+                  ? {}
+                  : { architecture: binary.architecture }),
+              },
+            }),
+        ...(previous === undefined
+          ? {}
+          : { upstream_partial_observation: jsonValueSchema.parse(previous) }),
         ...(counts === undefined
           ? {}
           : { validated_section_row_counts: { ...counts } }),
@@ -328,37 +370,34 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
     const observed: {
       artifact?: Il2cppMetadata["artifact"];
       counts?: Il2cppMetadataRowCounts;
+      binary?: Il2cppMetadata["artifact"];
     } = {};
     try {
       return await this.#resources.run(async () => {
-        const snapshot = await readStableArtifact(
+        const snapshot = await this.#readArtifact(
           input.path,
           INPUT_BYTES,
           options?.signal,
-          undefined,
-          this.#resources,
-        ).catch((cause: unknown) => {
-          // Only this awaited stable read owns these typed physical outcomes.
-          const outcome =
-            cause instanceof ArtifactFileCleanupFailure
-              ? (cause as ArtifactFileCleanupFailure<StableArtifactSnapshot>)
-                  .fileCleanupFailure.outcome
-              : cause instanceof ArtifactFileCancelled
-                ? (cause as ArtifactFileCancelled<StableArtifactSnapshot>)
-                    .fileCancellation.outcome
-                : undefined;
-          if (outcome?.kind === "completed")
-            observed.artifact = sourceArtifact(input.path, outcome.value);
-          throw cause;
-        });
+          (artifact) => {
+            observed.artifact = artifact;
+          },
+        );
         const artifact = sourceArtifact(input.path, snapshot);
         observed.artifact = artifact;
         assertArtifactReadActive(options?.signal);
         const limit = this.outputBytes;
-        const admission = createIl2cppMetadataAdmission(limit, () => {
-          throw reportLimit(input.path, limit);
-        });
-        const steps = readIl2cppMetadataForLinkingSteps(snapshot.bytes, {
+        const admission = createIl2cppMetadataAdmission(
+          limit,
+          () => {
+            throw reportLimit(input.path, limit);
+          },
+          input.binary_path !== undefined,
+        );
+        const readMetadata =
+          input.binary_path === undefined
+            ? readIl2cppMetadataSteps
+            : readIl2cppMetadataForLinkingSteps;
+        const steps = readMetadata(snapshot.bytes, {
           ...admission,
           beforeRows: (counts) => {
             observed.counts = counts;
@@ -371,7 +410,9 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           assertArtifactReadActive(options?.signal);
           step = steps.next();
         }
-        const { metadata: decoded, link } = step.value;
+        const value = step.value;
+        const decoded = "metadata" in value ? value.metadata : value;
+        const link = "metadata" in value ? value.link : undefined;
         const binaryPath = input.binary_path;
         let linked: Pick<
           Il2cppMetadata,
@@ -387,15 +428,20 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
           field_types: [],
           parameter_types: [],
         };
-        let admitted = 0;
         if (binaryPath !== undefined) {
+          if (link === undefined)
+            throw new AnalysisOutputError(
+              OPERATION,
+              "Native linking facts were not retained for the selected binary.",
+            );
           try {
-            const binary = await readStableArtifact(
+            const binary = await this.#readArtifact(
               binaryPath,
               BINARY_BYTES,
               options?.signal,
-              undefined,
-              this.#resources,
+              (artifact) => {
+                observed.binary = artifact;
+              },
             );
             assertArtifactReadActive(options?.signal);
             const linking = linkIl2cppBinarySteps(
@@ -403,6 +449,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
               decoded,
               link,
               input.binary_architecture,
+              admission,
             );
             let linkStep = linking.next();
             while (!linkStep.done) {
@@ -415,21 +462,6 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
               sha256: binary.sha256,
               bytes: binary.bytes.length,
             });
-            // Rendered type names can be long; admit every linked fact
-            // against the same report budget before retaining the report.
-            for (const rows of [
-              linked.method_addresses,
-              linked.return_types,
-              linked.field_types,
-              linked.parameter_types,
-            ])
-              for (const row of rows) {
-                admission.onRow(row);
-                if (++admitted % 256 === 0) {
-                  await this.yieldControl();
-                  assertArtifactReadActive(options?.signal);
-                }
-              }
           } catch (cause: unknown) {
             const failure = failureFor(
               cause,
@@ -438,11 +470,20 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
               "binary_path",
               BINARY_BYTES,
             );
-            // The metadata itself was read; keep its source identity.
-            if (failure.partialObservation === undefined)
-              failure.retainPartialObservation(
-                metadataSourceEvidence(artifact, observed.counts),
-              );
+            failure.partialObservation = metadataSourceEvidence(
+              artifact,
+              observed.counts,
+              {
+                path: binaryPath,
+                ...(input.binary_architecture === undefined
+                  ? {}
+                  : { architecture: input.binary_architecture }),
+                ...(observed.binary === undefined
+                  ? {}
+                  : { artifact: observed.binary }),
+              },
+              failure.partialObservation,
+            );
             return err(failure);
           }
         }
@@ -454,7 +495,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             "Only unencrypted global-metadata.dat versions 24, 27, 29, 31 and 39 are decoded; names, counts and string literals are observed file content, not runtime behavior.",
             binaryPath === undefined
               ? "Native code addresses and IL2CPP binary registration are not recovered without binary_path."
-              : "Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; generic method instances, adjustor thunks and invokers are not linked, and a null address means the module records no body.",
+              : "Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; generic method instances, adjustor thunks and invokers are not linked, no-body means an observed zero slot, and unknown means no module claimed the method or its slot has an unresolved relocation.",
             binaryPath === undefined
               ? "Field, parameter and return types are not recovered without binary_path; type indices refer to the native binary."
               : decoded.metadata_version === 27
@@ -463,9 +504,14 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             ...(linked.binary !== null &&
             linked.binary.code_gen_modules_field === null
               ? [
-                  "This binary keeps no static CodeRegistration, so the module array (code_gen_modules_array) was derived from the single x86-64 instruction that loads it, not read from a registration structure; the module records and method pointers themselves are read from the binary.",
+                  "The static CodeRegistration pair was not resolved. The module array is inferred from executable bytes consistent with RIP-relative LEA/MOV referencing one array candidate; instruction boundaries and runtime use were not verified.",
                 ]
               : []),
+            ...(binaryPath === undefined
+              ? []
+              : [
+                  "The binary/metadata pair is caller-selected. Module name/count/token agreement is structural evidence, not a cryptographic proof that both files come from the same build.",
+                ]),
             "declaring_type for types is derived from the nestedTypes section, and member and parameter owners from the owners' index ranges; row positions are the metadata indices.",
           ],
         };
@@ -483,16 +529,56 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
       });
     } catch (cause: unknown) {
       const failure = failureFor(cause, input.path);
-      if (
-        observed.artifact !== undefined &&
-        failure.partialObservation === undefined
-      )
-        failure.retainPartialObservation(
-          metadataSourceEvidence(observed.artifact, observed.counts),
+      if (observed.artifact !== undefined)
+        failure.partialObservation = metadataSourceEvidence(
+          observed.artifact,
+          observed.counts,
+          input.binary_path === undefined
+            ? undefined
+            : {
+                path: input.binary_path,
+                ...(input.binary_architecture === undefined
+                  ? {}
+                  : { architecture: input.binary_architecture }),
+                ...(observed.binary === undefined
+                  ? {}
+                  : { artifact: observed.binary }),
+              },
+          failure.partialObservation,
         );
       return err(failure);
     } finally {
       this.#inspecting = false;
+    }
+  }
+  async #readArtifact(
+    path: string,
+    maximum: number,
+    signal: AbortSignal | undefined,
+    observe: (artifact: Il2cppMetadata["artifact"]) => void,
+  ): Promise<StableArtifactSnapshot> {
+    try {
+      const snapshot = await readStableArtifact(
+        path,
+        maximum,
+        signal,
+        undefined,
+        this.#resources,
+      );
+      observe(sourceArtifact(path, snapshot));
+      return snapshot;
+    } catch (cause) {
+      const outcome =
+        cause instanceof ArtifactFileCleanupFailure
+          ? (cause as ArtifactFileCleanupFailure<StableArtifactSnapshot>)
+              .fileCleanupFailure.outcome
+          : cause instanceof ArtifactFileCancelled
+            ? (cause as ArtifactFileCancelled<StableArtifactSnapshot>)
+                .fileCancellation.outcome
+            : undefined;
+      if (outcome?.kind === "completed")
+        observe(sourceArtifact(path, outcome.value));
+      throw cause;
     }
   }
 }

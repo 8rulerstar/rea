@@ -1,3 +1,10 @@
+import { analysisErrorWithCleanupFailure } from "../../domain/analysisErrorCleanup.js";
+import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
+import type {
+  Il2cppSeedOutput,
+  Il2cppSeedWriterPort,
+  Il2cppSeedReceipt,
+} from "./Il2cppSeedWriterPort.js";
 import { isAbsolute } from "node:path";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
 import {
@@ -6,7 +13,7 @@ import {
   type AnalysisViewRetention,
 } from "../analysisView/AnalysisViewService.js";
 import type { Il2cppMetadataPort } from "./Il2cppMetadataPort.js";
-import type { AnalysisError } from "../../domain/analysisErrorBase.js";
+import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
   AnalysisInputError,
@@ -16,6 +23,8 @@ import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import {
   il2cppMetadataSchema,
   inspectIl2cppMetadataInputSchema,
+  type Il2cppMetadata,
+  type Il2cppMetadataProviderInput,
 } from "../../domain/il2cpp/il2cppMetadata.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../../domain/result.js";
@@ -28,17 +37,68 @@ const NO_RETENTION: AnalysisViewRetention = {
 
 /** Shared exact input validation, artifact-bound Evidence and summary delivery for CLI and MCP. */
 export class Il2cppMetadataService {
-  constructor(readonly provider: Il2cppMetadataPort) {}
+  constructor(
+    readonly provider: Il2cppMetadataPort,
+    private readonly seeds?: Il2cppSeedWriterPort,
+  ) {}
 
-  close(): Promise<void> {
-    return this.provider.close?.() ?? Promise.resolve();
+  async close(): Promise<void> {
+    let failure: AnalysisError | undefined;
+    for (const close of [
+      () => this.provider.close?.(),
+      () => this.seeds?.close(),
+    ]) {
+      try {
+        await close();
+      } catch (cause) {
+        const next =
+          cause instanceof AnalysisError
+            ? cause
+            : new ProviderCleanupError(
+                this.provider.identity.id,
+                [],
+                {
+                  reason:
+                    cause instanceof Error ? cause.message : String(cause),
+                },
+                { cause, operation: OPERATION },
+              );
+        failure =
+          failure === undefined
+            ? next
+            : analysisErrorWithCleanupFailure(
+                failure,
+                next,
+                OPERATION,
+              ).bindCleanupDependencies([failure, next]);
+      }
+    }
+    if (failure !== undefined) throw failure;
   }
 
-  /** Inspect one explicitly selected file; detail changes delivery, not decoded coverage. */
-  async inspect(
+  inspect(
     rawInput: unknown,
     options?: ExecutionOptions,
     retention: AnalysisViewRetention = NO_RETENTION,
+  ): Promise<Result<Evidence, AnalysisError>> {
+    return this.#inspect(rawInput, options, retention);
+  }
+
+  /** Explicit output workflow for CLI/SDK callers; ordinary inspection stays read-only. */
+  inspectWithGhidraSeeds(
+    rawInput: unknown,
+    output: Il2cppSeedOutput,
+    options?: ExecutionOptions,
+  ): Promise<Result<Evidence, AnalysisError>> {
+    return this.#inspect(rawInput, options, NO_RETENTION, output);
+  }
+
+  /** Inspect one explicitly selected file; detail changes delivery, not decoded coverage. */
+  async #inspect(
+    rawInput: unknown,
+    options: ExecutionOptions | undefined,
+    retention: AnalysisViewRetention,
+    output?: Il2cppSeedOutput,
   ): Promise<Result<Evidence, AnalysisError>> {
     if (options?.signal?.aborted)
       return err(
@@ -87,6 +147,28 @@ export class Il2cppMetadataService {
           },
         ]),
       );
+    if (output !== undefined) {
+      if (input.data.binary_path === undefined)
+        return err(
+          new AnalysisInputError(OPERATION, undefined, [
+            {
+              path: ["ghidra_seeds"],
+              reason: "invalid_value",
+              message:
+                "--ghidra-seeds needs --binary to link method addresses.",
+            },
+          ]),
+        );
+      if (this.seeds === undefined)
+        return err(
+          new AnalysisOutputError(
+            OPERATION,
+            "No seed output adapter is configured.",
+          ),
+        );
+      const ready = await this.seeds.check(output, options);
+      if (!ready.ok) return ready;
+    }
     const { detail, ...providerInput } = input.data;
     if (detail === "summary") {
       const ready = requireAnalysisViewRetention(OPERATION, retention);
@@ -99,7 +181,9 @@ export class Il2cppMetadataService {
       !report.success ||
       report.data.artifact.path !== providerInput.path ||
       (report.data.binary?.artifact.path ?? undefined) !==
-        providerInput.binary_path
+        providerInput.binary_path ||
+      (providerInput.binary_architecture !== undefined &&
+        report.data.binary?.architecture !== providerInput.binary_architecture)
     )
       return err(
         new AnalysisOutputError(
@@ -108,7 +192,38 @@ export class Il2cppMetadataService {
         ),
       );
     const value = report.data;
-    const evidence = createEvidence(
+    const evidence = this.#evidence(value, providerInput, output);
+    let seedReceipt: Il2cppSeedReceipt | undefined;
+    const cancelled = () =>
+      err(
+        new AnalysisCancelledError(OPERATION, {
+          cause: options?.signal?.reason,
+          partialObservation: evidence,
+          ...(seedReceipt === undefined
+            ? {}
+            : { diagnostics: { published_seed_output: { ...seedReceipt } } }),
+        }),
+      );
+    if (options?.signal?.aborted) return cancelled();
+    if (output !== undefined && this.seeds !== undefined) {
+      const written = await this.seeds.write(value, output, options);
+      if (!written.ok) {
+        written.error.retainPartialObservation(evidence);
+        return written;
+      }
+      seedReceipt = written.value;
+    }
+    if (options?.signal?.aborted) return cancelled();
+    return detail === "summary"
+      ? summarizeRetainedAnalysis(evidence, retention)
+      : ok(evidence);
+  }
+  #evidence(
+    value: Il2cppMetadata,
+    providerInput: Il2cppMetadataProviderInput,
+    output: Il2cppSeedOutput | undefined,
+  ): Evidence {
+    return createEvidence(
       {
         path: value.artifact.path,
         sha256: value.artifact.sha256,
@@ -117,13 +232,28 @@ export class Il2cppMetadataService {
       this.provider.identity,
       {
         operation: OPERATION,
-        parameters: Object.fromEntries(
-          Object.entries(providerInput).filter(
-            ([, value]) => value !== undefined,
-          ),
-        ) as Record<string, string>,
+        parameters: {
+          ...(Object.fromEntries(
+            Object.entries(providerInput).filter(
+              ([, value]) => value !== undefined,
+            ),
+          ) as Record<string, string>),
+          ...(output === undefined
+            ? {}
+            : {
+                ghidra_seeds: output.path,
+                ...(output.base === undefined
+                  ? {}
+                  : { seed_base: output.base }),
+              }),
+        },
         result: value,
-        confidence: "observed",
+        confidence:
+          value.binary === null
+            ? "observed"
+            : value.binary.code_gen_modules_field === null
+              ? "inferred"
+              : "derived",
         limitations: value.limitations,
         locations: [
           { kind: "artifact-path", path: value.artifact.path },
@@ -159,15 +289,5 @@ export class Il2cppMetadataService {
         ],
       },
     );
-    if (options?.signal?.aborted)
-      return err(
-        new AnalysisCancelledError(OPERATION, {
-          cause: options.signal.reason,
-          partialObservation: evidence,
-        }),
-      );
-    return detail === "summary"
-      ? summarizeRetainedAnalysis(evidence, retention)
-      : ok(evidence);
   }
 }

@@ -11,6 +11,8 @@ import {
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
   il2cppMethodAddressSchema,
+  il2cppBinaryLinkSchema,
+  il2cppCodeGenModuleSchema,
   il2cppTypeReferenceSchema,
   il2cppMetadataObjectSchema,
   il2cppMetadataParentSchema,
@@ -41,6 +43,7 @@ const countsSchema = z.strictObject({
   events: z.number().int().nonnegative().nullable(),
   parameters: z.number().int().nonnegative().nullable(),
   string_literals: z.number().int().nonnegative().nullable(),
+  code_gen_modules: z.number().int().nonnegative().nullable(),
   method_addresses: z.number().int().nonnegative().nullable(),
   /** method_addresses rows per state; zero without a linked binary, null when not collected. */
   method_address_states: z
@@ -70,10 +73,15 @@ export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
     return_types: true,
     field_types: true,
     parameter_types: true,
+    binary: true,
   })
-  // Reports retained before binary linking existed omit the link field.
-  .partial({ binary: true })
-  .extend({ counts: countsSchema });
+  .extend({
+    binary: il2cppBinaryLinkSchema
+      .omit({ code_gen_modules: true })
+      .nullable()
+      .optional(),
+    counts: countsSchema,
+  });
 
 const indexSchema = z.number().int().nonnegative();
 const sectionRowSchema = il2cppMetadataSectionSchema.extend({
@@ -97,6 +105,9 @@ const methodAddressRowSchema = il2cppMethodAddressSchema.extend({
   index: indexSchema,
 });
 const typeReferenceRowSchema = il2cppTypeReferenceSchema.extend({
+  index: indexSchema,
+});
+const codeGenModuleRowSchema = il2cppCodeGenModuleSchema.extend({
   index: indexSchema,
 });
 const indexPage = {
@@ -158,14 +169,23 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
     z.strictObject({
       ...indexPage,
       collection: z.literal("method_addresses"),
+      addresses: z.array(z.string().regex(/^0x[0-9a-fA-F]{1,16}$/u)).optional(),
+      states: z.array(il2cppMethodAddressSchema.shape.state).optional(),
       fields: z.array(methodAddressRowSchema.keyof()).optional(),
     }),
-    ...(["return_types", "field_types"] as const).map((collection) =>
-      z.strictObject({
-        ...indexPage,
-        collection: z.literal(collection),
-        fields: z.array(typeReferenceRowSchema.keyof()).optional(),
-      }),
+    z.strictObject({
+      ...indexPage,
+      collection: z.literal("code_gen_modules"),
+      image_indices: z.array(indexSchema).optional(),
+      fields: z.array(codeGenModuleRowSchema.keyof()).optional(),
+    }),
+    ...(["return_types", "field_types"] as const).map(
+      (collection) =>
+        z.strictObject({
+          ...indexPage,
+          collection: z.literal(collection),
+          fields: z.array(typeReferenceRowSchema.keyof()).optional(),
+        }),
     ),
     z.strictObject({
       ...indexPage,
@@ -187,16 +207,28 @@ export const il2cppMetadataViewItemsSchema = z.union([
   z.array(stringLiteralRowSchema.partial().required({ index: true })),
   z.array(methodAddressRowSchema.partial().required({ index: true })),
   z.array(typeReferenceRowSchema.partial().required({ index: true })),
+  z.array(codeGenModuleRowSchema.partial().required({ index: true })),
 ]);
 
 export const il2cppMetadataViewContextSchema = z.strictObject({
   metadata_version: il2cppMetadataObjectSchema.shape.metadata_version,
   counts: countsSchema,
+  binary_source: il2cppBinaryLinkSchema
+    .pick({
+      artifact: true,
+      format: true,
+      architecture: true,
+      image_base: true,
+    })
+    .optional(),
 });
 
 type Report = z.infer<typeof il2cppMetadataParentSchema>;
 type Request = z.infer<typeof il2cppMetadataViewRequestSchema>;
-type Row = NonNullable<Report[Request["collection"]]>[number];
+type CollectionRows = Omit<Report, "binary"> & {
+  code_gen_modules: NonNullable<Report["binary"]>["code_gen_modules"];
+};
+type Row = NonNullable<CollectionRows[Request["collection"]]>[number];
 interface CheckedReport {
   readonly report: Report;
   readonly counts: z.infer<typeof countsSchema>;
@@ -238,9 +270,13 @@ const parseMetadataReport = (
       events: report.events?.length ?? null,
       parameters: report.parameters?.length ?? null,
       string_literals: report.string_literals?.length ?? null,
-      method_addresses: report.method_addresses?.length ?? null,
+      code_gen_modules: report.binary?.code_gen_modules.length ?? null,
+      method_addresses:
+        report.binary == null
+          ? null
+          : (report.method_addresses?.length ?? null),
       method_address_states:
-        report.method_addresses?.reduce(
+        (report.binary == null ? undefined : report.method_addresses)?.reduce(
           (states, row) => {
             if (row.state === "code") states.code++;
             else if (row.state === "no-body") states.no_body++;
@@ -249,9 +285,12 @@ const parseMetadataReport = (
           },
           { code: 0, no_body: 0, unknown: 0 },
         ) ?? null,
-      return_types: report.return_types?.length ?? null,
-      field_types: report.field_types?.length ?? null,
-      parameter_types: report.parameter_types?.length ?? null,
+      return_types:
+        report.binary == null ? null : (report.return_types?.length ?? null),
+      field_types:
+        report.binary == null ? null : (report.field_types?.length ?? null),
+      parameter_types:
+        report.binary == null ? null : (report.parameter_types?.length ?? null),
     },
   };
   if (reusable) checkedReports.set(key, checked);
@@ -293,6 +332,14 @@ const selection = (view: Request, report: Report) => {
     !("declaring_types" in view) || view.declaring_types === undefined
       ? undefined
       : new Set(view.declaring_types);
+  const addresses =
+    view.collection === "method_addresses" && view.addresses !== undefined
+      ? new Set(view.addresses.map((value) => BigInt(value).toString(16)))
+      : undefined;
+  const states =
+    view.collection === "method_addresses" && view.states !== undefined
+      ? new Set<string>(view.states)
+      : undefined;
   const methods =
     (view.collection === "parameters" ||
       view.collection === "parameter_types") &&
@@ -334,7 +381,38 @@ const selection = (view: Request, report: Report) => {
       else ranges.push(range);
     }
   }
+  const moduleImages =
+    view.collection === "code_gen_modules" && view.image_indices !== undefined
+      ? new Set(view.image_indices)
+      : undefined;
+  if (
+    [
+      moduleImages,
+      addresses,
+      states,
+      names,
+      owners,
+      namespaces,
+      methods,
+      imageIndices,
+    ].every((filter) => filter === undefined)
+  )
+    return undefined;
   return (row: Row, index: number) => {
+    if (
+      moduleImages !== undefined &&
+      (!("image" in row) || !moduleImages.has(row.image))
+    )
+      return false;
+    if (
+      addresses !== undefined &&
+      (!("address" in row) ||
+        row.address === null ||
+        !addresses.has(BigInt(row.address).toString(16)))
+    )
+      return false;
+    if (states !== undefined && (!("state" in row) || !states.has(row.state)))
+      return false;
     if (
       names !== undefined &&
       (!("name" in row) || row.name === null || !names.has(row.name))
@@ -417,6 +495,7 @@ export const projectIl2cppMetadataView = (
     ...identity
   } = report;
   const allRows = {
+    code_gen_modules: report.binary?.code_gen_modules,
     sections,
     images,
     types,
@@ -438,10 +517,12 @@ export const projectIl2cppMetadataView = (
     artifact: { path: report.artifact.path, sha256: report.artifact.sha256 },
     limitations: [...parent.limitations],
     unknowns: [
-      ...[
-        ...il2cppMetadataMemberCollections,
-        ...il2cppMetadataBinaryCollections,
-      ]
+      ...(report.binary != null && report.binary.code_gen_modules_field === null
+        ? [
+            "Module-array association is inferred from executable byte patterns; instruction boundaries and runtime use remain unverified.",
+          ]
+        : []),
+      ...[...il2cppMetadataMemberCollections, ...il2cppMetadataBinaryCollections]
         .filter((name) => report[name] === undefined)
         .map(
           (name) =>
@@ -457,15 +538,32 @@ export const projectIl2cppMetadataView = (
         : []),
     ],
   };
-  if (view.kind === "summary")
+  if (view.kind === "summary") {
+    const binary =
+      report.binary == null
+        ? report.binary
+        : (({ code_gen_modules: _modules, ...facts }) => facts)(report.binary);
     return ok({
       kind: "summary",
       view,
       ...shared,
-      summary: { ...identity, counts },
+      summary: {
+        ...identity,
+        ...(binary === undefined ? {} : { binary }),
+        counts,
+      },
       coverage: completeWithinViewCoverage(1, 1),
     });
-  const rows = allRows[view.collection];
+  }
+  const nativeUnavailable =
+    report.binary == null &&
+    [
+      "method_addresses",
+      "return_types",
+      "field_types",
+      "parameter_types",
+    ].includes(view.collection);
+  const rows = nativeUnavailable ? undefined : allRows[view.collection];
   if (rows === undefined)
     return err(
       analysisViewInputError([
@@ -496,12 +594,19 @@ export const projectIl2cppMetadataView = (
     view.fields === undefined ? undefined : new Set<string>(view.fields);
   const items = [];
   let total = 0;
-  for (const index of rowIndices(rows.length, view.indices)) {
-    const row = rows[index]!;
-    if (!matches(row, index)) continue;
-    if (total >= view.offset && items.length < view.limit)
-      items.push(selectFields(row, index, selectedFields));
-    total++;
+  if (matches === undefined && view.indices === undefined) {
+    total = rows.length;
+    const end = Math.min(rows.length, view.offset + view.limit);
+    for (let index = Math.min(view.offset, rows.length); index < end; index++)
+      items.push(selectFields(rows[index]!, index, selectedFields));
+  } else {
+    for (const index of rowIndices(rows.length, view.indices)) {
+      const row = rows[index]!;
+      if (matches !== undefined && !matches(row, index)) continue;
+      if (total >= view.offset && items.length < view.limit)
+        items.push(selectFields(row, index, selectedFields));
+      total++;
+    }
   }
   return ok({
     kind: "il2cpp-metadata",
@@ -509,6 +614,16 @@ export const projectIl2cppMetadataView = (
     ...shared,
     items,
     metadata_version: report.metadata_version,
+    ...(report.binary == null
+      ? {}
+      : {
+          binary_source: {
+            artifact: report.binary.artifact,
+            format: report.binary.format,
+            architecture: report.binary.architecture,
+            image_base: report.binary.image_base,
+          },
+        }),
     counts,
     coverage: pageViewCoverage(view.offset, items.length, total),
   });

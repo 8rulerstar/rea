@@ -1,131 +1,221 @@
-import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFile.js";
+import {
+  GoBinaryFormatFailure,
+  mappedFileOffset,
+  isZeroFilledSpan,
+  type GoFileMapping,
+  type GoZeroFillMapping,
+} from "../go/GoBinaryContainer.js";
+import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 
-const PT_LOAD = 1;
-const PT_DYNAMIC = 2;
-const DT_NULL = 0n;
-const DT_RELA = 7n;
-const DT_RELASZ = 8n;
-const DT_RELAENT = 9n;
-// Android's packed relocation formats (APS2) are a separate encoding.
-const DT_ANDROID_REL = 0x6000000fn;
-const DT_ANDROID_RELA = 0x60000011n;
-
-/** R_<machine>_RELATIVE: the slot holds load base plus addend. */
-const RELATIVE_TYPES = new Map([
-  [183, 1027], // AArch64
-  [62, 8], // x86-64
-]);
-
-interface LoadSegment {
-  readonly address: bigint;
-  readonly offset: number;
-  readonly fileSize: number;
-}
-
+const DT_RELA = 7n,
+  DT_RELASZ = 8n,
+  DT_RELAENT = 9n;
+const DT_PLTRELSZ = 2n,
+  DT_PLTREL = 20n,
+  DT_JMPREL = 23n;
+const MAX_OVERLAY_ENTRIES = 65536;
 const malformed = (message: string) =>
   new Il2cppBinaryFormatFailure("malformed-container", message);
+const unsupported = (message: string) =>
+  new Il2cppBinaryFormatFailure("unsupported-pointer-encoding", message);
 
-/**
- * Return a copy of a 64-bit little-endian ELF shared object with every
- * RELATIVE relocation written into its pointer slot, so slots read as the
- * image would at its link-time addresses. Symbol relocations are left as
- * stored: IL2CPP registration tables point only into the image itself. RELR
- * slots already hold their link-time value, so DT_RELR needs no rewriting,
- * and RELATIVE slots outside file data (.bss) are never searched.
+interface RelocatedImage {
+  readonly bytes: Buffer;
+  readonly unresolved: Set<bigint>;
+  readonly zeroFillPointers: Map<bigint, bigint>;
+}
+interface RelocationSource {
+  readonly image: Buffer;
+  readonly mappings: readonly GoFileMapping[];
+  readonly zeroFills: readonly GoZeroFillMapping[];
+  readonly relative: number;
+  readonly unknownPointerKinds: ReadonlySet<number>;
+}
+
+/** Standard dynamic relocations whose destination spans at most eight bytes.
+ * Other encodings (including COPY and TLS descriptors) need their own width
+ * semantics; do not silently apply them or turn their stored zero into absence.
  */
-export const applyElfRelativeRelocations = (image: Buffer): Buffer => {
-  if (image.length < 64) throw malformed("ELF header is truncated");
-  const machine = image.readUInt16LE(18);
-  const relative = RELATIVE_TYPES.get(machine);
-  if (relative === undefined)
-    throw new Il2cppBinaryFormatFailure(
-      "unsupported-container",
-      `ELF machine ${machine} relocations are not decoded; AArch64 and x86-64 are`,
-    );
-  const phoff = Number(image.readBigUInt64LE(32));
-  const phentsize = image.readUInt16LE(54);
-  const phnum = image.readUInt16LE(56);
-  if (phentsize < 56 || phoff + phnum * phentsize > image.length)
-    throw malformed("ELF program headers extend beyond the file");
+const RELOCATION_KINDS = new Map([
+  [
+    183,
+    {
+      relative: 1027,
+      unknownPointerKinds: new Set([
+        257, 258, 259, 260, 261, 262, 1025, 1026, 1028, 1029, 1030, 1032,
+      ]),
+    },
+  ],
+  [
+    62,
+    {
+      relative: 8,
+      unknownPointerKinds: new Set([1, 2, 6, 7, 10, 11, 16, 17, 18, 24, 37]),
+    },
+  ],
+]);
 
-  const loads: LoadSegment[] = [];
+function* dynamicTags(image: Buffer): Generator<void, Map<bigint, bigint>> {
+  if (image.length < 64) throw malformed("ELF header is truncated");
+  const offset = Number(image.readBigUInt64LE(32)),
+    width = image.readUInt16LE(54),
+    count = image.readUInt16LE(56);
+  if (width < 56 || offset + count * width > image.length)
+    throw malformed("ELF program headers extend beyond the file");
   let dynamic: { offset: number; size: number } | undefined;
-  for (let index = 0; index < phnum; index++) {
-    const at = phoff + index * phentsize;
-    const type = image.readUInt32LE(at);
-    const offset = Number(image.readBigUInt64LE(at + 8));
-    const address = image.readBigUInt64LE(at + 16);
-    const fileSize = Number(image.readBigUInt64LE(at + 32));
-    if (type === PT_LOAD) loads.push({ address, offset, fileSize });
-    if (type === PT_DYNAMIC) {
-      if (dynamic !== undefined)
-        throw malformed("multiple PT_DYNAMIC segments");
-      dynamic = { offset, size: fileSize };
-    }
+  for (let index = 0; index < count; index++) {
+    if (index % 256 === 0) yield;
+    const at = offset + index * width;
+    if (image.readUInt32LE(at) !== 2) continue;
+    if (dynamic !== undefined) throw malformed("multiple PT_DYNAMIC segments");
+    dynamic = {
+      offset: Number(image.readBigUInt64LE(at + 8)),
+      size: Number(image.readBigUInt64LE(at + 32)),
+    };
   }
   if (dynamic === undefined)
     throw new Il2cppBinaryFormatFailure(
       "unsupported-container",
-      "ELF image has no PT_DYNAMIC segment, so it is not a shared object",
+      "ELF image has no PT_DYNAMIC segment",
     );
-  if (dynamic.offset + dynamic.size > image.length)
-    throw malformed("PT_DYNAMIC extends beyond the file");
-
-  const fileOffset = (address: bigint, size: number): number | null => {
-    for (const load of loads) {
-      if (address < load.address) continue;
-      const delta = address - load.address;
-      if (delta + BigInt(size) <= BigInt(load.fileSize))
-        return load.offset + Number(delta);
-    }
-    return null;
-  };
-
+  if (dynamic.size % 16 !== 0 || dynamic.offset + dynamic.size > image.length)
+    throw malformed("PT_DYNAMIC is truncated or outside the file");
   const tags = new Map<bigint, bigint>();
-  for (
-    let at = dynamic.offset;
-    at + 16 <= dynamic.offset + dynamic.size;
-    at += 16
-  ) {
+  const unique = new Set([
+    DT_RELA,
+    DT_RELASZ,
+    DT_RELAENT,
+    DT_JMPREL,
+    DT_PLTRELSZ,
+    DT_PLTREL,
+  ]);
+  for (let at = dynamic.offset; at < dynamic.offset + dynamic.size; at += 16) {
+    if ((at - dynamic.offset) % 65536 === 0) yield;
     const tag = image.readBigInt64LE(at);
-    if (tag === DT_NULL) break;
-    if (
-      tags.has(tag) &&
-      (tag === DT_RELA || tag === DT_RELASZ || tag === DT_RELAENT)
-    )
+    if (tag === 0n) return tags;
+    if (tags.has(tag) && unique.has(tag))
       throw malformed(`duplicate dynamic tag ${tag}`);
     tags.set(tag, image.readBigUInt64LE(at + 8));
   }
-  if (tags.has(DT_ANDROID_RELA) || tags.has(DT_ANDROID_REL))
-    throw new Il2cppBinaryFormatFailure(
-      "unsupported-pointer-encoding",
-      "Android packed relocations (APS2) are not decoded",
-    );
+  throw malformed("PT_DYNAMIC has no DT_NULL terminator");
+}
 
-  const bytes = Buffer.from(image);
-  const write = (address: bigint, value: bigint) => {
-    const target = fileOffset(address, 8);
-    if (target !== null) bytes.writeBigUInt64LE(value, target);
-  };
-
-  const relaAddress = tags.get(DT_RELA);
-  if (relaAddress !== undefined) {
-    const size = Number(tags.get(DT_RELASZ) ?? -1n);
-    const entry = Number(tags.get(DT_RELAENT) ?? 24n);
-    if (size < 0 || entry !== 24 || size % entry !== 0)
-      throw malformed("invalid DT_RELASZ or DT_RELAENT");
-    const start = fileOffset(relaAddress, size);
-    if (start === null) throw malformed("DT_RELA table is not file-backed");
-    for (let at = start; at < start + size; at += entry) {
-      const info = image.readBigUInt64LE(at + 8);
-      if (Number(info & 0xffffffffn) !== relative || info >> 32n !== 0n)
-        continue;
-      write(
-        image.readBigUInt64LE(at),
-        image.readBigInt64LE(at + 16) & 0xffffffffffffffffn,
-      );
-    }
+const fileOffset = (
+  mappings: readonly GoFileMapping[],
+  address: bigint,
+  size: number,
+): number | null => {
+  try {
+    return mappedFileOffset(mappings, address, size);
+  } catch (cause) {
+    if (cause instanceof GoBinaryFormatFailure) return null;
+    throw cause;
   }
-
-  return bytes;
 };
+
+const admitOverlay = (output: RelocatedImage) => {
+  if (
+    output.unresolved.size + output.zeroFillPointers.size >=
+    MAX_OVERLAY_ENTRIES
+  )
+    throw new Il2cppBinaryFormatFailure(
+      "native-index-capacity",
+      `ELF relocation overlay exceeds ${MAX_OVERLAY_ENTRIES} entries`,
+    );
+};
+
+/** Each admitted record is interpreted once from the original immutable bytes. */
+function* applyRelaTable(
+  source: RelocationSource,
+  output: RelocatedImage,
+  address: bigint,
+  size: bigint | undefined,
+  entry: bigint,
+): Generator<void> {
+  if (
+    size === undefined ||
+    size < 0n ||
+    entry !== 24n ||
+    size % entry !== 0n ||
+    size > BigInt(source.image.length)
+  )
+    throw malformed("invalid DT_RELASZ or DT_RELAENT");
+  const start = fileOffset(source.mappings, address, Number(size));
+  if (start === null) throw malformed("RELA table is not file-backed");
+  for (let at = start; at < start + Number(size); at += 24) {
+    if ((at - start) % (24 * 4096) === 0) yield;
+    const info = source.image.readBigUInt64LE(at + 8),
+      kind = Number(info & 0xffffffffn);
+    if (kind === 0) continue;
+    const destination = source.image.readBigUInt64LE(at);
+    const target = fileOffset(source.mappings, destination, 8);
+    if (kind !== source.relative || info >> 32n !== 0n) {
+      if (!source.unknownPointerKinds.has(kind))
+        throw unsupported(`ELF relocation kind ${kind} is not decoded`);
+      if (!output.unresolved.has(destination)) {
+        admitOverlay(output);
+        output.unresolved.add(destination);
+      }
+      // Registration scans read this private image directly. Clear unknown
+      // fields so their stored bytes cannot masquerade as resolved pointers.
+      if (target !== null) output.bytes.fill(0, target, target + 8);
+      continue;
+    }
+    const value = source.image.readBigInt64LE(at + 16) & 0xffffffffffffffffn;
+    if (target !== null) output.bytes.writeBigUInt64LE(value, target);
+    else if (
+      isZeroFilledSpan(source.mappings, source.zeroFills, destination, 8)
+    ) {
+      if (!output.zeroFillPointers.has(destination)) admitOverlay(output);
+      output.zeroFillPointers.set(destination, value);
+    } else
+      throw malformed(
+        "RELATIVE relocation target is outside unambiguous loaded memory",
+      );
+  }
+}
+
+/** Materialize relative pointers in a private copy, preserving unknown and .bss facts. */
+export function* applyElfRelativeRelocationsSteps(
+  image: Buffer,
+  mappings: readonly GoFileMapping[],
+  zeroFills: readonly GoZeroFillMapping[],
+): Generator<void, RelocatedImage> {
+  if (image.length < 64) throw malformed("ELF header is truncated");
+  const kinds = RELOCATION_KINDS.get(image.readUInt16LE(18));
+  if (kinds === undefined)
+    throw new Il2cppBinaryFormatFailure(
+      "unsupported-container",
+      "ELF relocations require AArch64 or x86-64",
+    );
+  const tags = yield* dynamicTags(image);
+  if (tags.has(0x6000000fn) || tags.has(0x60000011n) || tags.has(17n))
+    throw unsupported(
+      "Android packed (APS2) or REL relocations are not decoded",
+    );
+  yield;
+  const output: RelocatedImage = {
+    bytes: Buffer.from(image),
+    unresolved: new Set(),
+    zeroFillPointers: new Map(),
+  };
+  const source = { image, mappings, zeroFills, ...kinds };
+  const rela = tags.get(DT_RELA);
+  if (rela !== undefined)
+    yield* applyRelaTable(
+      source,
+      output,
+      rela,
+      tags.get(DT_RELASZ),
+      tags.get(DT_RELAENT) ?? 24n,
+    );
+  else if ((tags.get(DT_RELASZ) ?? 0n) !== 0n)
+    throw malformed("DT_RELASZ has no DT_RELA");
+  const plt = tags.get(DT_JMPREL);
+  if (plt !== undefined) {
+    if (tags.get(DT_PLTREL) !== DT_RELA)
+      throw unsupported("PLT relocations require RELA encoding");
+    yield* applyRelaTable(source, output, plt, tags.get(DT_PLTRELSZ), 24n);
+  }
+  return output;
+}

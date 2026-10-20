@@ -467,3 +467,31 @@ it("accepts cancellation between binary linking batches and keeps the metadata s
     await provider.close();
   }
 });
+
+it("retains both observed file identities and the selected architecture when native linking fails", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-failed-pair-");
+  const path = join(root, "global-metadata.dat"),
+    binary_path = join(root, "GameAssembly.dylib");
+  const bytes = createIl2cppBinaryFixture({ codeRegistration: false });
+  await writeFile(path, createIl2cppMetadataFixture().bytes);
+  await writeFile(binary_path, bytes);
+  const provider = new Il2cppMetadataProvider();
+  try {
+    const result = await provider.inspect({ path, binary_path });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Unresolved registration accepted");
+    expect(result.error.partialObservation).toMatchObject({
+      normalized_result: {
+        artifact: { path },
+        selected_binary: {
+          path: binary_path,
+          identity_status: "observed",
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.length,
+        },
+      },
+    });
+  } finally {
+    await provider.close();
+  }
+});

@@ -103,10 +103,10 @@ it("validates a sealed parent once across pages and keeps counts exact", () => {
         events: 0,
         parameters: 1,
         string_literals: 1,
-        method_addresses: 0,
-        return_types: 0,
-        field_types: 0,
-        parameter_types: 0,
+        method_addresses: null,
+        return_types: null,
+        field_types: null,
+        parameter_types: null,
       },
     });
   }
@@ -422,4 +422,195 @@ it("refuses a parent whose subject contradicts the recorded artifact identity", 
     page,
   );
   expect(result.ok).toBe(false);
+});
+
+const linkedReport = (): Il2cppMetadata => ({
+  ...structuredClone(report),
+  types: report.types.map((type, index) => ({
+    ...type,
+    method_start: index * 2,
+    method_count: 2,
+  })),
+  methods: [
+    { name: "A", declaring_type: 0 },
+    { name: "B", declaring_type: 0 },
+    { name: "Abstract", declaring_type: 1 },
+    { name: "Unresolved", declaring_type: 1 },
+  ],
+  binary: {
+    artifact: {
+      path: "/artifacts/GameAssembly.dll",
+      sha256: "c".repeat(64),
+      bytes: 4096,
+    },
+    format: "pe",
+    architecture: "amd64",
+    image_base: "0x1000",
+    code_gen_modules_field: "0x1200",
+    code_gen_modules_array: "0x1300",
+    code_gen_modules: [
+      { image: 0, address: "0x1400", method_pointer_count: 4 },
+    ],
+    types_field: "0x1500",
+    types_count: 1,
+  },
+  method_addresses: [
+    { state: "code", address: "0x1100", rva: "0x100" },
+    { state: "code", address: "0x1100", rva: "0x100" },
+    { state: "no-body", address: null, rva: null },
+    { state: "unknown", address: null, rva: null },
+  ],
+  return_types: Array.from({ length: 4 }, () => ({ type: 0, name: "void" })),
+  field_types: [{ type: 0, name: "int" }],
+  parameter_types: [{ type: 0, name: "int" }],
+});
+
+it("selects every folded method by numeric address with stable indices and both source identities", () => {
+  const source = parent(freezeJsonSnapshot(linkedReport()), true);
+  const view = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "method_addresses",
+    addresses: ["0x00001100", "0x1100"],
+    states: ["code"],
+    fields: [],
+    offset: 1,
+    limit: 1,
+  });
+  if (!view.ok) throw view.error;
+  expect(view.value).toMatchObject({
+    items: [{ index: 1 }],
+    artifact: { sha256: report.artifact.sha256 },
+    binary_source: {
+      artifact: { path: "/artifacts/GameAssembly.dll", sha256: "c".repeat(64) },
+      image_base: "0x1000",
+    },
+    coverage: { total: 2, exhausted: true },
+  });
+});
+
+it.each([
+  { addresses: [] },
+  { states: [] },
+  { indices: [] },
+  { addresses: ["0x1100"], indices: [2] },
+  { states: ["no-body" as const], addresses: ["0x1100"] },
+])(
+  "intersects native selectors and preserves empty selection: %j",
+  (selection) => {
+    const view = projectIl2cppMetadataView(parent(linkedReport(), false), {
+      kind: "il2cpp-metadata",
+      collection: "method_addresses",
+      ...selection,
+      offset: 0,
+      limit: 64,
+    });
+    if (!view.ok) throw view.error;
+    expect(view.value).toMatchObject({
+      items: [],
+      coverage: { total: 0, exhausted: true },
+    });
+  },
+);
+
+it.each([
+  { state: "no-body", address: "0x1100", rva: null },
+  { state: "unknown", address: null, rva: "0x100" },
+  { state: "code", address: "0x1100", rva: "0x101" },
+  { state: "code", address: "0x10000000000000000", rva: "0x100" },
+  { state: "code", address: "malformed", rva: "0x100" },
+])(
+  "rejects malformed native facts without throwing during boundary validation: %j",
+  (row) => {
+    const value = jsonObjectSchema.parse(linkedReport());
+    value.method_addresses = [row, ...linkedReport().method_addresses.slice(1)];
+    const view = projectIl2cppMetadataView(parent(value, false), {
+      kind: "summary",
+    });
+    expect(view.ok).toBe(false);
+  },
+);
+
+it("keeps pre-linking historical Evidence unknown and queryable", () => {
+  const historical = jsonObjectSchema.parse(report);
+  for (const key of [
+    "binary",
+    "method_addresses",
+    "return_types",
+    "field_types",
+    "parameter_types",
+  ])
+    delete historical[key];
+  const source = parent(freezeJsonSnapshot(historical), true);
+  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
+  if (!summary.ok) throw summary.error;
+  expect(summary.value).toMatchObject({
+    summary: {
+      counts: {
+        method_addresses: null,
+        method_address_states: null,
+        return_types: null,
+      },
+    },
+  });
+  expect(projectIl2cppMetadataView(source, page).ok).toBe(true);
+  expect(
+    projectIl2cppMetadataView(source, {
+      kind: "il2cpp-metadata",
+      collection: "method_addresses",
+      offset: 0,
+      limit: 1,
+    }).ok,
+  ).toBe(false);
+});
+
+it("does not report unrequested native tables as observed empty inventories", () => {
+  const source = parent(report, false);
+  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
+  if (!summary.ok) throw summary.error;
+  expect(summary.value).toMatchObject({
+    summary: {
+      counts: {
+        method_addresses: null,
+        method_address_states: null,
+        return_types: null,
+      },
+    },
+  });
+  expect(
+    projectIl2cppMetadataView(source, {
+      kind: "il2cpp-metadata",
+      collection: "method_addresses",
+      offset: 0,
+      limit: 64,
+    }).ok,
+  ).toBe(false);
+});
+
+it("keeps native summaries bounded while paging selected module facts", () => {
+  const value = linkedReport(),
+    source = parent(value, false);
+  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
+  if (!summary.ok) throw summary.error;
+  expect(summary.value).toMatchObject({
+    summary: {
+      counts: { code_gen_modules: 1 },
+      binary: { artifact: value.binary!.artifact },
+    },
+  });
+  expect(
+    "summary" in summary.value && summary.value.summary,
+  ).not.toHaveProperty("binary.code_gen_modules");
+  const page = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "code_gen_modules",
+    image_indices: [0],
+    fields: ["image", "address"],
+    offset: 0,
+    limit: 1,
+  });
+  if (!page.ok) throw page.error;
+  expect(page.value).toMatchObject({
+    items: [{ index: 0, image: 0, address: "0x1400" }],
+    coverage: { total: 1, exhausted: true },
+  });
 });
