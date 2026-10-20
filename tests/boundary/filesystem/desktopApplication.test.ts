@@ -373,6 +373,21 @@ it("orders member probes for Unity predefined script assemblies before every man
       );
 });
 
+it("offers no member probes when no managed directory has a Unity reference witness", async () => {
+  const root = await createTestTempDirectory("rea-desktop-mono-no-witness-");
+  const plain = buildManagedPeFixture({ references: ["System.Runtime"] });
+  await put(root, "Game_Data/Managed/Assembly-CSharp.dll", plain);
+  await put(root, "Game_Data/Managed/Assembly-CSharp-firstpass.dll", plain);
+  await put(root, "Contents/Resources/Data/Managed/Assembly-CSharp.dll", plain);
+  const { report } = await inspect(root);
+  expect(report.candidates.map((row) => row.family)).toEqual(["dotnet"]);
+  expect(report.next_probes.map((probe) => probe.operation)).toEqual([
+    "inspect_managed_artifact",
+    "inspect_managed_artifact",
+    "inspect_managed_artifact",
+  ]);
+});
+
 it("retains complete observations through cancellation during directory finalization", async () => {
   const root = await createTestTempDirectory("rea-desktop-finalize-cancel-");
   await put(root, "notes.txt", "target content");
