@@ -164,3 +164,45 @@ it("admits one inspection at a time per reader", async () => {
   expect((await provider.inspect({ path })).ok).toBe(true);
   await provider.close();
 });
+
+it.each(["v7", "v11"] as const)(
+  "yields during a long %s entry decode and stops there when cancelled",
+  async (layout) => {
+    const files = Array.from({ length: 3 * 4096 }, (_, at) => ({
+      path: `D/${at}`,
+      size: 0,
+    }));
+    const { path } = await writePak(
+      "long.pak",
+      createPakFixture({ layout, files }).bytes,
+    );
+    let yields = 0;
+    const complete = new UnrealPakProvider(undefined, async () => {
+      yields++;
+    });
+    const decoded = await complete.inspect({ path });
+    expect(decoded.ok && decoded.value.entries).toHaveLength(files.length);
+    expect(yields).toBeGreaterThanOrEqual(2);
+    await complete.close();
+
+    const controller = new AbortController();
+    const reason = new Error("cancel during entry decode");
+    let paused = 0;
+    const provider = new UnrealPakProvider(undefined, async () => {
+      paused++;
+      controller.abort(reason);
+    });
+    const result = await provider.inspect(
+      { path },
+      { signal: controller.signal },
+    );
+    expect(paused).toBe(1);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(result.error.cause).toBe(reason);
+    // The whole-file hash had not completed, so no source identity is claimed.
+    expect(result.error.partialObservation).toBeUndefined();
+    await provider.close();
+  },
+);

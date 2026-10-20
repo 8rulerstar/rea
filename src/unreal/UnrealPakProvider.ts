@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
@@ -214,7 +215,10 @@ export class UnrealPakProvider implements UnrealPakPort {
   #inspecting = false;
 
   /** `outputBytes` exists so tests can reach the guard with small files. */
-  constructor(private readonly outputBytes: number = OUTPUT_BYTES) {}
+  constructor(
+    private readonly outputBytes: number = OUTPUT_BYTES,
+    private readonly yieldControl: () => Promise<void> = setImmediate,
+  ) {}
 
   async close(): Promise<void> {
     try {
@@ -266,6 +270,10 @@ export class UnrealPakProvider implements UnrealPakPort {
               regionBytes: REGION_BYTES,
               entries: ENTRIES,
               pathChars: limit,
+              pause: async () => {
+                await this.yieldControl();
+                assertArtifactReadActive(options?.signal);
+              },
               beforeEntries: (count) => {
                 if (count * ENTRY_ROW > limit)
                   throw outputLimit(input.path, limit);

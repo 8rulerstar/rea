@@ -64,7 +64,20 @@ export interface UnrealPakLimits {
   readonly pathChars: number;
   /** Called with each declared entry count before its entries are built; may throw. */
   readonly beforeEntries?: (count: number) => void;
+  /** Awaited every YIELD_EVERY decoded records so long decodes yield and observe cancellation. */
+  readonly pause?: () => Promise<void>;
 }
+
+/** Records decoded between pauses; small enough to keep the event loop responsive. */
+export const YIELD_EVERY = 4096;
+
+/** Pause after every YIELD_EVERY records of one counted loop. */
+const pacer = (limits: UnrealPakLimits) => {
+  let count = 0;
+  return async () => {
+    if (++count % YIELD_EVERY === 0) await limits.pause?.();
+  };
+};
 
 export type UnrealPakDecoded = Omit<UnrealPak, "artifact" | "limitations">;
 
@@ -485,12 +498,13 @@ const finished = (cursor: Cursor) => {
  * One directory listing (the full directory index, or the pruned one inside
  * the path hash index): directories, each with file names and entry references.
  */
-const readDirectoryListing = (
+const readDirectoryListing = async (
   cursor: Cursor,
   footer: UnrealPakFooter,
   limits: UnrealPakLimits,
   budget: { used: number },
 ) => {
+  const pace = pacer(limits);
   const directories = cursor.u32();
   // Directories produce no rows, so only the count limit applies.
   checkCountLimit(directories, limits, cursor.label);
@@ -514,6 +528,7 @@ const readDirectoryListing = (
         );
       seen.add(path);
       listed.push([path, cursor.i32()]);
+      await pace();
     }
   }
   return { directories, listed };
@@ -553,6 +568,7 @@ export const readUnrealPak = async (
   spendPath(budget, limits, mountPoint.length, "index mount point");
   const entryCount = index.u32();
   checkEntryCount(entryCount, limits, "index");
+  const pace = pacer(limits);
 
   if (footer.version < 10) {
     const entries: UnrealPakEntry[] = [];
@@ -567,6 +583,7 @@ export const readUnrealPak = async (
         );
       seen.add(path);
       entries.push(readFullEntry(index, footer, path, null));
+      await pace();
     }
     finished(index);
     checkPlacement(entries, footer.index.offset);
@@ -615,6 +632,7 @@ export const readUnrealPak = async (
     checkCountLimit(recordStarts.size + 1, limits, "encoded entries");
     recordStarts.add(walk.position);
     readEncodedEntry(walk, footer, null, null);
+    await pace();
   }
   const fullCount = index.u32();
   checkEntryCount(fullCount, limits, "non-encoded entry list");
@@ -623,6 +641,7 @@ export const readUnrealPak = async (
     const start = index.position;
     readFullEntry(index, footer, null, null);
     fullEntries.push(index.bytes.subarray(start, index.position));
+    await pace();
   }
   finished(index);
 
@@ -682,19 +701,24 @@ export const readUnrealPak = async (
         );
       seenHashes.add(hash);
       hashed.push([hash, phi.i32()]);
+      await pace();
     }
     // The pruned directory index follows the hashes inside the same region.
-    const pruned = readDirectoryListing(phi, footer, limits, budget);
+    const pruned = await readDirectoryListing(phi, footer, limits, budget);
     finished(phi);
     // Every reference must name a placed record, even when the full
     // directory index is the one that names the returned entries.
-    checkPlacement(
-      pruned.listed.map(([path, reference]) => resolve(reference, path, null)),
-      footer.index.offset,
-    );
-    const fromHashes = hashed.map(([hash, reference]) =>
-      resolve(reference, null, hash),
-    );
+    const prunedEntries: UnrealPakEntry[] = [];
+    for (const [path, reference] of pruned.listed) {
+      prunedEntries.push(resolve(reference, path, null));
+      await pace();
+    }
+    checkPlacement(prunedEntries, footer.index.offset);
+    const fromHashes: UnrealPakEntry[] = [];
+    for (const [hash, reference] of hashed) {
+      fromHashes.push(resolve(reference, null, hash));
+      await pace();
+    }
     checkPlacement(fromHashes, footer.index.offset);
     pathHashIndex = {
       region: {
@@ -720,14 +744,16 @@ export const readUnrealPak = async (
       ),
       "full directory index",
     );
-    const { directories, listed } = readDirectoryListing(
+    const { directories, listed } = await readDirectoryListing(
       fdi,
       footer,
       limits,
       budget,
     );
-    for (const [path, reference] of listed)
+    for (const [path, reference] of listed) {
       entries.push(resolve(reference, path, null));
+      await pace();
+    }
     const files = listed.length;
     finished(fdi);
     directoryIndex = {
