@@ -4,6 +4,7 @@ import {
   readUnrealPak,
   UnrealPakFormatFailure,
   type UnrealPakLimits,
+  YIELD_EVERY,
 } from "../../../src/unreal/UnrealPakFile.js";
 import {
   createPakFixture,
@@ -498,6 +499,26 @@ describe("Unreal pak record and resource guards", () => {
     expect(pak.index).toMatchObject({
       full_directory_index: { directories: 13 },
     });
+  });
+
+  it("pauses between empty directories so cancellation is observed", async () => {
+    let pauses = 0;
+    await expect(
+      read(
+        createPakFixture({ layout: "v11", emptyDirectories: YIELD_EVERY * 2 })
+          .bytes,
+        {
+          ...LIMITS,
+          entries: YIELD_EVERY * 4,
+          regionBytes: 64 << 20,
+          pause: async () => {
+            pauses++;
+            throw new Error("cancelled");
+          },
+        },
+      ),
+    ).rejects.toThrow("cancelled");
+    expect(pauses).toBe(1);
   });
 
   it("refuses more encoded records than the entry limit even when unreferenced", async () => {

@@ -567,6 +567,8 @@ const readDirectoryListing = async (
       listed.push([path, cursor.i32()]);
       await pace();
     }
+    // Count the directory too, so runs of empty directories still yield.
+    await pace();
   }
   return { directories, listed };
 };
