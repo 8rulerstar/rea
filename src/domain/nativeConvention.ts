@@ -22,6 +22,11 @@ const DESKTOP_IL2CPP_LIBRARIES = new Set([
   "gameassembly.dylib",
   "libil2cpp.so",
 ]);
+/** Unity's predefined script assembly names; asmdef assembly names are project-chosen. */
+const UNITY_PREDEFINED_ASSEMBLIES = new Set([
+  "assembly-csharp.dll",
+  "assembly-csharp-firstpass.dll",
+]);
 
 /**
  * A runtime family named by one filename or directory segment.
@@ -67,6 +72,10 @@ export const desktopPathConventions = (path: string) => {
   const name = folded.at(-1) ?? "";
   return {
     unityManagedDirectory,
+    unityPredefinedAssembly:
+      unityManagedDirectory !== null &&
+      unityManagedDirectory.split("/").length === segments.length - 1 &&
+      UNITY_PREDEFINED_ASSEMBLIES.has(name),
     il2cppLibrary: DESKTOP_IL2CPP_LIBRARIES.has(name),
     electronArchive:
       folded.at(-2) === "resources" &&

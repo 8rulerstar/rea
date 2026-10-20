@@ -1,5 +1,6 @@
 import { IL2CPP_METADATA_VERSIONS } from "./il2cpp/il2cppMetadata.js";
 import { digestCanonicalValue } from "./canonicalDigest.js";
+import { desktopPathConventions } from "./nativeConvention.js";
 import type { DesktopApplication, DesktopFile } from "./desktopApplication.js";
 
 /** Interpret only the facts admitted by the directory reader, never target bytes. */
@@ -50,13 +51,28 @@ export const projectDesktopApplication = (
     managed,
     "PE optional headers declare nonempty CLI directories; CLR execution and metadata validity remain unverified.",
   );
+  const mono = managed.filter((file) => has(file, "unity-assembly-reference"));
+  const monoDirectories = new Set(
+    mono.map((file) => desktopPathConventions(file.path).unityManagedDirectory),
+  );
+  for (const file of managed) {
+    const conventions = desktopPathConventions(file.path);
+    if (
+      conventions.unityPredefinedAssembly &&
+      monoDirectories.has(conventions.unityManagedDirectory)
+    )
+      probe(
+        "inspect_managed_members",
+        file,
+        "Inventory types, members and user strings of this Unity predefined script assembly; its references and contents are unverified.",
+      );
+  }
   for (const file of managed)
     probe(
       "inspect_managed_artifact",
       file,
       "Inspect the declared managed metadata and references.",
     );
-  const mono = managed.filter((file) => has(file, "unity-assembly-reference"));
   candidate(
     "unity-mono",
     mono,

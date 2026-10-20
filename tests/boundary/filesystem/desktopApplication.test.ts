@@ -329,6 +329,45 @@ it.each(["Game_Data/Managed", "Contents/Resources/Data/Managed"])(
   },
 );
 
+it("orders member probes for Unity predefined script assemblies before every managed artifact probe", async () => {
+  const root = await createTestTempDirectory("rea-desktop-mono-members-");
+  const unity = buildManagedPeFixture({
+    references: ["UnityEngine.CoreModule"],
+  });
+  const plain = buildManagedPeFixture({ references: ["System.Runtime"] });
+  await put(root, "Game_Data/Managed/Assembly-CSharp.dll", unity);
+  await put(root, "Game_Data/Managed/ASSEMBLY-CSHARP-FIRSTPASS.DLL", plain);
+  await put(root, "Game_Data/Managed/Game.Logic.dll", unity);
+  await put(root, "Game_Data/Managed/UnityEngine.CoreModule.dll", plain);
+  await put(root, "Game_Data/Managed/Nested/Assembly-CSharp.dll", plain);
+  await put(root, "Other_Data/Managed/Assembly-CSharp.dll", plain);
+  await put(root, "Plugins/Assembly-CSharp.dll", unity);
+  const { report } = await inspect(root);
+  const relative = new Map(
+    report.files.map((file) => [file.file_id, file.path]),
+  );
+  const rows = report.next_probes.map((probe) => [
+    probe.operation,
+    relative.get(probe.file_id),
+  ]);
+  expect(
+    rows.filter(([operation]) => operation === "inspect_managed_members"),
+  ).toEqual([
+    [
+      "inspect_managed_members",
+      "Game_Data/Managed/ASSEMBLY-CSHARP-FIRSTPASS.DLL",
+    ],
+    ["inspect_managed_members", "Game_Data/Managed/Assembly-CSharp.dll"],
+  ]);
+  expect(rows.slice(0, 2).map(([operation]) => operation)).toEqual([
+    "inspect_managed_members",
+    "inspect_managed_members",
+  ]);
+  expect(
+    rows.filter(([operation]) => operation === "inspect_managed_artifact"),
+  ).toHaveLength(7);
+});
+
 it("retains complete observations through cancellation during directory finalization", async () => {
   const root = await createTestTempDirectory("rea-desktop-finalize-cancel-");
   await put(root, "notes.txt", "target content");
