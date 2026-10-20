@@ -109,6 +109,9 @@ or correspondence to a native binary. See [IL2CPP metadata](il2cpp-metadata.md).
 In a managed directory with a Unity Mono witness, `Assembly-CSharp.dll` and
 `Assembly-CSharp-firstpass.dll` get an `inspect_managed_members` probe listed
 first; project-named asmdef assemblies keep only the ordinary managed probes.
+The same probe is offered for those names in `Managed/` of a
+`<Product>_BackUpThisFolder_ButDontShipItWithYourGame` folder (or when that
+folder is the root); whether its IL matches the shipped IL2CPP code is unknown.
 
 Candidates are derived or inferred from these facts and do not prove loading or
 execution. BepInEx, MelonLoader, Easy Anti-Cheat and BattlEye labels identify
