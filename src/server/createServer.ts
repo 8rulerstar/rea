@@ -676,6 +676,7 @@ const registerConfiguredAnalysisTools = (
     il2cppMetadata,
     peResources,
     webNetworkCapture,
+    artifactResources,
   }: ServerToolContext,
   android: AndroidAnalysisPort,
   wasmArtifact: Pick<WasmArtifactService, "inspect" | "close">,
@@ -713,6 +714,7 @@ const registerConfiguredAnalysisTools = (
     evidenceById,
     recordEvidence,
     withAdmittedAnalysis,
+    artifactResources,
   );
   registerPeResourcesTool(
     server,
@@ -883,6 +885,7 @@ const registerBinaryAnalysisTools = ({
     activeTarget,
     recordEvidence,
     recordUnknown,
+    evidenceById,
     withAdmittedAnalysis,
   };
   registerOfficialTools(server, analysisOptions);

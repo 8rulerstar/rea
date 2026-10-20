@@ -1,5 +1,16 @@
 # Native, managed, and packaged artifacts
 
+For release comparisons, export `list_procedures` Evidence from each target before
+closing it. Close clears session records: import both bundles after collecting the
+two targets, or supply portable inline Evidence. `match_native_functions` pairs unique exact names and, when supplied,
+complete observed body bytes. Reuse optional same-context `list_names`,
+`procedure_info`, `read_bytes` and existing `analyze_function` Evidence; avoid
+decompiling every function merely to match it. Its summary retains a parent for
+`inspect_analysis_view` `function-matches` collections `matches` and `functions`.
+Select columns, batch IDs and page individual facts; aliases remain unresolved.
+Unpaired observations do not prove additions/removals. Existing matched dossier
+pairs include inputs for `compare_functions`; otherwise analyze just chosen pairs.
+
 ## Desktop installation directories
 
 When an installation directory is supplied and its runtime is unknown, use
@@ -154,6 +165,36 @@ Prepend each set's `shared_limitations` to a group's `limitations` to recover th
 operation's full ordered list. Candidate capabilities describe possible
 providers. Top-level session capabilities describe the current route, and
 `analysis_provider_binding` identifies the selected provider.
+
+## Ghidra startup deadline recovery
+
+`provider_timeout` during the first Ghidra query can cover import, auto-analysis,
+bridge startup, and readiness. The default 330,000 ms is configurable through
+`REA_GHIDRA_STARTUP_TIMEOUT_MS`; a smaller query still needs the same cold import.
+
+Preserve useful Evidence before closing the session or restarting REA. Check
+`close_binary` and resolve reported cleanup failures. Set a larger startup budget
+in the environment that launches REA, then restart REA and reconnect the MCP
+client before reopening the same target. Closing and reopening a binary in the
+existing server keeps its original configuration and starts import again.
+Environment changes in an agent's shell do not update an already running MCP
+server. If its launch configuration cannot be changed, report that constraint
+and the exact retry setting instead of claiming a fixed technical limit.
+
+The client's tool-call deadline must allow startup plus the requested query;
+server settings and progress notifications cannot override it. CLI analysis
+avoids the MCP client deadline, but retains the provider deadline. For example:
+
+```sh
+REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000 rea analyze /absolute/path/to/app.exe --provider ghidra --json
+```
+
+Thirty minutes is an example budget, not a completion guarantee. Keep host CPU
+and memory controls in place. Disable specific expensive analyzers only when
+their missing coverage is acceptable and retain the resulting limitations.
+Exported C and embedded resources remain useful independent evidence, but a
+timeout does not establish complete analysis or absence of code. See the
+[deadline and client guide](https://github.com/morluto/rea/blob/main/docs/mcp-contracts.md#ghidra-first-query-deadlines-and-recovery).
 
 ## Static memory and original file bytes
 
@@ -326,3 +367,22 @@ with two complete inspection Evidence records (or current-session retained
 references) and explicit scope. Preserve unknown types/duplicate names; static
 interface equality is not runtime compatibility. CLI accepts complete inline
 Evidence in `rea compare-wasm-interfaces input.json --json`.
+
+## Godot PCK
+
+For a standalone PCK, `open_binary` then `inspect_artifact` with
+`detail: "summary"` retains the complete static inventory. Use the returned
+`parent_evidence_id` with `inspect_analysis_view` inventory occurrences filtered
+by exact `logical_paths` or `occurrence_ids`, and join `artifact_id` to nodes
+filtered by `artifact_ids`. Select only needed fields; identity links remain.
+Prefer `inspect-artifact --detail summary --evidence_output PATH` for CLI tasks;
+the same CLI discovers embedded packs via their EOF trailer without opening a
+native analysis provider. Normal native opening remains unchanged.
+
+Distinguish declared MD5 from observed SHA-256 and graph/page completeness from
+`source_coverage`. Encrypted directories and sparse bundles have unknown entry
+coverage; encrypted members have unknown content identity. An empty filtered
+page cannot prove absence in unknown coverage. Retained views are historical,
+not fresh filesystem checks. No decryption, Godot resource decoding, GDScript
+decompilation or target execution is provided. See
+[Godot PCK](https://github.com/morluto/rea/blob/main/docs/godot-pck.md).

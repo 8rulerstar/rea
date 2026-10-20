@@ -1,3 +1,4 @@
+import { procedureInfoSchema } from "../domain/native/procedureInfo.js";
 import { z } from "zod";
 import {
   nativeFunctionAnnotationsInputSchema,
@@ -181,13 +182,11 @@ const procedureReferences = z
     ),
   })
   .strict();
-const procedureInfo = z
-  .object({
+const procedureInfo = procedureInfoSchema
+  .safeExtend({
     name: z.string().min(1),
     entrypoint: ghidraCanonicalAddressSchema,
-    basicblock_count: z.number().int().min(0),
     length: z.number().int().min(0),
-    signature: z.string().nullable(),
     locals: z.array(localVariable),
     classification,
     body: ghidraFunctionBody,
@@ -437,6 +436,7 @@ const functionObservationEnvelope = z.strictObject({
 
 export interface ParsedGhidraFunctionResult {
   readonly value: JsonValue;
+  readonly rawResult?: JsonValue;
   readonly limitations: readonly string[];
   readonly locations?: readonly EvidenceLocation[];
   readonly relationshipCoverage?: RelationshipCoverage;
@@ -488,6 +488,8 @@ export const parseGhidraFunctionResult = (
         ...(observation.selection === undefined
           ? {}
           : {
+              // Generic locations retain coordinates but not their mapping roles.
+              rawResult: value,
               locations: [
                 {
                   kind: "file-offset" as const,
