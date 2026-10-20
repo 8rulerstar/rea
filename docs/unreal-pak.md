@@ -126,6 +126,11 @@ writes the complete Evidence to a new file and returns the summary.
 | `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                         |
 | `paths-too-large`              | resource    | Directory and file names would build more path text than the 64 MiB report allows.     |
 
+Long index decodes yield every 4,096 records and stop there when the request is
+cancelled. Each reader admits one inspection at a time. A failure after the
+whole file was read and hashed keeps that SHA-256 and byte length as partial
+source Evidence, which does not establish any footer or entry fact.
+
 The complete report is limited to 64 MiB. It is refused from the declared entry
 count before entries are built when even minimal rows would exceed it. There is
 no partial success.
@@ -141,3 +146,20 @@ no partial success.
 `npm run verify:unreal:pak -- --pak PATH` compares the CLI with stdio MCP for a
 caller-owned pak and checks summary and page parity. Pak files from games are
 not redistributable, so CI uses synthetic fixtures.
+
+The version 12 layout was checked against a pak written by Unreal Engine 5.8.3
+for a blank Mac project (Oodle, 1,722 entries, 10,473,434 bytes, SHA-256
+`64c5f36e0c87573dde851109526b34bc0abaf0c7d1c2f66c99efba26b3614f9b`). The
+verifier passed, repak 0.2.3 listed the same 1,722 paths, and CUE4Parse matched
+every entry offset, stored size, uncompressed size, block count and encryption
+flag. CUE4Parse replaces a stored block size of 0 with the uncompressed size, so
+16 block sizes differ by that substitution only. Separately, 47 paks written by
+repak (versions 1 to 11 with no compression, Zlib, Gzip, LZ4 and Zstd, and one
+index with no directory index) matched repak's own entry offsets, sizes, block
+counts, block sizes and encryption flags.
+
+These checks do not establish coverage of paks from other engine releases,
+platforms or game-specific forks, of encrypted indexes with real keys, or of
+version 12 paks written with other options. Matching index facts do not
+establish that the file data decompresses or that a stored SHA-1 matches its
+data, because neither is read.
