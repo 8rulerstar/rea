@@ -83,11 +83,7 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
         "file-size",
         cause.message,
         { maximum_input_bytes: INPUT_BYTES },
-        {
-          cause,
-          remediationAction:
-            "Select a suitable stable artifact within the reported input byte allowance. Do not truncate required bytes; retrying the unchanged oversized input will fail again.",
-        },
+        { cause },
       );
     if (cause.reason === "path")
       return new AnalysisInputError(OPERATION, { cause }, [

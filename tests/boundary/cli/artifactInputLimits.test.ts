@@ -7,6 +7,8 @@ import { cliTest } from "../../support/cli/cliFixture.js";
 
 for (const { command, limit } of [
   { command: "inspect-go-binary", limit: 256 * 1024 * 1024 },
+  { command: "inspect-rust-binary", limit: 256 * 1024 * 1024 },
+  { command: "inspect-il2cpp-metadata", limit: 256 * 1024 * 1024 },
   { command: "inspect-wasm-artifact", limit: 8 * 1024 * 1024 },
 ]) {
   cliTest.skipIf(process.platform === "win32")(

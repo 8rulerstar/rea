@@ -7,6 +7,7 @@ import {
   AnalysisCancelledError,
   AnalysisResourceConstraintError,
 } from "../../../src/domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { Il2cppMetadataProvider } from "../../../src/il2cpp/Il2cppMetadataProvider.js";
 import { createIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -142,8 +143,22 @@ it("refuses an oversized report from its row lower bound before serializing it",
   try {
     const result = await provider.inspect({ path });
     expect(result.ok).toBe(false);
-    if (!result.ok)
-      expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
+    if (result.ok) throw new Error("Oversized report accepted");
+    expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
+    // The fixed report allowance is not a worker or host memory limit.
+    const projected = projectAnalysisError(result.error);
+    expect(projected).toMatchObject({
+      code: "resource_constraint",
+      retryable: false,
+      details: {
+        resource: "capacity",
+        reported_limits: { maximum_report_bytes: 64 * 1024 * 1024 },
+      },
+    });
+    expect(projected.remediation.action).toContain("report byte allowance");
+    expect(projected.remediation.action).not.toMatch(
+      /Retry with sufficient memory|Wait for an active analysis/,
+    );
     expect(
       stringify.mock.calls.some(
         ([value]) =>

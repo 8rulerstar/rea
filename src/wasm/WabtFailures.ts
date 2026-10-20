@@ -167,8 +167,6 @@ const classifyWabtFailure = (
         cause,
         ...cleanupOptions,
         retryable: false,
-        remediationAction:
-          "Select a suitable stable artifact within the reported input byte allowance. Do not truncate required bytes; retrying the unchanged oversized input will fail again.",
       },
     );
   if (

@@ -147,9 +147,10 @@ const failureFor = (cause: unknown, path: string): AnalysisError => {
 const reportLimit = (path: string, maximumBytes: number) =>
   new AnalysisResourceConstraintError(
     OPERATION,
-    "memory",
+    "capacity",
     `Complete IL2CPP metadata for ${path} exceeds the retained report budget; no complete inventory is retained.`,
     { maximum_report_bytes: maximumBytes },
+    { retryable: false },
   );
 
 const sourceArtifact = (path: string, snapshot: StableArtifactSnapshot) => ({

@@ -38,6 +38,24 @@ import {
 } from "./analysisErrorBase.js";
 import type { AnalysisErrorProjection } from "./analysisErrorProjection.js";
 
+/**
+ * A fixed input or report byte allowance is deterministic for the same input:
+ * neither a larger evidence-output allowance nor more worker or host memory
+ * admits it, so its advice is keyed on the reported limit, not the resource.
+ */
+const fixedBudgetRemediation = (
+  error: AnalysisResourceConstraintError,
+): string | undefined => {
+  if (
+    error.resource === "file-size" &&
+    error.reportedLimits?.maximum_input_bytes !== undefined
+  )
+    return "Select a suitable stable artifact within the reported input byte allowance. Do not truncate required bytes; retrying the unchanged oversized input will fail again.";
+  if (error.reportedLimits?.maximum_report_bytes !== undefined)
+    return "Select an artifact whose complete report fits within the reported report byte allowance. Worker or host memory does not raise this fixed allowance; retrying the unchanged input will fail again.";
+  return undefined;
+};
+
 export const analysisErrorRemediationAction = (
   error: AnalysisError,
 ): string => {
@@ -67,6 +85,7 @@ export const analysisErrorRemediationAction = (
   if (error instanceof AnalysisResourceConstraintError)
     return (
       error.remediationAction ??
+      fixedBudgetRemediation(error) ??
       (error.resource === "capacity"
         ? "Wait for an active analysis to complete, then retry within the reported admission limits."
         : error.resource === "transport"

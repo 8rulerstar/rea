@@ -273,6 +273,31 @@ it.each([
   },
 );
 it.each([
+  ["file-size", { maximum_input_bytes: 4096 }, "input byte allowance"],
+  ["file-size", { file_size_bytes: 1024 }, "evidence reply"],
+  ["memory", { maximum_input_bytes: 4096 }, "Retry with sufficient memory"],
+  ["capacity", { maximum_report_bytes: 8192 }, "report byte allowance"],
+  ["memory", { maximum_report_bytes: 8192 }, "report byte allowance"],
+  ["capacity", { maximum_concurrent_inspections: 1 }, "Wait for an active"],
+] as const)(
+  "advises on the reported %s limit %j",
+  (resource, limits, advice) => {
+    const action = projectAnalysisError(
+      new AnalysisResourceConstraintError(
+        "inspect",
+        resource,
+        "Bounded.",
+        limits,
+      ),
+    ).remediation.action;
+    expect(action).toContain(advice);
+    if (advice === "report byte allowance")
+      expect(action).not.toMatch(/Retry with sufficient memory|Wait for/);
+    if (advice === "input byte allowance")
+      expect(action).not.toContain("evidence reply");
+  },
+);
+it.each([
   new AnalysisInputError("inspect", { capturedOutput: retainedOutput }),
   new AnalysisOutputError("inspect", "invalid reply", {
     capturedOutput: retainedOutput,
