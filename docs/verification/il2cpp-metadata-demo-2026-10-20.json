@@ -1,0 +1,192 @@
+{
+  "issue": 778,
+  "scenario": "Unity IL2CPP metadata: assembly, type and method ownership of a game script",
+  "date": "2026-10-20",
+  "rea": {
+    "version": "6.7.0",
+    "source": "d0067ba34a39ea47dd7e11bb2e6169bc0938cc3f",
+    "entrypoint": "node scripts/rea.mjs"
+  },
+  "host": {
+    "os": "macOS 27.0.1 (26A434)",
+    "arch": "arm64",
+    "node": "26.5.0"
+  },
+  "producer": {
+    "unity": "2022.3.62f3 (96770f904ca7)",
+    "target": "StandaloneOSX",
+    "scripting_backend": "IL2CPP",
+    "sources": {
+      "Assets/Scripts/Sample.cs": "11b8df61eea74759148f3b776ab0b9fc0fb083c03756f0447f3dbac9a8921dd4",
+      "Assets/Editor/CiBuild.cs": "e912ed006a4699cdf23e7f11d8bb5548e50ad959e5f1fdad24658c35e92655b0",
+      "ProjectSettings/ProjectVersion.txt": "b51164d22c4d2716ba8aee7f0b59d6b7dd0efa8552fd1db2a8c3b123fae3a1ec"
+    },
+    "builds_with_identical_metadata": 3
+  },
+  "input": {
+    "path": "Build/Sample.app/Contents/Resources/Data/il2cpp_data/Metadata/global-metadata.dat",
+    "bytes": 1912344,
+    "sha256": "2875f161ae0da99b83932b52aace567747070a45af9d696bc52a725a58c358b7",
+    "metadata_version": 31,
+    "committed": false
+  },
+  "evidence_note": "Evidence IDs include the caller-selected local path, so a run at another path yields different IDs.",
+  "cli": {
+    "measured_at": "c374c2fe7290b914d73d9e27af38b498753ec593",
+    "summary_evidence_id": "ev_17e2810840d0aaec825f9b9eaade158a648e76a020fa5a86ec89d533c275c6b8",
+    "parent_evidence_id": "ev_4d5712e308f91477bea4f25da7dfeaeb18f7da3f61f35ec3d5d01b83feef1908",
+    "counts": {
+      "sections": 31,
+      "images": 38,
+      "types": 2478,
+      "methods": 12501,
+      "nested_types": 574,
+      "fields": 8914,
+      "properties": 1930,
+      "events": 5,
+      "parameters": 15571,
+      "string_literals": 3561
+    },
+    "views": [
+      {
+        "view": {
+          "collection": "images",
+          "names": ["Assembly-CSharp.dll"]
+        },
+        "evidence_id": "ev_b6ed71a3b70386c3e29f3834534c0cee7973b9874326a2ba18c91efca2541ffd",
+        "indices": [35]
+      },
+      {
+        "view": {
+          "collection": "types",
+          "namespaces": ["Sample"]
+        },
+        "evidence_id": "ev_775675de69a986d9026885cd8bbc44d063290ea8e4d472c95d82d7125af4cb61",
+        "indices": [2459]
+      },
+      {
+        "view": {
+          "collection": "types",
+          "declaring_types": [2459]
+        },
+        "evidence_id": "ev_3b1c3977160e275ef1bdfed9869670158cd4f66f9515a4ca7545b3a0ff83168c",
+        "indices": [2458]
+      },
+      {
+        "view": {
+          "collection": "types",
+          "image_indices": [35],
+          "fields": ["name", "namespace", "declaring_type"]
+        },
+        "evidence_id": "ev_596793f8ccee09aeca9405b04c1329cb3fade49b8fa1affe54a1ca3c8bea68df",
+        "indices": [2455, 2456, 2457, 2458, 2459, 2460, 2461, 2462]
+      },
+      {
+        "view": {
+          "collection": "methods",
+          "declaring_types": [2459, 2458],
+          "fields": ["name", "declaring_type"]
+        },
+        "evidence_id": "ev_d0d28b5ec4eb9031a6ca5fa3bfb31c64367225c37668a60e04df07e767c472ce",
+        "indices": [12477, 12478, 12479, 12480]
+      },
+      {
+        "view": {
+          "collection": "types",
+          "names": ["CiBuild"]
+        },
+        "evidence_id": "ev_7cc391daea37c3776ad9823c564601951b498bd85b9aa542451237862ba9bfce",
+        "indices": [],
+        "role": "control"
+      },
+      {
+        "view": {
+          "collection": "fields",
+          "declaring_types": [2459, 2458]
+        },
+        "evidence_id": "ev_e6fed5bb29ab0d83aaf75bce14f1bf01df770fcd7acd1006ac6a7818d55a8d07",
+        "indices": [8906, 8907]
+      },
+      {
+        "view": {
+          "collection": "parameters",
+          "method_indices": [12479]
+        },
+        "evidence_id": "ev_6e5ed2f848295cd846d4962e5f33e82a7ce2557c4f0d5033c0bdcbfd1590e843",
+        "indices": [],
+        "note": "Add() declares no parameters"
+      }
+    ]
+  },
+  "mcp": {
+    "measured_at": "c374c2fe7290b914d73d9e27af38b498753ec593",
+    "rows_identical_to_cli": true,
+    "summary_bytes": 3925,
+    "views": 7,
+    "view_bytes": {
+      "min": 3200,
+      "max": 3503
+    },
+    "complete_evidence_bytes": 2200187
+  },
+  "verifier": {
+    "command": "npm run verify:il2cpp:metadata -- --metadata PATH",
+    "result": "passed",
+    "checks": 3,
+    "cli_complete_decode_ms": 1261,
+    "complete_evidence_bytes": 2200749
+  },
+  "native": {
+    "binary": {
+      "path": "Build/Sample.app/Contents/Frameworks/GameAssembly.dylib",
+      "bytes": 15914406,
+      "sha256": "2068a79f5acc50dc19a62fee343b1c1e2c65f06e5269dc4fada1f701ff25e4de",
+      "format": "macho",
+      "architecture": "arm64",
+      "image_base": "0x0",
+      "note": "three builds gave three binary digests at the same size; addresses in the other two are unmeasured"
+    },
+    "code_gen_modules": 38,
+    "method_address_states": {
+      "code": 11022,
+      "no_body": 1479,
+      "unknown": 0
+    },
+    "addresses": {
+      "12477": "0x153560",
+      "12478": "0x153594",
+      "12479": "0x153584",
+      "12480": "0x15360c"
+    },
+    "ghidra_seeds": {
+      "seeds": 11022,
+      "bytes": 724043,
+      "seed_base": "0x0"
+    },
+    "analyze_function": "not run: Ghidra 12.1.4 on this host has no macOS arm64 native decompiler (open_binary rejection executable_missing)"
+  },
+  "measurements": {
+    "unity_build": {
+      "wall_s": 77.18,
+      "peak_rss_bytes": 1719435264
+    },
+    "verifier": {
+      "wall_s": 10.04,
+      "peak_rss_bytes": 887111680
+    },
+    "native_decode": {
+      "wall_s": 1.3,
+      "peak_rss_bytes": 497549312,
+      "evidence_bytes": 4302254,
+      "summary_bytes": 6975
+    },
+    "method": "/usr/bin/time -l, single run, largest process only; other jobs were running on the host"
+  },
+  "unmeasured": [
+    "per-query CLI time",
+    "agent token cost",
+    "recording",
+    "analyze_function"
+  ],
+  "cleanup": "no target process or provider session; Evidence export and query files deleted after the run"
+}

@@ -417,3 +417,7 @@ with batch `image_indices` or source `indices`, selected `fields` and pagination
 Module row `index` is its retained collection position; `image` joins the
 metadata image collection. Scalar registration facts and both source identities
 remain inline. Complete Evidence retains the original full table.
+
+A reproducible walkthrough builds a small self-authored Unity 2022.3.62f3
+project and answers which assembly and type declare its script methods:
+[Unity IL2CPP metadata demo](verification/il2cpp-metadata-demo-2026-10-20.md).
