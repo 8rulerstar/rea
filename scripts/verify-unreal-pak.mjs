@@ -113,7 +113,10 @@ try {
         })
       ).normalized_result,
     );
-    assert.deepEqual(page.items, report.entries.slice(0, 16));
+    assert.deepEqual(
+      page.items,
+      report.entries.slice(0, 16).map((entry, index) => ({ index, ...entry })),
+    );
     assert.deepEqual(
       await hashVerifierFile(path, resources),
       identity,
