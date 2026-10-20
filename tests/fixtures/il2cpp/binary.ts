@@ -185,6 +185,34 @@ export const createUniversalFixture = (
   return Buffer.concat(parts);
 };
 
+/** PE section with a method array ending across its file/zero-fill boundary. */
+export const createSplitPointerPeFixture = (zeroTail = true): Buffer => {
+  const payload = createIl2cppBinaryFixture();
+  payload.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0xff8n, 0x450);
+  payload.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x230n, 0xff8);
+  const header = Buffer.alloc(0x200);
+  header.writeUInt16LE(0x5a4d);
+  header.writeUInt32LE(0x40, 60);
+  header.writeUInt32LE(0x4550, 0x40);
+  header.writeUInt16LE(0x8664, 0x44);
+  header.writeUInt16LE(1, 0x46);
+  header.writeUInt16LE(240, 0x54);
+  const optional = 0x58;
+  header.writeUInt16LE(0x20b, optional);
+  header.writeBigUInt64LE(FIXTURE_BINARY_BASE, optional + 24);
+  header.writeUInt32LE(0x1000, optional + 32);
+  header.writeUInt32LE(0x200, optional + 36);
+  header.writeUInt32LE(0x2000, optional + 56);
+  header.writeUInt32LE(0x200, optional + 60);
+  const section = optional + 240;
+  header.write(".text", section);
+  header.writeUInt32LE(zeroTail ? 0x1008 : 0x1000, section + 8);
+  header.writeUInt32LE(0x1000, section + 16);
+  header.writeUInt32LE(0x200, section + 20);
+  header.writeUInt32LE(0x60000020, section + 36);
+  return Buffer.concat([header, payload]);
+};
+
 /** Android ELF relocation tables appended after the fixture image. */
 export interface ElfFixtureOptions {
   /** e_machine; 183 is AArch64. */

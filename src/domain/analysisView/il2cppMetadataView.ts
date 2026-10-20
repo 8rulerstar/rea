@@ -45,7 +45,7 @@ const countsSchema = z.strictObject({
   string_literals: z.number().int().nonnegative().nullable(),
   code_gen_modules: z.number().int().nonnegative().nullable(),
   method_addresses: z.number().int().nonnegative().nullable(),
-  /** method_addresses rows per state; zero without a linked binary, null when not collected. */
+  /** method_addresses rows per state; null when native observations were not collected. */
   method_address_states: z
     .strictObject({
       code: z.number().int().nonnegative(),
@@ -179,13 +179,12 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
       image_indices: z.array(indexSchema).optional(),
       fields: z.array(codeGenModuleRowSchema.keyof()).optional(),
     }),
-    ...(["return_types", "field_types"] as const).map(
-      (collection) =>
-        z.strictObject({
-          ...indexPage,
-          collection: z.literal(collection),
-          fields: z.array(typeReferenceRowSchema.keyof()).optional(),
-        }),
+    ...(["return_types", "field_types"] as const).map((collection) =>
+      z.strictObject({
+        ...indexPage,
+        collection: z.literal(collection),
+        fields: z.array(typeReferenceRowSchema.keyof()).optional(),
+      }),
     ),
     z.strictObject({
       ...indexPage,
@@ -522,7 +521,10 @@ export const projectIl2cppMetadataView = (
             "Module-array association is inferred from executable byte patterns; instruction boundaries and runtime use remain unverified.",
           ]
         : []),
-      ...[...il2cppMetadataMemberCollections, ...il2cppMetadataBinaryCollections]
+      ...[
+        ...il2cppMetadataMemberCollections,
+        ...il2cppMetadataBinaryCollections,
+      ]
         .filter((name) => report[name] === undefined)
         .map(
           (name) =>

@@ -1,7 +1,7 @@
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import {
   isMapped,
-  isZeroFilled,
+  hasPointerArrayCoverage,
   readPointer,
   type NativeImage,
 } from "./Il2cppBinaryImage.js";
@@ -137,12 +137,7 @@ export function* findModules(
         const count = image.bytes.readUInt32LE(offset + 8);
         if (count !== counts[index]) continue;
         const pointers = image.bytes.readBigUInt64LE(offset + 16);
-        if (
-          count > 0 &&
-          !isMapped(image, pointers, count * 8) &&
-          !isZeroFilled(image, pointers, count * 8)
-        )
-          continue;
+        if (!hasPointerArrayCoverage(image, pointers, count)) continue;
         const list = candidates.get(index) ?? [];
         if (list.length !== 0)
           throw new Il2cppBinaryFormatFailure(

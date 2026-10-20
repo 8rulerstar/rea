@@ -9,6 +9,7 @@ import {
   createElfFixture,
   createIl2cppBinaryFixture,
   createUniversalFixture,
+  createSplitPointerPeFixture,
   FIXTURE_BINARY_BASE,
   FIXTURE_METHOD_ADDRESSES,
   FIXTURE_RETURN_TYPE_NAME,
@@ -203,6 +204,16 @@ it("reads a method pointer array in zero-fill as methods without bodies", () => 
     expectedAddress("no-body"),
     expectedAddress("no-body"),
   ]);
+});
+
+it("reads a PE pointer array across file bytes and the declared zero-fill tail", () => {
+  const bytes = createSplitPointerPeFixture();
+  const original = Buffer.from(bytes);
+  expect(link(bytes).method_addresses).toEqual(expectedAddresses);
+  expect(bytes).toEqual(original);
+  expect(failure(createSplitPointerPeFixture(false)).reason).toBe(
+    "code-gen-modules-not-found",
+  );
 });
 
 it("reports a method no image range claims as unknown, not as without a body", () => {

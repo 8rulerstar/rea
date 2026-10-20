@@ -281,7 +281,8 @@ The builds checked are listed after the module search rules above.
 | `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                             |
 | `invalid-method-pointer`          | input error | A slot is unavailable or its nonzero address lacks unambiguous executable file coverage.          |
 | `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                 |
-| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or of an unrendered kind.           |
+| `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or malformed.                       |
+| `unsupported-type-kind`           | unsupported | A valid type kind has no implemented rendering.                                                   |
 
 Format and selection failures name `binary_path`; capacity refusals remain typed resource errors. Failed linking preserves the metadata source identity, validated counts, selected binary path/architecture and its SHA-256 when observed, plus prior producer observations. It never publishes an incomplete native table as complete. The binary input is bounded to1GiB.
 

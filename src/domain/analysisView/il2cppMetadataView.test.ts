@@ -198,8 +198,8 @@ it("treats Evidence retained before binary linking as unknown, not unlinked", ()
     summary: {
       binary: null,
       counts: {
-        method_addresses: 0,
-        method_address_states: { code: 0, no_body: 0, unknown: 0 },
+        method_addresses: null,
+        method_address_states: null,
       },
     },
   });

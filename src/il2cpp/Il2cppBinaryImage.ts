@@ -224,6 +224,52 @@ export const isZeroFilled = (
     size,
   );
 
+/** Admit readable slots across loader ranges without walking every pointer.
+ * Each chunk uses the format owner's alias checks; a gap or split slot is refused.
+ */
+export const hasPointerArrayCoverage = (
+  image: NativeImage,
+  address: bigint,
+  count: number,
+): boolean => {
+  const end = address + BigInt(count) * 8n;
+  let cursor = address;
+  while (cursor < end) {
+    let fileEnd = cursor;
+    for (const range of image.container.mappings)
+      if (
+        range.address <= cursor &&
+        range.address + BigInt(range.size) > fileEnd
+      )
+        fileEnd = range.address + BigInt(range.size);
+    let coveredEnd = fileEnd;
+    if (fileEnd === cursor)
+      for (const range of image.container.zero_fills)
+        if (range.address <= cursor && range.address + range.size > coveredEnd)
+          coveredEnd = range.address + range.size;
+    const stop = coveredEnd < end ? coveredEnd : end;
+    const size = Number(((stop - cursor) / 8n) * 8n);
+    if (size <= 0) return false;
+    try {
+      if (fileEnd === cursor) {
+        if (!isZeroFilled(image, cursor, size)) return false;
+      } else {
+        mappedFileOffset(
+          image.container.mappings,
+          cursor,
+          size,
+          image.container.zero_fills,
+        );
+      }
+    } catch (cause) {
+      if (cause instanceof GoBinaryFormatFailure) return false;
+      throw cause;
+    }
+    cursor += BigInt(size);
+  }
+  return true;
+};
+
 /** Both executable coverage and the unique full loader mapping must agree. */
 export const isExecutable = (image: NativeImage, address: bigint): boolean => {
   try {
