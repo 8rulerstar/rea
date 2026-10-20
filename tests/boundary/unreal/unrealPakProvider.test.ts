@@ -147,3 +147,19 @@ it("keeps the decoded report when cancellation arrives after a complete read", a
   });
   await provider.close();
 });
+
+it("admits one inspection at a time per reader", async () => {
+  const { path } = await writePak(
+    "busy.pak",
+    createPakFixture({ layout: "v11" }).bytes,
+  );
+  const provider = new UnrealPakProvider();
+  const first = provider.inspect({ path });
+  const second = await provider.inspect({ path });
+  expect(second.ok).toBe(false);
+  if (!second.ok)
+    expect(second.error).toBeInstanceOf(AnalysisResourceConstraintError);
+  expect((await first).ok).toBe(true);
+  expect((await provider.inspect({ path })).ok).toBe(true);
+  await provider.close();
+});

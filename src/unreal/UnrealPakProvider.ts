@@ -2,14 +2,17 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactFileCleanupFailure,
+  ArtifactFileCancelled,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
+  assertArtifactReadActive,
 } from "../artifacts/ArtifactFileOperation.js";
 import { readStableArtifactRanges } from "../artifacts/readStableArtifact.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type { UnrealPakPort } from "../application/unreal/UnrealPakPort.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { createEvidence } from "../domain/evidence.js";
 import {
   AnalysisAccessDeniedError,
   AnalysisArtifactChangedError,
@@ -68,11 +71,7 @@ const LIMITATIONS = [
   "Compression names come from the footer table (version 8+) or legacy flag values (Zlib, Gzip, Custom); they name methods, not verified codecs. The pak version is not attributed to an engine release.",
 ];
 
-const failureForPrimary = (
-  cause: unknown,
-  path: string,
-  signal?: AbortSignal,
-): AnalysisError => {
+const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
   if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
     return new AnalysisArtifactChangedError(OPERATION, path, cause.message, {
@@ -136,8 +135,6 @@ const failureForPrimary = (
         },
       ]);
   }
-  // A decoder interrupted by cancellation can fail in any way; report the cancellation.
-  if (signal?.aborted) return new AnalysisCancelledError(OPERATION, { cause });
   return new ProviderAdapterError(UNREAL_PAK_PROVIDER_IDENTITY.id, OPERATION, {
     cause,
     diagnostics: {
@@ -147,18 +144,12 @@ const failureForPrimary = (
   });
 };
 
-const failureFor = (
-  cause: unknown,
-  path: string,
-  signal?: AbortSignal,
-): AnalysisError => {
+const failureFor = (cause: unknown, path: string): AnalysisError => {
   const primary =
     cause instanceof ArtifactFileCleanupFailure &&
     cause.fileCleanupFailure.outcome.kind === "failed"
-      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path, signal)
-      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
-        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
-        : failureForPrimary(cause, path, signal);
+      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path)
+      : failureForPrimary(cause, path);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -180,10 +171,47 @@ const outputLimit = (path: string, maximumBytes: number) =>
     { maximum_output_bytes: maximumBytes },
   );
 
+type PakArtifact = UnrealPak["artifact"];
+type StableRead = { readonly sha256: string; readonly bytes: number };
+
+/** The whole-file read that completed even though its close or cancellation failed. */
+const completedRead = (cause: unknown): StableRead | undefined => {
+  const outcome =
+    cause instanceof ArtifactFileCleanupFailure
+      ? (cause as ArtifactFileCleanupFailure<StableRead>).fileCleanupFailure
+          .outcome
+      : cause instanceof ArtifactFileCancelled
+        ? (cause as ArtifactFileCancelled<StableRead>).fileCancellation.outcome
+        : undefined;
+  return outcome?.kind === "completed" ? outcome.value : undefined;
+};
+
+/** Source identity survives a failed inspection without claiming index coverage. */
+const pakSourceEvidence = (artifact: PakArtifact) =>
+  createEvidence(
+    { path: artifact.path, sha256: artifact.sha256, format: "file" },
+    UNREAL_PAK_PROVIDER_IDENTITY,
+    {
+      operation: "observe_unreal_pak_source",
+      predicateType: "rea.unreal-pak-source",
+      parameters: { path: artifact.path },
+      result: { artifact, inventory_status: "not-returned-as-complete" },
+      confidence: "observed",
+      limitations: [
+        "This partial source observation records the hashed file identity only; it does not contain footer, index or entry facts.",
+      ],
+      locations: [
+        { kind: "artifact-path", path: artifact.path },
+        { kind: "file-offset-range", start: 0, end: artifact.bytes },
+      ],
+    },
+  );
+
 /** Stable in-process index decoding without extraction, decompression or decryption. */
 export class UnrealPakProvider implements UnrealPakPort {
   readonly identity = UNREAL_PAK_PROVIDER_IDENTITY;
   readonly #resources = new ArtifactResourceScope();
+  #inspecting = false;
 
   /** `outputBytes` exists so tests can reach the guard with small files. */
   constructor(private readonly outputBytes: number = OUTPUT_BYTES) {}
@@ -213,6 +241,17 @@ export class UnrealPakProvider implements UnrealPakPort {
     input: UnrealPakProviderInput,
     options?: ExecutionOptions,
   ): Promise<Result<UnrealPak, AnalysisError>> {
+    if (this.#inspecting)
+      return err(
+        new AnalysisResourceConstraintError(
+          OPERATION,
+          "memory",
+          "Only one Unreal pak inspection is admitted per reader.",
+          { maximum_concurrent_inspections: 1 },
+        ),
+      );
+    this.#inspecting = true;
+    let artifact: PakArtifact | undefined;
     try {
       const limit = this.outputBytes;
       const {
@@ -234,12 +273,23 @@ export class UnrealPakProvider implements UnrealPakPort {
             }),
           options?.signal,
           this.#resources,
-        ),
+        ).catch((cause: unknown) => {
+          // Only this awaited stable read owns these typed physical outcomes.
+          const read = completedRead(cause);
+          if (read !== undefined)
+            artifact = {
+              path: input.path,
+              sha256: read.sha256,
+              bytes: read.bytes,
+            };
+          throw cause;
+        }),
       );
-      options?.signal?.throwIfAborted();
+      artifact = { path: input.path, sha256, bytes };
+      assertArtifactReadActive(options?.signal);
       const report = {
         ...decoded,
-        artifact: { path: input.path, sha256, bytes },
+        artifact,
         limitations: LIMITATIONS,
       };
       // Counted in UTF-8 bytes without building the serialization the budget would refuse.
@@ -252,9 +302,15 @@ export class UnrealPakProvider implements UnrealPakPort {
           "Unreal pak reader produced invalid footer, index or entry values.",
           { cause: parsed.error },
         );
+      assertArtifactReadActive(options?.signal);
       return ok(parsed.data);
     } catch (cause: unknown) {
-      return err(failureFor(cause, input.path, options?.signal));
+      const failure = failureFor(cause, input.path);
+      if (artifact !== undefined && failure.partialObservation === undefined)
+        failure.retainPartialObservation(pakSourceEvidence(artifact));
+      return err(failure);
+    } finally {
+      this.#inspecting = false;
     }
   }
 }
