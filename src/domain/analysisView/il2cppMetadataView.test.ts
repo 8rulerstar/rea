@@ -61,6 +61,11 @@ const report: Il2cppMetadata = {
   events: [],
   parameters: [{ name: "times", method: 0 }],
   string_literals: [{ value: "Go", value_base64: null }],
+  binary: null,
+  method_addresses: [],
+  return_types: [],
+  field_types: [],
+  parameter_types: [],
   limitations: [],
 };
 
@@ -98,6 +103,10 @@ it("validates a sealed parent once across pages and keeps counts exact", () => {
         events: 0,
         parameters: 1,
         string_literals: 1,
+        method_addresses: 0,
+        return_types: 0,
+        field_types: 0,
+        parameter_types: 0,
       },
     });
   }
@@ -146,6 +155,132 @@ it("preserves historical omission as unknown while keeping existing metadata que
   });
   expect(unavailable.ok).toBe(false);
 });
+
+it("treats Evidence retained before binary linking as unknown, not unlinked", () => {
+  const historical = jsonObjectSchema.parse(report);
+  for (const key of [
+    "binary",
+    "method_addresses",
+    "return_types",
+    "field_types",
+    "parameter_types",
+  ])
+    delete historical[key];
+  const source = parent(freezeJsonSnapshot(historical), true);
+  const summary = projectIl2cppMetadataView(source, { kind: "summary" });
+  if (!summary.ok) throw summary.error;
+  expect(summary.value).not.toHaveProperty("summary.binary");
+  expect(summary.value).toMatchObject({
+    summary: {
+      counts: {
+        fields: 1,
+        method_addresses: null,
+        method_address_states: null,
+        return_types: null,
+      },
+    },
+    unknowns: expect.arrayContaining([
+      expect.stringContaining("did not collect method_addresses"),
+    ]),
+  });
+  const unavailable = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "method_addresses",
+    offset: 0,
+    limit: 1,
+  });
+  expect(unavailable.ok).toBe(false);
+  const current = projectIl2cppMetadataView(parent(report, false), {
+    kind: "summary",
+  });
+  if (!current.ok) throw current.error;
+  expect(current.value).toMatchObject({
+    summary: {
+      binary: null,
+      counts: {
+        method_addresses: 0,
+        method_address_states: { code: 0, no_body: 0, unknown: 0 },
+      },
+    },
+  });
+});
+
+const linkedBinary = {
+  artifact: {
+    path: "/fixture/libil2cpp.so",
+    sha256: "c".repeat(64),
+    bytes: 64,
+  },
+  format: "elf" as const,
+  architecture: "arm64",
+  image_base: "0x0",
+  code_gen_modules_field: "0x10",
+  code_gen_modules_array: "0x20",
+  code_gen_modules: [],
+  types_field: "0x30",
+  types_count: 4,
+};
+
+it("selects parameter types by owning method through the parameters collection", () => {
+  const linked = {
+    ...report,
+    parameters: [
+      { name: "a", method: 0 },
+      { name: "b", method: 0 },
+    ],
+    binary: { ...linkedBinary },
+    method_addresses: report.methods.map(() => ({
+      state: "no-body" as const,
+      address: null,
+      rva: null,
+    })),
+    return_types: report.methods.map(() => ({ type: -1, name: null })),
+    field_types: report.fields.map(() => ({ type: 1, name: "int" })),
+    parameter_types: [
+      { type: 2, name: "string" },
+      { type: 3, name: "bool" },
+    ],
+  };
+  const select = (
+    source: ReturnType<typeof parent>,
+    method_indices: number[],
+  ) =>
+    projectIl2cppMetadataView(source, {
+      kind: "il2cpp-metadata",
+      collection: "parameter_types",
+      method_indices,
+      offset: 0,
+      limit: 8,
+    });
+  const owned = select(parent(linked, false), [0]);
+  if (!owned.ok) throw owned.error;
+  expect(owned.value).toMatchObject({
+    items: [
+      { index: 0, type: 2, name: "string" },
+      { index: 1, type: 3, name: "bool" },
+    ],
+  });
+  const none = select(parent(linked, false), [1]);
+  if (!none.ok) throw none.error;
+  expect(none.value).toMatchObject({ items: [] });
+  // Without retained parameters the owners are unknown, so the filter is refused.
+  const historical = jsonObjectSchema.parse(linked);
+  delete historical.parameters;
+  expect(select(parent(freezeJsonSnapshot(historical), true), [0]).ok).toBe(
+    false,
+  );
+});
+
+it.each([{ method_addresses: undefined }, { binary: undefined }])(
+  "rejects a binary link field retained without its collections: %j",
+  (changed) => {
+    const result = projectIl2cppMetadataView(
+      parent({ ...report, ...changed }, false),
+      { kind: "summary" },
+    );
+    expect(result.ok).toBe(false);
+  },
+);
 
 it.each([
   { fields: [{ name: "bad", declaring_type: 2 }] },

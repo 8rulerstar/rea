@@ -10,9 +10,12 @@ import {
   il2cppMetadataSectionSchema,
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
+  il2cppMethodAddressSchema,
+  il2cppTypeReferenceSchema,
   il2cppMetadataObjectSchema,
   il2cppMetadataParentSchema,
   il2cppMetadataMemberCollections,
+  il2cppMetadataBinaryCollections,
   il2cppMetadataTypeSchema,
 } from "../il2cpp/il2cppMetadata.js";
 import { err, ok, type Result } from "../result.js";
@@ -38,6 +41,18 @@ const countsSchema = z.strictObject({
   events: z.number().int().nonnegative().nullable(),
   parameters: z.number().int().nonnegative().nullable(),
   string_literals: z.number().int().nonnegative().nullable(),
+  method_addresses: z.number().int().nonnegative().nullable(),
+  /** method_addresses rows per state; zero without a linked binary, null when not collected. */
+  method_address_states: z
+    .strictObject({
+      code: z.number().int().nonnegative(),
+      no_body: z.number().int().nonnegative(),
+      unknown: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  return_types: z.number().int().nonnegative().nullable(),
+  field_types: z.number().int().nonnegative().nullable(),
+  parameter_types: z.number().int().nonnegative().nullable(),
 });
 
 export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
@@ -51,7 +66,13 @@ export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
     events: true,
     parameters: true,
     string_literals: true,
+    method_addresses: true,
+    return_types: true,
+    field_types: true,
+    parameter_types: true,
   })
+  // Reports retained before binary linking existed omit the link field.
+  .partial({ binary: true })
   .extend({ counts: countsSchema });
 
 const indexSchema = z.number().int().nonnegative();
@@ -70,6 +91,12 @@ const parameterRowSchema = il2cppMetadataParameterSchema.extend({
   index: indexSchema,
 });
 const stringLiteralRowSchema = il2cppMetadataStringLiteralSchema.extend({
+  index: indexSchema,
+});
+const methodAddressRowSchema = il2cppMethodAddressSchema.extend({
+  index: indexSchema,
+});
+const typeReferenceRowSchema = il2cppTypeReferenceSchema.extend({
   index: indexSchema,
 });
 const indexPage = {
@@ -128,6 +155,25 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
       collection: z.literal("string_literals"),
       fields: z.array(stringLiteralRowSchema.keyof()).optional(),
     }),
+    z.strictObject({
+      ...indexPage,
+      collection: z.literal("method_addresses"),
+      fields: z.array(methodAddressRowSchema.keyof()).optional(),
+    }),
+    ...(["return_types", "field_types"] as const).map((collection) =>
+      z.strictObject({
+        ...indexPage,
+        collection: z.literal(collection),
+        fields: z.array(typeReferenceRowSchema.keyof()).optional(),
+      }),
+    ),
+    z.strictObject({
+      ...indexPage,
+      collection: z.literal("parameter_types"),
+      // Owners come from the retained parameters collection.
+      method_indices: z.array(indexSchema).optional(),
+      fields: z.array(typeReferenceRowSchema.keyof()).optional(),
+    }),
   ],
 );
 
@@ -139,6 +185,8 @@ export const il2cppMetadataViewItemsSchema = z.union([
   z.array(memberRowSchema.partial().required({ index: true })),
   z.array(parameterRowSchema.partial().required({ index: true })),
   z.array(stringLiteralRowSchema.partial().required({ index: true })),
+  z.array(methodAddressRowSchema.partial().required({ index: true })),
+  z.array(typeReferenceRowSchema.partial().required({ index: true })),
 ]);
 
 export const il2cppMetadataViewContextSchema = z.strictObject({
@@ -190,6 +238,20 @@ const parseMetadataReport = (
       events: report.events?.length ?? null,
       parameters: report.parameters?.length ?? null,
       string_literals: report.string_literals?.length ?? null,
+      method_addresses: report.method_addresses?.length ?? null,
+      method_address_states:
+        report.method_addresses?.reduce(
+          (states, row) => {
+            if (row.state === "code") states.code++;
+            else if (row.state === "no-body") states.no_body++;
+            else states.unknown++;
+            return states;
+          },
+          { code: 0, no_body: 0, unknown: 0 },
+        ) ?? null,
+      return_types: report.return_types?.length ?? null,
+      field_types: report.field_types?.length ?? null,
+      parameter_types: report.parameter_types?.length ?? null,
     },
   };
   if (reusable) checkedReports.set(key, checked);
@@ -232,9 +294,18 @@ const selection = (view: Request, report: Report) => {
       ? undefined
       : new Set(view.declaring_types);
   const methods =
-    view.collection === "parameters" && view.method_indices !== undefined
+    (view.collection === "parameters" ||
+      view.collection === "parameter_types") &&
+    view.method_indices !== undefined
       ? new Set(view.method_indices)
       : undefined;
+  // A parameter type row is owned by the method of the parameter at its index.
+  const parameterOwner = (row: Row, index: number) =>
+    "method" in row
+      ? row.method
+      : view.collection === "parameter_types"
+        ? report.parameters?.[index]?.method
+        : undefined;
   const namespaces =
     view.collection !== "types" || view.namespaces === undefined
       ? undefined
@@ -279,10 +350,7 @@ const selection = (view: Request, report: Report) => {
       (!("namespace" in row) || !namespaces.has(row.namespace))
     )
       return false;
-    if (
-      methods !== undefined &&
-      (!("method" in row) || !methods.has(row.method))
-    )
+    if (methods !== undefined && !methods.has(parameterOwner(row, index) ?? -1))
       return false;
     if (imageIndices === undefined) return true;
     let lower = 0;
@@ -309,7 +377,7 @@ export const projectIl2cppMetadataView = (
           path: ["view"],
           reason: "invalid_value",
           message:
-            "IL2CPP metadata Evidence supports summary and selected sections, images, types, methods, member, parameter and string literal pages.",
+            "IL2CPP metadata Evidence supports summary and selected sections, images, types, methods, member, parameter, string literal, method address and type reference pages.",
         },
       ]),
     );
@@ -342,6 +410,10 @@ export const projectIl2cppMetadataView = (
     events,
     parameters,
     string_literals,
+    method_addresses,
+    return_types,
+    field_types,
+    parameter_types,
     ...identity
   } = report;
   const allRows = {
@@ -354,6 +426,10 @@ export const projectIl2cppMetadataView = (
     events,
     parameters,
     string_literals,
+    method_addresses,
+    return_types,
+    field_types,
+    parameter_types,
   };
   const shared = {
     parent_evidence_id: parent.evidenceId,
@@ -362,13 +438,18 @@ export const projectIl2cppMetadataView = (
     artifact: { path: report.artifact.path, sha256: report.artifact.sha256 },
     limitations: [...parent.limitations],
     unknowns: [
-      ...il2cppMetadataMemberCollections
+      ...[
+        ...il2cppMetadataMemberCollections,
+        ...il2cppMetadataBinaryCollections,
+      ]
         .filter((name) => report[name] === undefined)
         .map(
           (name) =>
             `Retained Evidence did not collect ${name}; its count is unknown. Reinspect the metadata to acquire these facts.`,
         ),
-      "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown.",
+      report.binary == null
+        ? "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown."
+        : "Addresses come from static binary tables; runtime behavior and generic instance code remain unknown.",
       ...(parent.subject == null
         ? [
             "The parent has no recorded subject; its normalized artifact identity cannot be cross-checked against a subject digest.",
@@ -392,6 +473,21 @@ export const projectIl2cppMetadataView = (
           path: ["view", "collection"],
           reason: "invalid_value",
           message: `Retained Evidence did not collect ${view.collection}; inspect the metadata again to acquire these facts.`,
+        },
+      ]),
+    );
+  if (
+    view.collection === "parameter_types" &&
+    view.method_indices !== undefined &&
+    report.parameters === undefined
+  )
+    return err(
+      analysisViewInputError([
+        {
+          path: ["view", "method_indices"],
+          reason: "invalid_value",
+          message:
+            "Retained Evidence did not collect parameters, so parameter owners are unknown; inspect the metadata again to select parameter types by method.",
         },
       ]),
     );
