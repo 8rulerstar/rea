@@ -108,9 +108,10 @@ writes the complete Evidence to a new file and returns the summary.
 ## Issues
 
 Two facts the pak records separately can disagree while the structure stays
-readable. Decoding then continues, only the affected fact becomes null, and
-`issues` records each contradiction once with its `kind`, the file `offset` of
-the record that shows it, and a `message`:
+readable. Decoding then continues with the effect the table below gives for
+each kind (only `entry-count-mismatch` and `unknown-compression-slot` make a
+fact null), and `issues` records each contradiction once with its `kind`, the
+file `offset` of the record that shows it, and a `message`:
 
 | Kind                       | Offset                                 | Effect                                                                |
 | -------------------------- | -------------------------------------- | --------------------------------------------------------------------- |
@@ -122,7 +123,8 @@ the record that shows it, and a `message`:
 The summary counts issues, and `inspect_analysis_view` collection `issues`
 selects them by `indices`, `kinds` and `fields`, each row with its source
 `index`. An empty list means every checked redundant fact agreed, not that the
-file data is intact.
+file data is intact. An encrypted index is not read, so none of its facts are
+checked and `issues` is empty; `index.state: "encrypted"` tells that case apart.
 
 ## Failures
 
