@@ -27,7 +27,7 @@ import {
   type UnrealPak,
   type UnrealPakProviderInput,
 } from "../domain/unreal/unrealPak.js";
-import { jsonStringLength } from "../domain/jsonStringLength.js";
+import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import {
   readUnrealPak,
   UnrealPakFormatFailure,
@@ -61,29 +61,6 @@ const ENTRY_ROW = JSON.stringify({
   sha1: null,
   record: "full",
 }).length;
-
-/**
- * A lower bound on the serialized mount point and entry rows. Escaping can make
- * a string six times longer than the index bytes it came from, so this refuses
- * from escaped lengths before JSON.stringify builds a string the budget would
- * reject, and returns as soon as the bound passes `limit`.
- */
-const serializedLowerBound = (decoded: UnrealPakDecoded, limit: number) => {
-  let total =
-    decoded.index.state === "decoded"
-      ? jsonStringLength(decoded.index.mount_point, limit)
-      : 0;
-  for (const entry of decoded.entries) {
-    if (total > limit) return total;
-    // ENTRY_ROW already counts a null path as four characters.
-    total +=
-      ENTRY_ROW +
-      (entry.path === null
-        ? 0
-        : jsonStringLength(entry.path, limit - total) - "null".length);
-  }
-  return total;
-};
 
 const LIMITATIONS = [
   "Only the footer and index of pak versions 1 to 12 are decoded; entry paths, offsets, sizes and compression names are observed index content. File data is not read, decompressed or extracted.",
@@ -260,22 +237,13 @@ export class UnrealPakProvider implements UnrealPakPort {
         ),
       );
       options?.signal?.throwIfAborted();
-      if (serializedLowerBound(decoded, limit) > limit)
-        throw outputLimit(input.path, limit);
       const report = {
         ...decoded,
         artifact: { path: input.path, sha256, bytes },
         limitations: LIMITATIONS,
       };
-      let serialized: string;
-      try {
-        serialized = JSON.stringify(report);
-      } catch (cause: unknown) {
-        // Escaped text can pass the character budget and still exceed V8's string limit.
-        if (cause instanceof RangeError) throw outputLimit(input.path, limit);
-        throw cause;
-      }
-      if (Buffer.byteLength(serialized, "utf8") > limit)
+      // Counted in UTF-8 bytes without building the serialization the budget would refuse.
+      if (jsonValueByteLength(report, limit) > limit)
         throw outputLimit(input.path, limit);
       const parsed = unrealPakSchema.safeParse(report);
       if (!parsed.success)
