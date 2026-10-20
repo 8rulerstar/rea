@@ -122,6 +122,18 @@ cliTest(
       total: 1,
       exhausted: true,
     });
+    const none = await call("inspect_analysis_view", {
+      source: {
+        kind: "retained-evidence",
+        evidence_id: view.parent_evidence_id,
+      },
+      view: { kind: "unreal-pak", collection: "entries", paths: [] },
+    });
+    expect(
+      analysisViewResultSchema.parse(
+        parseEvidence(none.structuredContent).normalized_result,
+      ),
+    ).toMatchObject({ items: [], coverage: { total: 0 } });
     const invalid = await call("inspect_analysis_view", {
       source: {
         kind: "retained-evidence",

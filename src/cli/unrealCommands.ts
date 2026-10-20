@@ -17,8 +17,7 @@ export const registerUnrealCommands = (
   logger: Logger,
 ): void => {
   cli.command(CLI_COMMANDS.inspectUnrealPak, {
-    description:
-      "Inventory an Unreal Engine .pak footer and index entries without extracting, decompressing or decrypting file data",
+    description: "Inventory an Unreal Engine .pak footer and index entries",
     args: z.object({
       path: z
         .string()
