@@ -6,9 +6,12 @@ import { logCliCommand } from "../cliLogging.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
-import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import {
+  analysisEvidenceDeliveryOptions,
+  deliverCliAnalysisEvidence,
+} from "./analysisEvidenceDelivery.js";
 
-/** Resolve caller paths and inspect Unreal pak indexes through the shared workflow. */
+/** CLI and MCP share inspection; one-shot summaries preserve a complete Evidence file. */
 export const registerUnrealCommands = (
   cli: CliInstance,
   logger: Logger,
@@ -21,26 +24,25 @@ export const registerUnrealCommands = (
         .string()
         .describe("Local Unreal Engine .pak file (version 1 to 12)"),
     }),
-    run: ({ args }) =>
-      withCommandCancellation(async (signal) => {
-        const service = createUnrealPakService();
-        return await logCliCommand(
-          logger,
-          CLI_COMMANDS.inspectUnrealPak,
-          async () =>
-            finishAnalysisCommand(
-              () =>
-                service.inspect(
-                  // One-shot CLI runs retain no Evidence for later views.
-                  { path: absoluteCallerPath(args.path), detail: "complete" },
-                  { signal },
-                ),
-              service,
-              "unreal-pak",
-              "inspect_unreal_pak",
-              signal,
-            ),
-        );
-      }),
+    options: z.object(analysisEvidenceDeliveryOptions),
+    run: ({ args, options }) =>
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, CLI_COMMANDS.inspectUnrealPak, async () => {
+          const service = createUnrealPakService();
+          return deliverCliAnalysisEvidence({
+            run: () =>
+              service.inspect(
+                { path: absoluteCallerPath(args.path), detail: "complete" },
+                { signal },
+              ),
+            service,
+            providerId: "unreal-pak",
+            operation: "inspect_unreal_pak",
+            signal,
+            detail: options.detail,
+            evidenceOutput: options.evidence_output,
+          });
+        }),
+      ),
   });
 };

@@ -33,9 +33,9 @@ export const inspectUnrealPakInputSchema = z.strictObject({
   ),
   detail: z
     .enum(["complete", "summary"])
-    .default("complete")
+    .default("summary")
     .describe(
-      "complete (default) returns every index entry inline; summary retains every entry and returns counts with a linked inspect_analysis_view summary",
+      "summary (default) retains every entry and returns footer, index facts and entry counts; complete returns every index entry inline",
     ),
 });
 

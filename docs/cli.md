@@ -126,8 +126,10 @@ rea inspect-unreal-pak /absolute/path/Game-Windows.pak --json
 
 The command reads the footer and index of a version 1 to 12 pak and reports
 every entry's path, offset, sizes and compression method. It does not extract,
-decompress or decrypt file data. MCP returns every entry by default;
-`detail: "summary"` returns counts and pages entries on request. See
+decompress or decrypt file data. MCP defaults to counts with retained Evidence;
+select entries by exact indices or paths with selected fields. The CLI defaults
+to complete Evidence; `--detail summary --evidence_output FILE` exports the full
+result to a new file and returns a compact overview. See
 [Unreal pak indexes](unreal-pak.md).
 
 Inspect an embedded cargo-auditable Rust dependency list without installing

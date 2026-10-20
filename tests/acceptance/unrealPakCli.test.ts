@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { unlink, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "vitest";
+import { readEvidenceBundle } from "../../src/application/EvidenceBundleFiles.js";
 import { toolContract } from "../../src/contracts/toolContracts.js";
 import {
   analysisViewResultSchema,
@@ -42,17 +43,17 @@ cliTest(
     expect(evidence.parameters).toEqual({ path });
 
     const { client, call } = await connectLocalToolsMcp();
-    // Omitted detail delivers every entry, like the other inspection tools.
-    const complete = await call("inspect_unreal_pak", { path });
+    const complete = await call("inspect_unreal_pak", {
+      path,
+      detail: "complete",
+    });
     expect(complete.isError, JSON.stringify(complete)).not.toBe(true);
     expect(parseEvidence(complete.structuredContent).normalized_result).toEqual(
       report,
     );
 
-    const summarized = await call("inspect_unreal_pak", {
-      path,
-      detail: "summary",
-    });
+    // Omitted detail delivers the compact summary, like IL2CPP metadata.
+    const summarized = await call("inspect_unreal_pak", { path });
     expect(summarized.isError, JSON.stringify(summarized)).not.toBe(true);
     const view = unrealPakSummaryViewResultSchema.parse(
       parseEvidence(summarized.structuredContent).normalized_result,
@@ -90,7 +91,45 @@ cliTest(
       rows.push(...projected.items);
       offset = projected.coverage.next_offset ?? report.entries.length;
     } while (offset < report.entries.length);
-    expect(rows).toEqual(report.entries);
+    expect(rows).toEqual(
+      report.entries.map((entry, index) => ({ index, ...entry })),
+    );
+
+    // Filters intersect and rows keep their source index, not the page offset.
+    const selected = await call("inspect_analysis_view", {
+      source: {
+        kind: "retained-evidence",
+        evidence_id: view.parent_evidence_id,
+      },
+      view: {
+        kind: "unreal-pak",
+        collection: "entries",
+        indices: [2, 0, 2],
+        paths: [report.entries[2]!.path!, report.entries[1]!.path!],
+        fields: ["size"],
+      },
+    });
+    expect(selected.isError, JSON.stringify(selected)).not.toBe(true);
+    const filtered = analysisViewResultSchema.parse(
+      parseEvidence(selected.structuredContent).normalized_result,
+    );
+    if (filtered.kind !== "unreal-pak") throw new Error("Wrong pak page kind");
+    expect(filtered.items).toEqual([
+      { index: 2, size: report.entries[2]!.size },
+    ]);
+    expect(filtered.coverage).toMatchObject({
+      examined: 1,
+      total: 1,
+      exhausted: true,
+    });
+    const invalid = await call("inspect_analysis_view", {
+      source: {
+        kind: "retained-evidence",
+        evidence_id: view.parent_evidence_id,
+      },
+      view: { kind: "unreal-pak", collection: "entries", fields: ["name"] },
+    });
+    expect(parseMcpToolError(invalid).error.code).toBe("invalid_request");
     await client.ping();
   },
   30000,
@@ -169,6 +208,82 @@ cliTest(
       entries: [],
     });
     await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "exports complete pak Evidence for compact CLI delivery and portable selected reads",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-unreal-pak-export-");
+    const path = join(root, "Game-Mac.pak");
+    const bundle = join(root, "evidence.json");
+    const refused = await cli.run({
+      arguments: [
+        "inspect-unreal-pak",
+        join(root, "must-not-be-read"),
+        "--detail",
+        "summary",
+        "--json",
+      ],
+    });
+    expect(refused.exitCode).toBe(1);
+    expect(refused.json).toMatchObject({
+      code: "invalid_request",
+      details: { issues: [{ path: ["evidence_output"] }] },
+    });
+    const { bytes, files } = createPakFixture({ layout: "v11" });
+    await writeFile(path, bytes);
+    const args = [
+      "inspect-unreal-pak",
+      path,
+      "--detail",
+      "summary",
+      "--evidence_output",
+      bundle,
+      "--json",
+    ];
+    const result = await cli.run({ arguments: args });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.json).toMatchObject({
+      evidence_bundle: { path: bundle, bytes: expect.any(Number) },
+      summary: { normalized_result: { kind: "summary" } },
+    });
+    const before = await readFile(bundle);
+    const overwrite = await cli.run({ arguments: args });
+    expect(overwrite.exitCode).toBe(1);
+    expect(await readFile(bundle)).toEqual(before);
+    const saved = await readEvidenceBundle(bundle);
+    if (!saved.ok) throw saved.error;
+    const evidence = saved.value.records[0];
+    if (evidence === undefined) throw new Error("Missing exported Evidence");
+    expect(
+      unrealPakSchema
+        .parse(evidence.normalized_result)
+        .entries.map((entry) => entry.path),
+    ).toEqual(files.map((file) => file.path));
+    await unlink(path);
+    const query = join(root, "query.json");
+    await writeFile(
+      query,
+      JSON.stringify({
+        source: { kind: "inline", evidence },
+        view: {
+          kind: "unreal-pak",
+          collection: "entries",
+          indices: [1],
+          fields: ["path"],
+        },
+      }),
+    );
+    const selected = await cli.run({
+      arguments: ["inspect-analysis-view", query, "--json"],
+    });
+    expect(selected.exitCode, selected.stderr).toBe(0);
+    expect(parseEvidence(selected.json).normalized_result).toMatchObject({
+      items: [{ index: 1, path: files[1]!.path }],
+      parent_evidence_id: evidence.evidence_id,
+    });
   },
   30000,
 );

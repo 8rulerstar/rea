@@ -16,23 +16,21 @@ rejected.
 
 ## MCP
 
-MCP returns every entry by default, like the other inspection tools. For a large
-pak, select `detail: "summary"` first:
+MCP returns a compact summary by default and retains the complete Evidence in
+the session:
 
 ```json
 {
   "name": "inspect_unreal_pak",
-  "arguments": {
-    "path": "/artifacts/Content/Paks/Game-Windows.pak",
-    "detail": "summary"
-  }
+  "arguments": { "path": "/artifacts/Content/Paks/Game-Windows.pak" }
 }
 ```
 
-The summary retains the complete Evidence in the session and returns the
-footer, the index facts and `counts` (`entries`, `encoded_records`,
-`full_records`, `compressed`, `encrypted`, `deleted`, `without_path`). Page the
-entries in index order without reopening the file:
+The summary has the footer, the index facts and `counts` (`entries`,
+`encoded_records`, `full_records`, `compressed`, `encrypted`, `deleted`,
+`without_path`). Select entries without reopening the file. Every row keeps its
+original `index` in the pak index; `indices` and `paths` select exact entries,
+`fields` selects row fields, and filters intersect before paging:
 
 ```json
 {
@@ -45,6 +43,8 @@ entries in index order without reopening the file:
     "view": {
       "kind": "unreal-pak",
       "collection": "entries",
+      "paths": ["Content/Maps/Entry.umap"],
+      "fields": ["offset", "size", "compression_name"],
       "offset": 0,
       "limit": 64
     }
@@ -52,13 +52,16 @@ entries in index order without reopening the file:
 }
 ```
 
+`detail: "complete"` returns every entry inline.
+
 ## CLI
 
 ```bash
 rea inspect-unreal-pak /absolute/path/Game-Windows.pak --json
 ```
 
-The CLI always returns the complete report.
+The CLI defaults to complete Evidence. `--detail summary --evidence_output FILE`
+writes the complete Evidence to a new file and returns the summary.
 
 ## Observations
 

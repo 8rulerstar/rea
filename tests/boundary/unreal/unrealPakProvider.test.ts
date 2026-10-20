@@ -110,9 +110,10 @@ it("refuses relative paths and unretained summaries before reading", async () =>
     "ok.pak",
     createPakFixture({ layout: "v11" }).bytes,
   );
-  const summary = await service.inspect({ path, detail: "summary" });
+  // Omitted detail is summary, which needs retention.
+  const summary = await service.inspect({ path });
   expect(summary.ok).toBe(false);
-  const complete = await service.inspect({ path });
+  const complete = await service.inspect({ path, detail: "complete" });
   expect(complete.ok && complete.value.operation).toBe("inspect_unreal_pak");
   await service.close();
 });
