@@ -148,9 +148,11 @@ references that name no record, and counts above the resource limits.
 | `paths-too-large`              | resource    | Directory and file names would build more path text than the 64 MiB report allows.     |
 
 Long index decodes yield every 4,096 records and stop there when the request is
-cancelled. Each reader admits one inspection at a time. A failure after the
-whole file was read and hashed keeps that SHA-256 and byte length as partial
-source Evidence, which does not establish any footer or entry fact.
+cancelled. Each reader admits one inspection at a time. A reader failure after
+the whole file was read and hashed keeps that SHA-256 and byte length as partial
+source Evidence, which does not establish any footer or entry fact. A
+cancellation observed after the reader returned its complete report keeps the
+decoded report as partial Evidence.
 
 The complete report is limited to 64 MiB. It is refused from the declared entry
 count before entries are built when even minimal rows would exceed it. There is
