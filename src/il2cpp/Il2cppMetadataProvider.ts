@@ -64,6 +64,11 @@ const INPUT_BYTES = 256 * 1024 * 1024;
 const BINARY_BYTES = 1024 * 1024 * 1024;
 // A 12.9 MB Unity 6000.4 file with 112,232 methods serializes to 7.8 MB.
 const OUTPUT_BYTES = 64 * 1024 * 1024;
+/** Instruction form the module-array fallback matched, per architecture. */
+const inferredReferenceForm = (architecture: string) =>
+  architecture === "arm64"
+    ? "an adjacent ADRP+ADD pair"
+    : "RIP-relative LEA/MOV";
 const failureForPrimary = (
   cause: unknown,
   path: string,
@@ -541,7 +546,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             ...(linked.binary !== null &&
             linked.binary.code_gen_modules_field === null
               ? [
-                  "The static CodeRegistration pair was not resolved. The module array is inferred from executable bytes consistent with RIP-relative LEA/MOV referencing one array candidate; instruction boundaries and runtime use were not verified.",
+                  `The static CodeRegistration pair was not resolved. The module array is inferred from executable bytes consistent with ${inferredReferenceForm(linked.binary.architecture)} referencing one array candidate; instruction boundaries and runtime use were not verified.`,
                 ]
               : []),
             ...(binaryPath === undefined

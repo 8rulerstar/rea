@@ -575,3 +575,53 @@ it("retains both observed file identities and the selected architecture when nat
     await provider.close();
   }
 });
+
+it.each([
+  {
+    architecture: "x86-64",
+    name: "libil2cpp.so",
+    binary: () =>
+      createElfFixture(
+        createIl2cppBinaryFixture({
+          codeRegistration: false,
+          codeReference: true,
+        }),
+        { machine: 62 },
+      ),
+    named: "RIP-relative LEA/MOV",
+    absent: "ADRP+ADD",
+  },
+  {
+    architecture: "arm64",
+    name: "GameAssembly.dylib",
+    binary: () =>
+      createIl2cppBinaryFixture({
+        codeRegistration: false,
+        adrpAdd: [[0xc00, 0x500]],
+      }),
+    named: "ADRP+ADD",
+    absent: "RIP-relative LEA/MOV",
+  },
+])(
+  "names the $architecture instruction form behind an inferred module array",
+  async ({ name, binary, named, absent }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-inferred-form-");
+    const path = join(root, "global-metadata.dat"),
+      binary_path = join(root, name);
+    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(binary_path, binary());
+    const provider = new Il2cppMetadataProvider();
+    try {
+      const result = await provider.inspect({ path, binary_path });
+      if (!result.ok) throw result.error;
+      const inferred = result.value.limitations.filter((line) =>
+        line.includes("static CodeRegistration pair was not resolved"),
+      );
+      expect(inferred).toHaveLength(1);
+      expect(inferred[0]).toContain(named);
+      expect(inferred[0]).not.toContain(absent);
+    } finally {
+      await provider.close();
+    }
+  },
+);
