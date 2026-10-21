@@ -298,6 +298,85 @@ it.each([
   },
 );
 
+it("finds an arm64 type table through the ADRP+ADD pair that loads it", () => {
+  const linked = link(
+    createIl2cppBinaryFixture({
+      metadataRegistration: false,
+      adrpAdd: [[0xc20, 0x900]],
+    }),
+  );
+  const reference = link(createIl2cppBinaryFixture());
+  expect(linked.types_field).toBeNull();
+  expect(linked.types_count).toBe(4);
+  expect(linked.return_types).toEqual(reference.return_types);
+  expect(linked.field_types).toEqual(reference.field_types);
+  expect(linked.parameter_types).toEqual(reference.parameter_types);
+});
+
+it("finds an x86-64 type table through the instruction that loads it", () => {
+  const image = createIl2cppBinaryFixture({ metadataRegistration: false });
+  // lea rcx, [rip + disp32] at 0xc40, loading the type table at 0x900.
+  image.set([0x48, 0x8d, 0x0d], 0xc40);
+  image.writeInt32LE(0x900 - (0xc40 + 7), 0xc43);
+  const linked = link(createElfFixture(image, { machine: 62 }));
+  expect(linked.types_field).toBeNull();
+  expect(linked.types_count).toBe(4);
+  expect(linked.return_types).toEqual(
+    link(createElfFixture(createIl2cppBinaryFixture(), { machine: 62 }))
+      .return_types,
+  );
+});
+
+it.each([
+  ["the pair loads an address inside the run", { target: 0x908 }],
+  [
+    "a type-shaped word extends the run before the loaded address",
+    { before: true },
+  ],
+  ["two runs are each loaded", { second: true }],
+  [
+    "the loaded run is shorter than the referenced type indices",
+    { short: true },
+  ],
+] as const)(
+  "keeps metadata-registration-not-found when %s",
+  (
+    _,
+    variant: {
+      target?: number;
+      before?: boolean;
+      second?: boolean;
+      short?: boolean;
+    },
+  ) => {
+    const bytes = createIl2cppBinaryFixture({
+      metadataRegistration: false,
+      adrpAdd: [
+        [0xc20, variant.target ?? 0x900],
+        ...(variant.second === true ? [[0xc30, 0xb00] as const] : []),
+      ],
+    });
+    if (variant.second === true) bytes.copy(bytes, 0xb00, 0x900, 0x920);
+    // The int record (type 3) is a valid Il2CppType, so the run starts at 0x8f8.
+    if (variant.before === true)
+      bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x9b0n, 0x8f8);
+    // Kind 0 ends the run after two entries; the facts below reference type 3.
+    if (variant.short === true) bytes.writeUInt32LE(0, 0x980 + 2 * 16 + 8);
+    const required =
+      variant.short === true
+        ? { ...facts, returnTypes: Int32Array.from(facts.returnTypes, () => 3) }
+        : facts;
+    let reason: string | undefined;
+    try {
+      linkIl2cppBinary(bytes, metadata, required);
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      reason = cause.reason;
+    }
+    expect(reason).toBe("metadata-registration-not-found");
+  },
+);
+
 it("refuses to choose among too many candidate module arrays", () => {
   const base = createIl2cppBinaryFixture({
     codeRegistration: false,

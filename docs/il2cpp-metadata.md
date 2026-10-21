@@ -209,7 +209,7 @@ symbols are needed, so stripped builds work. A method's token row id selects its
 slot in the module's method pointer array.
 
 Module records establish names through their declared NUL-terminated string pointers. NUL/0xFF padding, spaces, Unicode and suffix-shared storage are supported. A pointer to a longer string does not match just its suffix; a pointer directly into a shared suffix may name it. Exact reversed UTF-8 matching avoids rescanning the file for every name and retains duplicate-name owners until module records resolve them. A contributor investigated a Linux
-`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. A located module array does not by itself complete linking: a Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol, and after this step it still stops at `metadata-registration-not-found`.
+`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. A Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol; its type table is then inferred as described below.
 
 The binary/metadata pair is caller-selected. Name/count/token agreement is structural evidence, not a cryptographic same-build proof. File-offset locations refer to the primary metadata artifact; linked virtual addresses refer to `binary.artifact`. Both SHA-256 identities remain available in compact native pages as `artifact` and `binary_source`.
 
@@ -257,6 +257,15 @@ The result adds:
 `Il2CppMetadataRegistration.typesCount` and its value. That record is found as
 the single place whose `fieldOffsetsCount` and `typeDefinitionsSizesCount` both
 equal the metadata type-definition count and whose type table is file mapped.
+Linking reads only that table. When no such record matches on x86-64 or arm64,
+the reader collects maximal runs of pointers to Il2CppType-shaped records (a
+kind from 0x01 to 0x1e; class and value-type data below the type-definition
+count) that are long enough for every type index the metadata references, and
+requires exactly one run start to be loaded by the same instruction forms as the
+module-array fallback. `types_field` is then `null`, `types_count` is that run's
+length rather than an observed `typesCount`, and Evidence is **inferred**. A run
+that a type-shaped neighbour extends before the loaded address is not accepted.
+Otherwise the result is `metadata-registration-not-found`.
 
 Without `binary_path`, `binary` is `null` and the four binary collections are
 empty in the complete producer report to indicate unrequested observations. Their summary counts, including state counts, are `null`, and native page requests report unavailable observations. This does not establish an empty native inventory. Missing native fields in historical Evidence remain unknown too.
@@ -280,7 +289,7 @@ The builds checked are listed after the module search rules above.
 | `code-registration-not-found`     | input error | No unique module table or executable-byte array candidate was resolved.                           |
 | `invalid-method-token`            | input error | A method token is not a method row inside its module's pointer count.                             |
 | `invalid-method-pointer`          | input error | A slot is unavailable or its nonzero address lacks unambiguous executable file coverage.          |
-| `metadata-registration-not-found` | input error | No single MetadataRegistration matches the type-definition count.                                 |
+| `metadata-registration-not-found` | input error | No single MetadataRegistration or executable-byte type-table candidate was resolved.              |
 | `invalid-type`                    | input error | A type index or `Il2CppType` record is out of range, unmapped or malformed.                       |
 | `unsupported-type-kind`           | unsupported | A valid type kind has no implemented rendering.                                                   |
 

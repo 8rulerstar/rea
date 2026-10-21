@@ -625,3 +625,39 @@ it.each([
     }
   },
 );
+
+it("states that an inferred type table's count is a run length", async () => {
+  const root = await createTestTempDirectory("rea-il2cpp-inferred-types-");
+  const path = join(root, "global-metadata.dat"),
+    binary_path = join(root, "GameAssembly.dylib");
+  await writeFile(path, createIl2cppMetadataFixture().bytes);
+  await writeFile(
+    binary_path,
+    createIl2cppBinaryFixture({
+      metadataRegistration: false,
+      adrpAdd: [[0xc20, 0x900]],
+    }),
+  );
+  const provider = new Il2cppMetadataProvider();
+  try {
+    const result = await provider.inspect({ path, binary_path });
+    if (!result.ok) throw result.error;
+    expect(result.value.binary).toMatchObject({
+      types_field: null,
+      types_count: 4,
+      code_gen_modules_field: expect.any(String),
+    });
+    const inferred = result.value.limitations.filter((line) =>
+      line.includes("No static MetadataRegistration matched"),
+    );
+    expect(inferred).toHaveLength(1);
+    expect(inferred[0]).toContain("ADRP+ADD");
+    expect(
+      result.value.limitations.some((line) =>
+        line.includes("static CodeRegistration pair was not resolved"),
+      ),
+    ).toBe(false);
+  } finally {
+    await provider.close();
+  }
+});

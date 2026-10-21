@@ -340,14 +340,17 @@ function* arm64PageReferences(
  * fieldOffsetsCount and typeDefinitionsSizesCount (words 10 and 12) both equal
  * the metadata type-definition count and are followed by mapped pointers.
  * typesCount and types are words 6 and 7. Counts are int32 in 8-byte slots.
+ * Linking reads only the type table, so when no static registration matches on
+ * x86-64 or arm64 the table is inferred from code instead (field null).
  */
 export function* findMetadataRegistration(
   image: NativeImage,
   typeDefinitions: number,
+  requiredTypes: number,
 ): Generator<
   void,
   {
-    readonly field: bigint;
+    readonly field: bigint | null;
     readonly count: number;
     readonly types: bigint;
   }
@@ -384,10 +387,92 @@ export function* findMetadataRegistration(
       });
     }
   }
+  const architecture = image.container.architecture;
+  if (
+    matches.length === 0 &&
+    requiredTypes > 0 &&
+    (architecture === "amd64" || architecture === "arm64")
+  ) {
+    const table = yield* findTypeTableByCode(
+      image,
+      typeDefinitions,
+      requiredTypes,
+    );
+    if (table !== null) return { field: null, ...table };
+  }
   if (matches.length !== 1)
     throw new Il2cppBinaryFormatFailure(
       "metadata-registration-not-found",
       `${matches.length} MetadataRegistration candidates count ${typeDefinitions} type definitions`,
     );
   return matches[0]!;
+}
+
+/**
+ * An inlined MetadataRegistration leaves the Il2CppType pointer table loaded
+ * directly by code. Candidates are maximal runs of pointers to Il2CppType-shaped
+ * records (a kind byte from 0x01 to 0x1e; class and value-type data below the
+ * metadata type-definition count) long enough for every type index the
+ * metadata references. Exactly one run start must be loaded by the same
+ * instruction forms as the module-array fallback. The run length becomes the
+ * count: an upper bound on the table, never below what the metadata needs.
+ */
+const TYPE_TABLE_CANDIDATES = 64;
+
+function* findTypeTableByCode(
+  image: NativeImage,
+  typeDefinitions: number,
+  requiredTypes: number,
+): Generator<void, { readonly count: number; readonly types: bigint } | null> {
+  const { bytes, container } = image;
+  const recordOffset = (address: bigint) => {
+    for (const mapping of container.mappings)
+      if (
+        address >= mapping.address &&
+        address + 12n <= mapping.address + BigInt(mapping.size)
+      )
+        return mapping.offset + Number(address - mapping.address);
+    return -1;
+  };
+  const isType = (address: bigint) => {
+    const offset = recordOffset(address);
+    if (offset < 0) return false;
+    const kind = (bytes.readUInt32LE(offset + 8) >>> 16) & 0xff;
+    if (kind === 0 || kind > 0x1e) return false;
+    if (kind !== 0x11 && kind !== 0x12) return true;
+    return bytes.readBigUInt64LE(offset) < BigInt(typeDefinitions);
+  };
+  const runs = new Map<bigint, number>();
+  for (const mapping of container.mappings) {
+    const start = Number((8n - (mapping.address % 8n)) % 8n);
+    let runStart = -1;
+    for (let at = start; at <= mapping.size; at += 8) {
+      if ((at & 0xffff) < 8) yield;
+      if (
+        at + 8 <= mapping.size &&
+        isType(bytes.readBigUInt64LE(mapping.offset + at))
+      ) {
+        if (runStart < 0) runStart = at;
+        continue;
+      }
+      if (runStart >= 0 && (at - runStart) / 8 >= requiredTypes) {
+        runs.set(mapping.address + BigInt(runStart), (at - runStart) / 8);
+        if (runs.size > TYPE_TABLE_CANDIDATES)
+          throw new Il2cppBinaryFormatFailure(
+            "native-index-capacity",
+            `type-table index exceeds ${TYPE_TABLE_CANDIDATES} entries`,
+          );
+      }
+      runStart = -1;
+    }
+  }
+  if (runs.size === 0) return null;
+  const starts = new Set(runs.keys());
+  const referenced =
+    container.architecture === "arm64"
+      ? yield* arm64PageReferences(image, starts)
+      : yield* ripRelativeReferences(image, starts);
+  if (referenced.size !== 1) return null;
+  const types = [...referenced][0]!;
+  return { count: runs.get(types)!, types };
 }

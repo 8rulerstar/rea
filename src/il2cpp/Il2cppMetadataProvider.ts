@@ -227,7 +227,7 @@ const binaryReport = (
       address: hex(module.address),
       method_pointer_count: module.method_pointer_count,
     })),
-    types_field: hex(link.types_field),
+    types_field: link.types_field === null ? null : hex(link.types_field),
     types_count: link.types_count,
   },
   return_types: link.return_types,
@@ -547,6 +547,11 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             linked.binary.code_gen_modules_field === null
               ? [
                   `The static CodeRegistration pair was not resolved. The module array is inferred from executable bytes consistent with ${inferredReferenceForm(linked.binary.architecture)} referencing one array candidate; instruction boundaries and runtime use were not verified.`,
+                ]
+              : []),
+            ...(linked.binary !== null && linked.binary.types_field === null
+              ? [
+                  `No static MetadataRegistration matched. The type table is inferred from executable bytes consistent with ${inferredReferenceForm(linked.binary.architecture)} referencing the one run of Il2CppType-shaped pointers long enough for every referenced type index; types_count is that run's length, not an observed typesCount, and instruction boundaries and runtime use were not verified.`,
                 ]
               : []),
             ...(binaryPath === undefined
