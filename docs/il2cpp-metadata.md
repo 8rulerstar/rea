@@ -209,7 +209,7 @@ symbols are needed, so stripped builds work. A method's token row id selects its
 slot in the module's method pointer array.
 
 Module records establish names through their declared NUL-terminated string pointers. NUL/0xFF padding, spaces, Unicode and suffix-shared storage are supported. A pointer to a longer string does not match just its suffix; a pointer directly into a shared suffix may name it. Exact reversed UTF-8 matching avoids rescanning the file for every name and retains duplicate-name owners until module records resolve them. A contributor investigated a Linux
-`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. A Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol; its type table is then inferred as described below.
+`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. Cpp2IL's StrippedCodeRegSupport plugin (2023) first recovered the module list of an inlined CodeRegistration by walking from module names to the list; this fallback applies the same idea and additionally requires the exact located module set and a single code reference. A Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol; its type table is then inferred as described below.
 
 The binary/metadata pair is caller-selected. Name/count/token agreement is structural evidence, not a cryptographic same-build proof. File-offset locations refer to the primary metadata artifact; linked virtual addresses refer to `binary.artifact`. Both SHA-256 identities remain available in compact native pages as `artifact` and `binary_source`.
 
@@ -263,9 +263,17 @@ kind from 0x01 to 0x1e; class and value-type data below the type-definition
 count) that are long enough for every type index the metadata references, and
 requires exactly one run start to be loaded by the same instruction forms as the
 module-array fallback. `types_field` is then `null`, `types_count` is that run's
-length rather than an observed `typesCount`, and Evidence is **inferred**. A run
-that a type-shaped neighbour extends before the loaded address is not accepted.
-Otherwise the result is `metadata-registration-not-found`.
+length rather than an observed `typesCount`, and Evidence is **inferred**. The
+run length is an upper bound: adjacent type-shaped pointers would extend it past
+the real table, and only the type indices the metadata references are read. A
+run that a type-shaped neighbour extends before the loaded address, or that
+spans two mappings, is not accepted. When the metadata references few type
+indices, short pointer runs elsewhere can exceed the 64-candidate bound and the
+result is `native-index-capacity`. Otherwise the result is
+`metadata-registration-not-found`. Il2CppDumper's `SectionHelper` and Cpp2IL's
+`FindMetadataRegistrationPost24_5` find MetadataRegistration from its count
+words in data, as the static search above does, so they need the record to
+exist; StrippedCodeRegSupport restores only the module list.
 
 Without `binary_path`, `binary` is `null` and the four binary collections are
 empty in the complete producer report to indicate unrequested observations. Their summary counts, including state counts, are `null`, and native page requests report unavailable observations. This does not establish an empty native inventory. Missing native fields in historical Evidence remain unknown too.
@@ -295,7 +303,7 @@ The builds checked are listed after the module search rules above.
 
 Format and selection failures name `binary_path`; capacity refusals remain typed resource errors. Failed linking preserves the metadata source identity, validated counts, selected binary path/architecture and its SHA-256 when observed, plus prior producer observations. It never publishes an incomplete native table as complete. The binary input is bounded to1GiB.
 
-Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to65,536 entries/nodes and fallback module-array candidates to64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a64MiB UTF-8 cache-workspace guard, separate from the64MiB encoded-report admission, and64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
+Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to65,536 entries/nodes and fallback module-array and type-table candidates each to64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a64MiB UTF-8 cache-workspace guard, separate from the64MiB encoded-report admission, and64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
 
 ELF RELATIVE writes into zero-fill are kept as a private virtual-pointer overlay. Unresolved supported-width symbol relocations, including RELA PLT entries, remain unknown; stored zeros never establish no-body. COPY, TLS descriptor, REL, packed APS2 and other unsupported relocation encodings fail closed. Input bytes are unchanged.
 

@@ -6,6 +6,11 @@ import {
   type NativeImage,
 } from "./Il2cppBinaryImage.js";
 import type { Il2cppMetadataDecoded } from "./Il2cppMetadataFile.js";
+import {
+  IL2CPP_TYPE_KIND_MAX,
+  il2cppTypeKind,
+  isDefinitionTypeKind,
+} from "./Il2cppBinaryTypes.js";
 import type { Il2cppCodeGenModule } from "./Il2cppBinaryFile.js";
 // Bound the retained name-address index independently of binary size. No
 // repeated name is evidence of ambiguous module ownership by itself.
@@ -435,11 +440,13 @@ function* findTypeTableByCode(
     return -1;
   };
   const isType = (address: bigint) => {
+    // Records hold an 8-byte pointer first; zero and unaligned words are not types.
+    if (address === 0n || (address & 7n) !== 0n) return false;
     const offset = recordOffset(address);
     if (offset < 0) return false;
-    const kind = (bytes.readUInt32LE(offset + 8) >>> 16) & 0xff;
-    if (kind === 0 || kind > 0x1e) return false;
-    if (kind !== 0x11 && kind !== 0x12) return true;
+    const kind = il2cppTypeKind(bytes.readUInt32LE(offset + 8));
+    if (kind === 0 || kind > IL2CPP_TYPE_KIND_MAX) return false;
+    if (!isDefinitionTypeKind(kind)) return true;
     return bytes.readBigUInt64LE(offset) < BigInt(typeDefinitions);
   };
   const runs = new Map<bigint, number>();

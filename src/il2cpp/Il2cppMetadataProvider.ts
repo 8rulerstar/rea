@@ -551,7 +551,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
               : []),
             ...(linked.binary !== null && linked.binary.types_field === null
               ? [
-                  `No static MetadataRegistration matched. The type table is inferred from executable bytes consistent with ${inferredReferenceForm(linked.binary.architecture)} referencing the one run of Il2CppType-shaped pointers long enough for every referenced type index; types_count is that run's length, not an observed typesCount, and instruction boundaries and runtime use were not verified.`,
+                  `No static MetadataRegistration matched. The type table is inferred from executable bytes consistent with ${inferredReferenceForm(linked.binary.architecture)} referencing the one run of Il2CppType-shaped pointers long enough for every referenced type index; types_count is that run's length, an upper bound rather than an observed typesCount, and instruction boundaries and runtime use were not verified.`,
                 ]
               : []),
             ...(binaryPath === undefined

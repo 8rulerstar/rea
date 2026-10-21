@@ -48,7 +48,8 @@ export interface Il2cppBinaryLink {
   /**
    * Address of MetadataRegistration's typesCount field, or null when no static
    * registration matched and an executable byte-pattern candidate identified
-   * the type table; types_count is then the table's inferred run length.
+   * the type table; types_count is then the inferred run length, an upper
+   * bound on the table.
    */
   readonly types_field: bigint | null;
   readonly types_count: number;
