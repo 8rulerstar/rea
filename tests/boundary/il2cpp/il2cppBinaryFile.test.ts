@@ -261,6 +261,43 @@ it.each([
   ).toBe("code-registration-not-found");
 });
 
+it("finds an arm64 module array through the ADRP+ADD pair that loads it", () => {
+  const linked = link(
+    createIl2cppBinaryFixture({
+      codeRegistration: false,
+      adrpAdd: [[0xc00, 0x500]],
+    }),
+  );
+  expect(linked.code_gen_modules_field).toBeNull();
+  expect(linked.code_gen_modules_array).toBe(FIXTURE_BINARY_BASE + 0x500n);
+  expect(linked.method_addresses).toEqual(expectedAddresses);
+});
+
+it.each([
+  ["no instruction pair loads the array", {}],
+  ["the pair starts off a 4-byte instruction boundary", { at: 0xc02 }],
+  ["two module-array candidates are each loaded", { second: true }],
+  ["the pair lies outside executable ranges", { protection: 3 }],
+] as const)(
+  "keeps arm64 code-registration-not-found when %s",
+  (_, variant: { at?: number; second?: boolean; protection?: number }) => {
+    const bytes = createIl2cppBinaryFixture({
+      codeRegistration: false,
+      adrpAdd:
+        Object.keys(variant).length === 0
+          ? []
+          : [
+              [variant.at ?? 0xc00, 0x500],
+              ...(variant.second === true ? [[0xc10, 0x520] as const] : []),
+            ],
+    });
+    if (variant.second === true) bytes.copy(bytes, 0x520, 0x500, 0x510);
+    if (variant.protection !== undefined)
+      bytes.writeUInt32LE(variant.protection, 92);
+    expect(failure(bytes).reason).toBe("code-registration-not-found");
+  },
+);
+
 it("refuses to choose among too many candidate module arrays", () => {
   const base = createIl2cppBinaryFixture({
     codeRegistration: false,

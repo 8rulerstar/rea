@@ -207,7 +207,11 @@ export function* findCodeRegistration(
       }
     }
   }
-  if (matches.length === 0 && image.container.architecture === "amd64") {
+  const architecture = image.container.architecture;
+  if (
+    matches.length === 0 &&
+    (architecture === "amd64" || architecture === "arm64")
+  ) {
     const array = yield* findModuleArrayByCode(image, expected);
     if (array !== null) return { field: null, array };
   }
@@ -220,12 +224,16 @@ export function* findCodeRegistration(
 }
 
 /**
- * Some x86-64 builds (a Unity 2023.2 Linux GameAssembly.so) keep no static
- * CodeRegistration: the compiler folded the module array and its count into
- * the one loop that walks it, so no data word points at the array. Find every
+ * Some builds keep no static CodeRegistration: the compiler folded the module
+ * array and its count into the one loop that walks it, so no data word points
+ * at the array. Seen on x86-64 (a Unity 2023.2 Linux GameAssembly.so) and on
+ * arm64 (a Unity 2022.3 macOS Master/LTO GameAssembly.dylib). Find every
  * pointer array that lists exactly the located modules, then require exactly
- * one of them to be the target of a RIP-relative `lea`/`mov` (REX.W 8D/8B with
- * a disp32 operand). Anything else stays code-registration-not-found.
+ * one of them to be the target of an address-forming instruction in an
+ * executable range: on x86-64 a RIP-relative `lea`/`mov` (REX.W 8D/8B with a
+ * disp32 operand), on arm64 an `adrp` immediately followed by an `add` of its
+ * page offset to the same register. Anything else stays
+ * code-registration-not-found.
  */
 const MODULE_ARRAY_CANDIDATES = 64;
 
@@ -262,6 +270,17 @@ function* findModuleArrayByCode(
     }
   }
   if (arrays.size === 0) return null;
+  const referenced =
+    image.container.architecture === "arm64"
+      ? yield* arm64PageReferences(image, arrays)
+      : yield* ripRelativeReferences(image, arrays);
+  return referenced.size === 1 ? [...referenced][0]! : null;
+}
+
+function* ripRelativeReferences(
+  image: NativeImage,
+  arrays: ReadonlySet<bigint>,
+): Generator<void, Set<bigint>> {
   const referenced = new Set<bigint>();
   for (const mapping of image.container.executable_mappings ?? []) {
     const bytes = image.bytes;
@@ -278,7 +297,42 @@ function* findModuleArrayByCode(
       if (arrays.has(target)) referenced.add(target);
     }
   }
-  return referenced.size === 1 ? [...referenced][0]! : null;
+  return referenced;
+}
+
+/**
+ * arm64 instructions are 4-byte aligned words, so only aligned addresses are
+ * decoded. `adrp xd, page` forms the 4 KiB page of pc plus a signed 21-bit
+ * page delta; the next word must be `add xd, xd, #imm12` (64-bit, unshifted),
+ * which adds the offset within that page. Pairs split by other instructions or
+ * loads through `ldr` are not followed.
+ */
+function* arm64PageReferences(
+  image: NativeImage,
+  arrays: ReadonlySet<bigint>,
+): Generator<void, Set<bigint>> {
+  const referenced = new Set<bigint>();
+  const bytes = image.bytes;
+  for (const mapping of image.container.executable_mappings ?? []) {
+    const start = Number((4n - (mapping.address % 4n)) % 4n);
+    for (let at = start; at + 8 <= mapping.size; at += 4) {
+      if ((at & 0xffff) < 4) yield;
+      const adrp = bytes.readUInt32LE(mapping.offset + at);
+      if ((adrp & 0x9f000000) >>> 0 !== 0x90000000) continue;
+      const add = bytes.readUInt32LE(mapping.offset + at + 4);
+      if ((add & 0xffc00000) >>> 0 !== 0x91000000) continue;
+      const register = adrp & 0x1f;
+      if ((add & 0x1f) !== register || ((add >>> 5) & 0x1f) !== register)
+        continue;
+      const pages =
+        (((((adrp >>> 5) & 0x7ffff) << 2) | ((adrp >>> 29) & 3)) << 11) >> 11;
+      const pc = mapping.address + BigInt(at);
+      const target =
+        (pc & ~0xfffn) + (BigInt(pages) << 12n) + BigInt((add >>> 10) & 0xfff);
+      if (arrays.has(target)) referenced.add(target);
+    }
+  }
+  return referenced;
 }
 
 /**

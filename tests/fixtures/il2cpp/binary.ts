@@ -27,6 +27,8 @@ export interface Il2cppBinaryFixtureOptions {
   readonly codeRegistration?: boolean;
   /** Write a RIP-relative `lea rax, [module array]`, as an inlined build loads it. */
   readonly codeReference?: boolean;
+  /** Write `adrp x8, page; add x8, x8, #pageoff` at each file offset, loading the target offset. */
+  readonly adrpAdd?: readonly (readonly [at: number, target: number])[];
   /** Omit the MetadataRegistration type table. */
   readonly metadataRegistration?: boolean;
   /** Byte written before each image name instead of NUL (MSVC pads with 0xFF). */
@@ -121,6 +123,21 @@ export const createIl2cppBinaryFixture = (
     const at = 0xc00;
     bytes.set([0x48, 0x8d, 0x05], at);
     bytes.writeInt32LE(MODULE_ARRAY - (at + 7), at + 3);
+  }
+  for (const [at, target] of options.adrpAdd ?? []) {
+    const pc = address(at),
+      to = address(target);
+    const pages = Number(((to >> 12n) - (pc >> 12n)) & 0x1fffffn);
+    // ADRP x8: immlo in bits 29-30, immhi in bits 5-23.
+    bytes.writeUInt32LE(
+      (0x90000008 | ((pages & 3) << 29) | ((pages >> 2) << 5)) >>> 0,
+      at,
+    );
+    // ADD x8, x8, #pageoff (64-bit, unshifted imm12).
+    bytes.writeUInt32LE(
+      (0x91000108 | (Number(to & 0xfffn) << 10)) >>> 0,
+      at + 4,
+    );
   }
   if (options.codeRegistration !== false) {
     bytes.writeBigUInt64LE(2n, REGISTRATION);
