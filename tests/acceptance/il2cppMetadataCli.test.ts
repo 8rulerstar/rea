@@ -123,6 +123,7 @@ cliTest(
       parameter_types: null,
       generic_method_instances: null,
       generic_method_instance_states: null,
+      generic_method_issues: null,
     });
     expect(view.summary).not.toHaveProperty("sections");
     expect(view.summary.binary).toBeNull();

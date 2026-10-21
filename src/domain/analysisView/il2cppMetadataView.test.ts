@@ -662,6 +662,47 @@ it("pages generic method instances by definition, state, address, name and field
   expect(summary.unknowns.join(" ")).toContain("outside genericMethodTable");
 });
 
+it("keeps generic method issues out of summaries and pages them", () => {
+  const source = parent(freezeJsonSnapshot(genericLinked()), true);
+  // Issues can outnumber what a summary may carry, so it keeps only a count.
+  const summary = summarize(source);
+  expect(summary).not.toHaveProperty("summary.binary.generic_methods.issues");
+  expect(summary).toMatchObject({
+    summary: {
+      binary: { generic_methods: { generic_method_table_count: 4 } },
+      counts: { generic_method_issues: 1 },
+    },
+  });
+  const page = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "generic_method_issues",
+    rows: [2],
+    offset: 0,
+    limit: 64,
+  });
+  if (!page.ok) throw page.error;
+  expect(page.value).toMatchObject({
+    items: [
+      { index: 0, ...genericLinked().binary!.generic_methods!.issues[0] },
+    ],
+    coverage: { total: 1, exhausted: true },
+  });
+  const none = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "generic_method_issues",
+    rows: [0],
+    offset: 0,
+    limit: 64,
+  });
+  expect(none.ok && "items" in none.value ? none.value.items : null).toEqual(
+    [],
+  );
+  // Unrequested generic instances leave the issue count unknown, not zero.
+  expect(
+    summarize(parent(freezeJsonSnapshot(linkedReport()), true)),
+  ).toMatchObject({ summary: { counts: { generic_method_issues: null } } });
+});
+
 it("keeps unrequested generic instances unknown and refuses their page", () => {
   const source = parent(freezeJsonSnapshot(linkedReport()), true);
   expect(summarize(source)).toMatchObject({

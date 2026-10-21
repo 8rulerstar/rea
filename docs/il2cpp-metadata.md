@@ -58,8 +58,8 @@ the original rows without reopening or decoding the file:
 
 Collections are `sections`, `images`, `types`, `methods`, `fields`,
 `properties`, `events`, `parameters`, `string_literals`, `method_addresses`,
-`return_types`, `field_types`, `parameter_types`, `code_gen_modules` and
-`generic_method_instances`. Every returned row includes
+`return_types`, `field_types`, `parameter_types`, `code_gen_modules`,
+`generic_method_instances` and `generic_method_issues`. Every returned row includes
 its source `index`, scoped by artifact SHA-256 and collection. All collections
 accept batch `indices` and `fields`; collections whose rows have a `name` also
 accept exact `names`. Types also accept `image_indices`, `namespaces` and
@@ -68,7 +68,8 @@ accept exact `names`. Types also accept `image_indices`, `namespaces` and
 method indices retrieves their parameters without reading the entire parameter
 table. `parameter_types` accepts the same `method_indices`, resolved through the
 retained `parameters` owners; Evidence without `parameters` refuses that filter. Generic method instances
-accept `methods` (definition indices) and `states`. Filters intersect, duplicate indices are returned once, and
+accept `method_indices` (definition indices) and `states`; generic method
+issues accept `rows` (the instance rows they leave unknown). Filters intersect, duplicate indices are returned once, and
 rows retain metadata order. An empty filter selects no rows; `fields: []`
 returns indices only. Omitted fields return the complete selected rows.
 
@@ -114,7 +115,7 @@ reports that it was not collected; it is never presented as an empty inventory. 
 omits `binary`, and `method_addresses`, `method_address_states`,
 `return_types`, `field_types` and `parameter_types` counts are `null`. A link retained before
 generic instances existed omits `binary.generic_methods`, and the
-`generic_method_instances` counts are `null`.
+`generic_method_instances` and `generic_method_issues` counts are `null`.
 Existing empty collections retain a zero count. Full Evidence is preserved.
 
 `offset` counts matching rows, not source indices. `limit` defaults to 64;
@@ -312,8 +313,10 @@ container offset and the generic class layout have not been checked against a
 real build, so it is refused rather than guessed.
 
 After the layout is fixed, rows that contradict another table do not fail the
-whole link: a method spec naming a method or generic instance out of range, a
-name that cannot be rendered, or a pointer slot that is unmapped, has an
+whole link: a method spec naming a method or generic instance out of range,
+class or method arguments whose count differs from the generic container the
+owner declares (none for a non-generic type or method), a name that cannot be
+rendered, or a pointer slot that is unmapped, has an
 unresolved relocation or points outside unambiguous executable file data adds
 an `issues` entry, and that row is `unknown` with no address. A method spec
 issue also leaves `name` `null`, even when the pointer slot is valid: the slot
@@ -323,7 +326,10 @@ refusals are never turned into issues. Rows that share one method spec
 names one other sharing row, and all of them lose `name` and become `unknown`.
 A zero pointer slot is a `no-body` row and has no issue. Before any row is
 resolved, the smallest row for every table entry is checked against the
-remaining report budget; each row and issue is then admitted as it is retained. Like
+remaining report budget; each row and issue is then admitted as it is retained.
+Compact summaries omit `binary.generic_methods.issues` and keep its count in
+`counts.generic_method_issues`; query `collection: "generic_method_issues"`
+with `rows`, `indices`, `fields` and pagination. Like
 method addresses, these rows are derived from static tables; layout agreement
 is structural evidence, not proof of runtime use.
 
