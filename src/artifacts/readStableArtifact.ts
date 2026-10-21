@@ -4,6 +4,8 @@ import { lstat, open, type FileHandle } from "node:fs/promises";
 import { ArtifactReaderFailure } from "./ArtifactReader.js";
 import type { ArtifactResourceScope } from "./ArtifactResourceScope.js";
 import {
+  ArtifactFileCancelled,
+  ArtifactFileCleanupFailure,
   withArtifactFileHandle,
   assertArtifactReadActive,
 } from "./ArtifactFileOperation.js";
@@ -141,4 +143,22 @@ export const readStableArtifact = async (
       };
     },
   );
+};
+
+/**
+ * The snapshot a read finished before its file cleanup failed or the caller
+ * cancelled, so a caller can keep the observed identity on its refusal.
+ */
+export const completedStableArtifact = (
+  cause: unknown,
+): StableArtifactSnapshot | undefined => {
+  const outcome =
+    cause instanceof ArtifactFileCleanupFailure
+      ? (cause as ArtifactFileCleanupFailure<StableArtifactSnapshot>)
+          .fileCleanupFailure.outcome
+      : cause instanceof ArtifactFileCancelled
+        ? (cause as ArtifactFileCancelled<StableArtifactSnapshot>)
+            .fileCancellation.outcome
+        : undefined;
+  return outcome?.kind === "completed" ? outcome.value : undefined;
 };
