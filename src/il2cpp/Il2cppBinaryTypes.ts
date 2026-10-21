@@ -2,7 +2,7 @@ import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import {
   readPointer,
   readUInt32,
-  isMapped,
+  hasPointerArrayCoverage,
   type NativeImage,
 } from "./Il2cppBinaryImage.js";
 import type {
@@ -167,7 +167,8 @@ const createTypeRenderer = (
     const count = u32(instance, "generic argument count");
     const argv = pointer(instance + 8n, "generic arguments");
     guard(Math.max(count - 1, 0) * 2);
-    if (!isMapped(image, argv, count * 8))
+    // The array may span adjacent loader ranges; each slot is read on its own.
+    if (!hasPointerArrayCoverage(image, argv, count))
       fail("generic argument array is not file mapped");
     const args: string[] = [];
     let bytes = Math.max(count - 1, 0) * 2;

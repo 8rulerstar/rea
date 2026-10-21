@@ -35,6 +35,8 @@ export interface Il2cppBinaryFixtureOptions {
   readonly namePrefix?: string;
   /** Write generic method registration tables (see FIXTURE_GENERIC_INSTANCES). */
   readonly genericMethods?: GenericMethodFixtureOptions;
+  /** Split the file into two adjacent segments at this file offset. */
+  readonly splitSegmentAt?: number;
 }
 
 export interface GenericMethodFixtureOptions {
@@ -123,26 +125,39 @@ export const createIl2cppBinaryFixture = (
   const bytes = Buffer.alloc(SIZE);
   const address = (offset: number) => FIXTURE_BINARY_BASE + BigInt(offset);
   const chained = options.chainedFixups === true;
-  // Mach-O 64-bit header: arm64 dylib with one or two load commands.
+  const split = options.splitSegmentAt;
+  // LC_SEGMENT_64 records, read-execute; a split gives two adjacent ones.
+  const segments: readonly [name: string, start: number, end: number][] =
+    split === undefined
+      ? [["__TEXT", 0, SIZE]]
+      : [
+          ["__TEXT", 0, split],
+          ["__DATA", split, SIZE],
+        ];
+  const commands = segments.length + (chained ? 1 : 0);
+  // Mach-O 64-bit header: arm64 dylib with its load commands.
   bytes.writeUInt32LE(0xfeedfacf, 0);
   bytes.writeUInt32LE(0x0100000c, 4);
   bytes.writeUInt32LE(6, 12);
-  bytes.writeUInt32LE(chained ? 2 : 1, 16);
-  bytes.writeUInt32LE(chained ? 72 + 16 : 72, 20);
-  // LC_SEGMENT_64 __TEXT mapping the whole file read-execute.
-  bytes.writeUInt32LE(0x19, 32);
-  bytes.writeUInt32LE(72, 36);
-  bytes.write("__TEXT", 40, "latin1");
-  bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE, 56);
-  bytes.writeBigUInt64LE(BigInt(SIZE), 64);
-  bytes.writeBigUInt64LE(0n, 72);
-  bytes.writeBigUInt64LE(BigInt(SIZE), 80);
-  bytes.writeUInt32LE(5, 88);
-  bytes.writeUInt32LE(5, 92);
+  bytes.writeUInt32LE(commands, 16);
+  bytes.writeUInt32LE(segments.length * 72 + (chained ? 16 : 0), 20);
+  segments.forEach(([name, start, end], index) => {
+    const at = 32 + index * 72;
+    bytes.writeUInt32LE(0x19, at);
+    bytes.writeUInt32LE(72, at + 4);
+    bytes.write(name, at + 8, "latin1");
+    bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + BigInt(start), at + 24);
+    bytes.writeBigUInt64LE(BigInt(end - start), at + 32);
+    bytes.writeBigUInt64LE(BigInt(start), at + 40);
+    bytes.writeBigUInt64LE(BigInt(end - start), at + 48);
+    bytes.writeUInt32LE(5, at + 56);
+    bytes.writeUInt32LE(5, at + 60);
+  });
   if (chained) {
     // linkedit_data_command pointing at an empty range.
-    bytes.writeUInt32LE(0x80000034, 104);
-    bytes.writeUInt32LE(16, 108);
+    const at = 32 + segments.length * 72;
+    bytes.writeUInt32LE(0x80000034, at);
+    bytes.writeUInt32LE(16, at + 4);
   }
   const names = options.imageNames ?? ["Assembly-CSharp.dll", "mscorlib.dll"];
   const nameAt: number[] = [];

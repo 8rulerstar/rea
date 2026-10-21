@@ -513,6 +513,26 @@ const genericFacts = (version: 24 | 27 | 31 | 39) =>
   readIl2cppMetadataForLinking(
     createIl2cppMetadataFixture({ version, genericOwners: true }).bytes,
   );
+it("allocates no generic container column, reading method containers on demand", () => {
+  // Only the per-row columns every link uses are typed arrays.
+  const { metadata: decoded, link } = genericFacts(31);
+  const columns = Object.entries(link)
+    .filter(([, value]) => ArrayBuffer.isView(value))
+    .map(([key]) => key)
+    .sort();
+  expect(columns).toEqual([
+    "fieldTypes",
+    "methodTokens",
+    "parameterTypes",
+    "returnTypes",
+  ]);
+  const count = decoded.methods.length;
+  expect(link.methodGenericContainer(-1)).toBeUndefined();
+  expect(link.methodGenericContainer(count)).toBeUndefined();
+  // ToString<int> (method 4) is generic; .ctor (method 3) is not.
+  expect(link.methodGenericContainer(3)).toBe(-1);
+  expect(link.methodGenericContainer(4)).toBeGreaterThanOrEqual(0);
+});
 const linkGeneric = (
   options: GenericMethodFixtureOptions = {},
   version: 24 | 27 | 31 | 39 = 31,
@@ -758,6 +778,36 @@ it.each<[string, GenericMethodFixtureOptions, string]>([
   expect(generic.issues).toEqual([{ row: 0, address: at(0xb80n), message }]);
 });
 
+it("keeps a method spec unnamed when its owner's container is out of range", () => {
+  // Method 4 (ToString<int>) points past the decoded generic containers.
+  const decoded = genericFacts(31);
+  const link = {
+    ...decoded.link,
+    methodGenericContainer: (index: number) =>
+      index === 4 ? 99 : decoded.link.methodGenericContainer(index),
+  };
+  const generic = linkIl2cppBinary(
+    createIl2cppBinaryFixture({ genericMethods: {} }),
+    decoded.metadata,
+    link,
+    undefined,
+    { genericInstances: true },
+  ).generic_methods!;
+  expect(generic.instances).toEqual([
+    FIXTURE_GENERIC_INSTANCES[0],
+    FIXTURE_GENERIC_INSTANCES[1],
+    { ...FIXTURE_GENERIC_INSTANCES[2], name: null, ...unknownRow },
+  ]);
+  expect(generic.issues).toEqual([
+    {
+      row: 2,
+      address: at(0xb80n + 24n),
+      message:
+        "method spec 2 gives method 4 1 generic arguments, but its generic container 99 is out of range",
+    },
+  ]);
+});
+
 it("keeps a generic slot with an unresolved relocation unknown", () => {
   // An ELF symbol relocation on slot 1 leaves its pointer unresolved.
   const bytes = createElfFixture(
@@ -797,6 +847,17 @@ it("keeps the other generic rows when one pointer slot is unmapped", () => {
       message: "genericMethodPointers slot 2 is not file mapped",
     },
   ]);
+});
+
+it("names generic instances whose argument array spans two segments", () => {
+  // <Größe<int>, int> keeps its arguments at 0xb68 and 0xb70, one per segment.
+  const bytes = createIl2cppBinaryFixture({
+    genericMethods: {},
+    splitSegmentAt: 0xb70,
+  });
+  const generic = linkGeneric({}, 31, bytes).generic_methods!;
+  expect(generic.instances).toEqual(FIXTURE_GENERIC_INSTANCES);
+  expect(generic.issues).toEqual([]);
 });
 
 it("returns no instances for an empty genericMethodTable without picking a layout", () => {

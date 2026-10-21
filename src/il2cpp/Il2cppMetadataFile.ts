@@ -610,19 +610,12 @@ function* readMethods({
       );
     if (linkFacts !== undefined) {
       const returnAt = at + 4 + widths.type_definition;
-      const tokenAt =
-        returnAt +
-        widths.type +
-        (methodReturnParameterToken ? 4 : 0) +
-        widths.parameter +
-        widths.generic_container;
       linkFacts.returnTypes[index] = readIndex(bytes, returnAt, widths.type);
-      linkFacts.methodGenericContainers[index] = readIndex(
-        bytes,
-        tokenAt - widths.generic_container,
-        widths.generic_container,
+      linkFacts.methodTokens[index] = bytes.readUInt32LE(
+        at +
+          methodContainerAt({ widths, methodReturnParameterToken }) +
+          widths.generic_container,
       );
-      linkFacts.methodTokens[index] = bytes.readUInt32LE(tokenAt);
     }
     parameterRanges.push({
       start: readIndex(
@@ -734,8 +727,6 @@ export interface Il2cppMetadataLinkFacts {
   readonly methodTokens: Uint32Array;
   /** Il2CppType table index of each method's return type. */
   readonly returnTypes: Int32Array;
-  /** GenericContainerIndex per method index; -1 for a non-generic method. */
-  readonly methodGenericContainers: Int32Array;
   readonly fieldTypes: Int32Array;
   readonly parameterTypes: Int32Array;
   /** Demand-read names from this stable metadata snapshot, by GenericParameterIndex. */
@@ -746,6 +737,11 @@ export interface Il2cppMetadataLinkFacts {
    */
   readonly typeGenericContainer: (index: number) => number | undefined;
   /**
+   * Demand-read GenericContainerIndex of a method definition: -1 for a
+   * non-generic method, undefined when the index is out of range.
+   */
+  readonly methodGenericContainer: (index: number) => number | undefined;
+  /**
    * Demand-read argument count and first GenericParameterIndex of a generic
    * container; undefined out of range and for the counted (version 39)
    * layout, whose container records are not decoded.
@@ -755,7 +751,18 @@ export interface Il2cppMetadataLinkFacts {
   ) => { readonly count: number; readonly parameterStart: number } | undefined;
 }
 
-/** Type-definition container indices and container records, read on demand. */
+/** Byte offset of GenericContainerIndex in a method record; the token follows. */
+const methodContainerAt = ({
+  widths,
+  methodReturnParameterToken,
+}: Pick<MetadataTables, "widths" | "methodReturnParameterToken">) =>
+  4 +
+  widths.type_definition +
+  widths.type +
+  (methodReturnParameterToken ? 4 : 0) +
+  widths.parameter;
+
+/** Type and method container indices and container records, read on demand. */
 const createGenericContainerReaders = (tables: MetadataTables) => {
   const types = tables.section("typeDefinitions"),
     typeCount = tables.counts.typeDefinitions,
@@ -771,7 +778,19 @@ const createGenericContainerReaders = (tables: MetadataTables) => {
       : Math.floor(containers.size / containerBytes);
   const inRange = (index: number, count: number) =>
     Number.isInteger(index) && index >= 0 && index < count;
+  const methods = tables.section("methods"),
+    methodCount = tables.counts.methods,
+    methodBytes = tables.recordBytes.methods,
+    methodAt = methodContainerAt(tables);
   return {
+    methodGenericContainer: (index: number): number | undefined =>
+      !inRange(index, methodCount)
+        ? undefined
+        : readIndex(
+            tables.bytes,
+            methods.offset + index * methodBytes + methodAt,
+            tables.widths.generic_container,
+          ),
     typeGenericContainer: (index: number): number | undefined =>
       tables.indexing === "counted" || !inRange(index, typeCount)
         ? undefined
@@ -890,7 +909,6 @@ function* readMetadataCoreSteps(
       linkFacts: {
         methodTokens: new Uint32Array(tables.counts.methods),
         returnTypes: new Int32Array(tables.counts.methods),
-        methodGenericContainers: new Int32Array(tables.counts.methods),
         fieldTypes: new Int32Array(tables.members.counts.fields),
         parameterTypes: new Int32Array(tables.members.counts.parameters),
         genericParameterName: createGenericParameterReader(tables),

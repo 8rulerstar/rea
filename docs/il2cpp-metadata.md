@@ -315,8 +315,8 @@ real build, so it is refused rather than guessed.
 After the layout is fixed, rows that contradict another table do not fail the
 whole link: a method spec naming a method or generic instance out of range,
 class or method arguments whose count differs from the generic container the
-owner declares (none for a non-generic type or method), a name that cannot be
-rendered, or a pointer slot that is unmapped, has an
+owner declares (none for a non-generic type or method), an owner whose generic
+container index is out of range, a name that cannot be rendered, or a pointer slot that is unmapped, has an
 unresolved relocation or points outside unambiguous executable file data adds
 an `issues` entry, and that row is `unknown` with no address. A method spec
 issue also leaves `name` `null`, even when the pointer slot is valid: the slot

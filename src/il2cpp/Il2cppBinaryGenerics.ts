@@ -267,8 +267,11 @@ export function* linkGenericMethodsSteps(
     const given = readUInt32(image, instance);
     const declared =
       container === -1 ? 0 : facts.genericContainer(container)?.count;
-    return given === null || declared === undefined || given === declared
-      ? null
+    if (given === null || given === declared) return null;
+    // Versions with generic linking decode every container record, so a miss
+    // is a damaged index, not an unread layout.
+    return declared === undefined
+      ? `gives ${kind} ${owner} ${given} generic arguments, but its generic container ${container} is out of range`
       : `gives ${kind} ${owner} ${given} generic arguments, but it declares ${declared}`;
   };
   const unknown = { state: "unknown", address: null, rva: null } as const;
@@ -328,7 +331,7 @@ export function* linkGenericMethodsSteps(
           argumentMismatch(
             "method",
             method,
-            facts.methodGenericContainers[method],
+            facts.methodGenericContainer(method),
             methodInstance,
           );
         if (mismatch !== null)
