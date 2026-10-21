@@ -106,8 +106,6 @@ export type ProcessIdentityObservation =
     }
   | { readonly state: "unavailable"; readonly reason: string };
 
-export type { ProcessLifecycleObservation } from "./ProcessLifecycle.js";
-
 /** Parent and process-group membership from the same native identity read. */
 export type ProcessNativeRelationObservation =
   | {
@@ -328,6 +326,13 @@ const mergeUnverifiedObservations = (
   return { ...result, unverified: merged };
 };
 
+/**
+ * Times one group may be revalidated in a single cleanup. The second pass
+ * covers a group that reappears after it was already processed. Another
+ * appearance stays unresolved instead of reporting success.
+ */
+const OWNED_GROUP_REVALIDATION_LIMIT = 2;
+
 /** Token-validate every rooted POSIX process group before signaling any. */
 export const cleanupOwnedProcessGroup = async (
   ownership: OwnedProcessGroup,
@@ -360,7 +365,7 @@ export const cleanupOwnedProcessGroup = async (
       return mergeUnverifiedObservations(
         {
           cleaned: false,
-          reason: `owned process group ${String(processGroupId)} reappeared after revalidation`,
+          reason: `owned process group ${String(processGroupId)} reappeared after ${String(OWNED_GROUP_REVALIDATION_LIMIT)} revalidation passes. This release has no runtime override.`,
         },
         plan.unverified,
       );
@@ -380,7 +385,7 @@ export const cleanupOwnedProcessGroup = async (
         return mergeUnverifiedObservations(
           {
             cleaned: false,
-            reason: `owned process group ${String(groupId)} reappeared after revalidation`,
+            reason: `owned process group ${String(groupId)} reappeared after ${String(OWNED_GROUP_REVALIDATION_LIMIT)} revalidation passes. This release has no runtime override.`,
           },
           plan.unverified,
         );
@@ -632,13 +637,6 @@ const isExitRefreshCandidate = (
 };
 
 /**
- * Times one group may be revalidated in a single cleanup. The second pass
- * covers a group that reappears after it was already processed. Another
- * appearance stays unresolved instead of reporting success.
- */
-const OWNED_GROUP_REVALIDATION_LIMIT = 2;
-
-/**
  * Token-check rows that exist only in the post-exit table. A prior PID, group,
  * or ancestry link is handled by the caller; these rows have none of those.
  * Foreign tokens are not owned. A matching token authorizes only a group whose
@@ -716,8 +714,7 @@ const classifyUnlinkedExitRows = async (
     if (confirmations > EXIT_REFRESH_CONFIRMATION_LIMIT)
       return {
         kind: "uncertain",
-        reason:
-          "process ownership could not be revalidated: exit refresh confirmation limit exceeded",
+        reason: `process ownership could not be revalidated: the exit refresh confirmation limit of ${String(EXIT_REFRESH_CONFIRMATION_LIMIT)} reads was exceeded. This release has no runtime override.`,
       };
     // The confirmation read is its own table. A PID classified on the previous
     // table, including a readable foreign token, does not identify the process
