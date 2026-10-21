@@ -33,7 +33,62 @@ export interface Il2cppBinaryFixtureOptions {
   readonly namePadding?: number;
   /** Text written directly before mscorlib.dll, making it the tail of a longer name. */
   readonly namePrefix?: string;
+  /** Write generic method registration tables (see FIXTURE_GENERIC_INSTANCES). */
+  readonly genericMethods?: GenericMethodFixtureOptions;
 }
+
+export interface GenericMethodFixtureOptions {
+  /** 16 writes the 27.1+ layout (genericAdjustorThunks); 12 the 27.0 layout. */
+  readonly stride?: 12 | 16;
+  /** Omit CodeRegistration's generic fields, leaving no layout to agree. */
+  readonly codeRegistration?: boolean;
+  /** methodIndex of row 0; 3 or more is past genericMethodPointersCount. */
+  readonly firstPointerSlot?: number;
+  /** methodDefinitionIndex of method spec 0. */
+  readonly firstSpecMethod?: number;
+  /** classIndexIndex of method spec 0; 2 or more is past genericInstsCount. */
+  readonly firstSpecClass?: number;
+  /** Point row 2 at method spec 0 as well. */
+  readonly duplicateSpec?: boolean;
+  /** Pointer written in slot 0 instead of a code address. */
+  readonly firstSlot?: bigint;
+  /** Write genericMethodTableCount 0, as a build without generic instances. */
+  readonly emptyTable?: boolean;
+}
+
+/**
+ * Generic instances the fixture's genericMethodTable resolves to, by row:
+ * a class instance of System.Größe, a method instance on a nested type whose
+ * code is folded with metadata method 0, and a row without code. Row
+ * position is the genericMethodTable index.
+ */
+const code = (offset: bigint) => ({
+  state: "code" as const,
+  address: `0x${(FIXTURE_BINARY_BASE + offset).toString(16)}`,
+  rva: `0x${offset.toString(16)}`,
+});
+export const FIXTURE_GENERIC_INSTANCES = [
+  {
+    method_spec: 0,
+    method: 3,
+    name: "System.Größe<int>$$.ctor",
+    ...code(0x240n),
+  },
+  {
+    method_spec: 1,
+    method: 2,
+    name: "Game.Player.Slot$$Add<Größe<int>, int>",
+    ...code(0x200n),
+  },
+  {
+    method_spec: 2,
+    method: 4,
+    name: "System.Größe$$ToString<int>",
+    state: "no-body" as const,
+    address: null,
+    rva: null,
+  },
+];
 
 /** Every fixture method returns type 0, an array of a generic instance. */
 export const FIXTURE_RETURN_TYPE_NAME = "System.Größe<int>[]";
@@ -51,6 +106,12 @@ const MODULES = 0x400;
 const MODULE_ARRAY = 0x500;
 const REGISTRATION = 0x600;
 const DUPLICATE = 0x700;
+const GENERIC_INST_POINTERS = 0xb00;
+const GENERIC_INST_RECORDS = 0xb20;
+const GENERIC_INST_ARGUMENTS = 0xb60;
+const METHOD_SPECS = 0xb80;
+const GENERIC_METHOD_TABLE = 0xbc0;
+const GENERIC_METHOD_POINTERS = 0xd00;
 
 export const createIl2cppBinaryFixture = (
   options: Il2cppBinaryFixtureOptions = {},
@@ -157,7 +218,82 @@ export const createIl2cppBinaryFixture = (
     word(12, 4n);
     word(13, address(TYPE_POINTERS));
   }
+  if (options.genericMethods !== undefined)
+    writeGenericMethods(bytes, address, options.genericMethods);
   return bytes;
+};
+
+const writeGenericMethods = (
+  bytes: Buffer,
+  address: (offset: number) => bigint,
+  options: GenericMethodFixtureOptions,
+) => {
+  const stride = options.stride ?? 16;
+  // Il2CppGenericInst records: <int> and <Größe<int>, int>.
+  const intType = address(TYPE_RECORDS + 48);
+  const instanceType = address(TYPE_RECORDS + 16);
+  const instances = [[intType], [instanceType, intType]];
+  let argument = GENERIC_INST_ARGUMENTS;
+  instances.forEach((args, index) => {
+    const record = GENERIC_INST_RECORDS + index * 16;
+    bytes.writeBigUInt64LE(address(record), GENERIC_INST_POINTERS + index * 8);
+    bytes.writeBigUInt64LE(BigInt(args.length), record);
+    bytes.writeBigUInt64LE(address(argument), record + 8);
+    for (const type of args) {
+      bytes.writeBigUInt64LE(type, argument);
+      argument += 8;
+    }
+  });
+  // Il2CppMethodSpec: methodDefinitionIndex, classIndexIndex, methodIndexIndex.
+  const specs = [
+    [options.firstSpecMethod ?? 3, options.firstSpecClass ?? 0, -1],
+    [2, -1, 1],
+    [4, -1, 0],
+  ];
+  specs.forEach((spec, index) =>
+    spec.forEach((value, field) =>
+      bytes.writeInt32LE(value, METHOD_SPECS + index * 12 + field * 4),
+    ),
+  );
+  // genericMethodIndex, methodIndex, invokerIndex (and adjustorThunk).
+  const rows = [
+    [0, options.firstPointerSlot ?? 0, 0],
+    [1, 1, 3],
+    [options.duplicateSpec === true ? 0 : 2, 2, -1],
+  ];
+  rows.forEach((row, index) =>
+    row.forEach((value, field) =>
+      bytes.writeInt32LE(
+        value,
+        GENERIC_METHOD_TABLE + index * stride + field * 4,
+      ),
+    ),
+  );
+  const slots = [options.firstSlot ?? address(0x240), address(0x200), 0n];
+  slots.forEach((slot, index) =>
+    bytes.writeBigUInt64LE(slot, GENERIC_METHOD_POINTERS + index * 8),
+  );
+  const metadataWord = (slot: number, value: bigint) =>
+    bytes.writeBigUInt64LE(value, METADATA_REGISTRATION + slot * 8);
+  metadataWord(2, BigInt(instances.length));
+  metadataWord(3, address(GENERIC_INST_POINTERS));
+  metadataWord(4, options.emptyTable === true ? 0n : BigInt(rows.length));
+  metadataWord(5, address(GENERIC_METHOD_TABLE));
+  metadataWord(8, BigInt(specs.length));
+  metadataWord(9, address(METHOD_SPECS));
+  if (options.codeRegistration === false) return;
+  // CodeRegistration ends at codeGenModulesCount (REGISTRATION): 104 bytes
+  // before it in the 27.1+ layout, 96 in the 27.0 layout.
+  const start = REGISTRATION - (stride === 16 ? 104 : 96);
+  const codeWord = (offset: number, value: bigint) =>
+    bytes.writeBigUInt64LE(value, start + offset);
+  // A build without generic instances records no pointers and a null array,
+  // which leaves every candidate layout readable.
+  const empty = options.emptyTable === true;
+  codeWord(16, empty ? 0n : BigInt(slots.length));
+  codeWord(24, empty ? 0n : address(GENERIC_METHOD_POINTERS));
+  // invokerPointersCount follows genericAdjustorThunks when rows carry one.
+  codeWord(stride === 16 ? 40 : 32, 4n);
 };
 
 /** Wrap thin Mach-O slices in a 32-bit universal header, page aligned. */

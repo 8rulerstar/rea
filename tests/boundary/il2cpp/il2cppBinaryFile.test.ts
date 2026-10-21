@@ -11,7 +11,9 @@ import {
   createUniversalFixture,
   createSplitPointerPeFixture,
   FIXTURE_BINARY_BASE,
+  FIXTURE_GENERIC_INSTANCES,
   FIXTURE_METHOD_ADDRESSES,
+  type GenericMethodFixtureOptions,
   FIXTURE_RETURN_TYPE_NAME,
   type Il2cppBinaryFixtureOptions,
 } from "../../fixtures/il2cpp/binary.js";
@@ -496,4 +498,246 @@ it("reads type attributes without requiring file-backed alignment padding", () =
   expect(link(bytes).return_types.map((row) => row.name)).toEqual(
     Array.from({ length: 5 }, () => "int"),
   );
+});
+
+const genericFacts = (version: 24 | 27 | 31 | 39) =>
+  readIl2cppMetadataForLinking(createIl2cppMetadataFixture({ version }).bytes);
+const linkGeneric = (
+  options: GenericMethodFixtureOptions = {},
+  version: 24 | 27 | 31 | 39 = 31,
+  bytes = createIl2cppBinaryFixture({ genericMethods: options }),
+) => {
+  const decoded = genericFacts(version);
+  return linkIl2cppBinary(bytes, decoded.metadata, decoded.link, undefined, {
+    genericInstances: true,
+  });
+};
+const genericFailure = (
+  options: GenericMethodFixtureOptions,
+  version: 24 | 27 | 31 | 39 = 31,
+) => {
+  try {
+    linkGeneric(options, version);
+  } catch (cause) {
+    if (cause instanceof Il2cppBinaryFormatFailure)
+      return { reason: cause.reason, kind: cause.kind };
+    throw cause;
+  }
+  throw new Error("expected a link failure");
+};
+const at = (offset: bigint) =>
+  `0x${(FIXTURE_BINARY_BASE + offset).toString(16)}`;
+const unknownRow = { state: "unknown", address: null, rva: null } as const;
+// Smallest serialized generic row, reserved per table entry before resolving.
+const minimumGenericRow = JSON.stringify({
+  ...unknownRow,
+  method_spec: 0,
+  method: 0,
+  name: null,
+}).length;
+
+it("links generic method instances only when asked", () => {
+  // Not requested is unknown, not an empty table.
+  expect(
+    link(createIl2cppBinaryFixture({ genericMethods: {} })).generic_methods,
+  ).toBeNull();
+  const linked = linkGeneric();
+  expect(linked.method_addresses).toEqual(expectedAddresses);
+  expect(linked.generic_methods).toEqual({
+    generic_method_pointers_field: FIXTURE_BINARY_BASE + 0x600n - 104n + 16n,
+    generic_method_pointers_count: 3,
+    generic_method_table: FIXTURE_BINARY_BASE + 0xbc0n,
+    generic_method_table_count: 3,
+    generic_method_table_stride: 16,
+    method_specs_count: 3,
+    generic_insts_count: 2,
+    instances: FIXTURE_GENERIC_INSTANCES,
+    issues: [],
+  });
+});
+
+it("admits every generic row and issue before retention", () => {
+  const decoded = genericFacts(31);
+  const rows: Readonly<Record<string, unknown>>[] = [];
+  const reserved: number[] = [];
+  linkIl2cppBinary(
+    createIl2cppBinaryFixture({ genericMethods: { firstSpecMethod: 9 } }),
+    decoded.metadata,
+    decoded.link,
+    undefined,
+    {
+      genericInstances: true,
+      onRow: (row) => rows.push(row),
+      beforeText: (bytes) => reserved.push(bytes),
+    },
+  );
+  // The whole table is reserved before the first row is resolved.
+  expect(reserved).toContain(3 * minimumGenericRow);
+  expect(rows.filter((row) => "method_spec" in row)).toHaveLength(3);
+  expect(rows).toContainEqual({
+    address: at(0xb80n),
+    message: "method spec 0 names method 9 outside the 5 metadata methods",
+  });
+  // A refused reservation stops before any generic row is retained.
+  const refused: unknown[] = [];
+  expect(() =>
+    linkIl2cppBinary(
+      createIl2cppBinaryFixture({ genericMethods: {} }),
+      decoded.metadata,
+      decoded.link,
+      undefined,
+      {
+        genericInstances: true,
+        onRow: (row) => refused.push(row),
+        beforeText: (bytes) => {
+          if (bytes === 3 * minimumGenericRow) throw new Error("budget");
+        },
+      },
+    ),
+  ).toThrow("budget");
+  expect(
+    refused.some(
+      (row) => typeof row === "object" && row !== null && "method_spec" in row,
+    ),
+  ).toBe(false);
+});
+
+it("selects the 27.0 layout by its 12-byte rows and agreeing counts", () => {
+  const linked = linkGeneric({ stride: 12 }, 27);
+  expect(linked.generic_methods).toMatchObject({
+    generic_method_pointers_field: FIXTURE_BINARY_BASE + 0x600n - 96n + 16n,
+    generic_method_table_stride: 12,
+    instances: FIXTURE_GENERIC_INSTANCES,
+  });
+  // Header version 27 also covers 27.1 and 27.2, which add adjustor thunks.
+  expect(linkGeneric({ stride: 16 }, 27).generic_methods).toMatchObject({
+    generic_method_pointers_field: FIXTURE_BINARY_BASE + 0x600n - 104n + 16n,
+    generic_method_table_stride: 16,
+    instances: FIXTURE_GENERIC_INSTANCES,
+  });
+  // Version 31 has no 12-byte-row layout to try.
+  expect(genericFailure({ stride: 12 }, 31).reason).toBe(
+    "generic-method-registration-not-found",
+  );
+});
+
+it.each<
+  [string, GenericMethodFixtureOptions, 24 | 27 | 31 | 39, string, string]
+>([
+  [
+    "a binary without CodeRegistration generic fields",
+    { codeRegistration: false },
+    31,
+    "generic-method-registration-not-found",
+    "malformed",
+  ],
+  [
+    "a row past genericMethodPointersCount",
+    { firstPointerSlot: 3 },
+    31,
+    "generic-method-registration-not-found",
+    "malformed",
+  ],
+  [
+    // Its type-definition container offset and generic class layout are
+    // unchecked, although a 24.2 CodeRegistration layout would agree here.
+    "metadata version 24",
+    { stride: 12 },
+    24,
+    "generic-methods-unsupported",
+    "unsupported",
+  ],
+  ["metadata version 39", {}, 39, "generic-methods-unsupported", "unsupported"],
+])("refuses generic linking for %s", (_, options, version, reason, kind) => {
+  expect(genericFailure(options, version)).toEqual({ reason, kind });
+});
+
+it("keeps contradicting rows unknown and reports the record address", () => {
+  const issues = (options: GenericMethodFixtureOptions) => {
+    const generic = linkGeneric(options).generic_methods!;
+    return { first: generic.instances[0], issues: generic.issues };
+  };
+  expect(issues({ firstSpecMethod: 9 })).toEqual({
+    first: { ...FIXTURE_GENERIC_INSTANCES[0], method: 9, name: null },
+    issues: [
+      {
+        address: at(0xb80n),
+        message: "method spec 0 names method 9 outside the 5 metadata methods",
+      },
+    ],
+  });
+  expect(issues({ firstSpecClass: 2 })).toEqual({
+    first: { ...FIXTURE_GENERIC_INSTANCES[0], name: null },
+    issues: [
+      {
+        address: at(0xb80n),
+        message:
+          "method spec 0 names generic instances 2 and -1, outside the 2 readable genericInsts",
+      },
+    ],
+  });
+  const outside = FIXTURE_BINARY_BASE + 0x10000n;
+  expect(issues({ firstSlot: outside })).toEqual({
+    first: { ...FIXTURE_GENERIC_INSTANCES[0], ...unknownRow },
+    issues: [
+      {
+        address: at(0xd00n),
+        message: `genericMethodPointers slot 0 points outside unambiguous executable file data at 0x${outside.toString(16)}`,
+      },
+    ],
+  });
+  // Il2CppDumper keys pointers by method spec and refuses a second row, so
+  // neither row's name or address is kept.
+  const duplicate = linkGeneric({ duplicateSpec: true }).generic_methods!;
+  expect(
+    duplicate.instances.map(({ name, state }) => ({ name, state })),
+  ).toEqual([
+    { name: null, state: "unknown" },
+    { name: FIXTURE_GENERIC_INSTANCES[1]!.name, state: "code" },
+    { name: null, state: "unknown" },
+  ]);
+  expect(duplicate.issues).toEqual(
+    [0n, 32n].map((offset) => ({
+      address: at(0xbc0n + offset),
+      message: "genericMethodTable rows 0, 2 resolve the same method spec 0",
+    })),
+  );
+});
+
+it("keeps a generic slot with an unresolved relocation unknown", () => {
+  // An ELF symbol relocation on slot 1 leaves its pointer unresolved.
+  const bytes = createElfFixture(
+    createIl2cppBinaryFixture({ genericMethods: {} }),
+  );
+  const dynamic = Number(bytes.readBigUInt64LE(128));
+  const relocationBytes = Number(bytes.readBigUInt64LE(dynamic + 24));
+  for (let entry = 0x1000; entry < 0x1000 + relocationBytes; entry += 24)
+    if (bytes.readBigUInt64LE(entry) === FIXTURE_BINARY_BASE + 0xd08n)
+      bytes.writeBigUInt64LE((1n << 32n) | 1025n, entry + 8);
+  const generic = linkGeneric({}, 31, bytes).generic_methods!;
+  expect(generic.instances[1]).toEqual({
+    ...FIXTURE_GENERIC_INSTANCES[1],
+    ...unknownRow,
+  });
+  expect(generic.issues).toEqual([
+    {
+      address: at(0xd08n),
+      message: "genericMethodPointers slot 1 has an unresolved relocation",
+    },
+  ]);
+});
+
+it("returns no instances for an empty genericMethodTable without picking a layout", () => {
+  // With no rows every readable layout bounds the table, so none is chosen.
+  expect(linkGeneric({ emptyTable: true }).generic_methods).toEqual({
+    generic_method_pointers_field: null,
+    generic_method_pointers_count: null,
+    generic_method_table: FIXTURE_BINARY_BASE + 0xbc0n,
+    generic_method_table_count: 0,
+    generic_method_table_stride: null,
+    method_specs_count: 3,
+    generic_insts_count: 2,
+    instances: [],
+    issues: [],
+  });
 });

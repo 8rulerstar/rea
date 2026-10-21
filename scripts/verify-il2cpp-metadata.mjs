@@ -132,6 +132,8 @@ try {
       return_types: null,
       field_types: null,
       parameter_types: null,
+      generic_method_instances: null,
+      generic_method_instance_states: null,
     });
     const page = analysisViewResultSchema.parse(
       (

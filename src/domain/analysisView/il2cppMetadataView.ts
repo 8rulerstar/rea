@@ -11,6 +11,7 @@ import {
   il2cppMetadataParameterSchema,
   il2cppMetadataStringLiteralSchema,
   il2cppMethodAddressSchema,
+  il2cppGenericMethodInstanceSchema,
   il2cppBinaryLinkSchema,
   il2cppCodeGenModuleSchema,
   il2cppTypeReferenceSchema,
@@ -56,6 +57,16 @@ const countsSchema = z.strictObject({
   return_types: z.number().int().nonnegative().nullable(),
   field_types: z.number().int().nonnegative().nullable(),
   parameter_types: z.number().int().nonnegative().nullable(),
+  /** Null unless generic_instances was requested, or before it was collected. */
+  generic_method_instances: z.number().int().nonnegative().nullable(),
+  /** generic_method_instances rows per state; null as above. */
+  generic_method_instance_states: z
+    .strictObject({
+      code: z.number().int().nonnegative(),
+      no_body: z.number().int().nonnegative(),
+      unknown: z.number().int().nonnegative(),
+    })
+    .nullable(),
 });
 
 export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
@@ -73,11 +84,14 @@ export const il2cppMetadataSummarySchema = il2cppMetadataObjectSchema
     return_types: true,
     field_types: true,
     parameter_types: true,
+    generic_method_instances: true,
     binary: true,
   })
   .extend({
+    // Links retained before generic instances existed omit generic_methods.
     binary: il2cppBinaryLinkSchema
       .omit({ code_gen_modules: true })
+      .partial({ generic_methods: true })
       .nullable()
       .optional(),
     counts: countsSchema,
@@ -105,6 +119,9 @@ const methodAddressRowSchema = il2cppMethodAddressSchema.extend({
   index: indexSchema,
 });
 const typeReferenceRowSchema = il2cppTypeReferenceSchema.extend({
+  index: indexSchema,
+});
+const genericInstanceRowSchema = il2cppGenericMethodInstanceSchema.extend({
   index: indexSchema,
 });
 const codeGenModuleRowSchema = il2cppCodeGenModuleSchema.extend({
@@ -174,6 +191,15 @@ export const il2cppMetadataViewRequestSchema = z.discriminatedUnion(
       fields: z.array(methodAddressRowSchema.keyof()).optional(),
     }),
     z.strictObject({
+      ...page,
+      collection: z.literal("generic_method_instances"),
+      /** Metadata method indices of the generic definitions. */
+      method_indices: z.array(indexSchema).optional(),
+      addresses: z.array(z.string().regex(/^0x[0-9a-fA-F]{1,16}$/u)).optional(),
+      states: z.array(il2cppGenericMethodInstanceSchema.shape.state).optional(),
+      fields: z.array(genericInstanceRowSchema.keyof()).optional(),
+    }),
+    z.strictObject({
       ...indexPage,
       collection: z.literal("code_gen_modules"),
       image_indices: z.array(indexSchema).optional(),
@@ -207,6 +233,7 @@ export const il2cppMetadataViewItemsSchema = z.union([
   z.array(methodAddressRowSchema.partial().required({ index: true })),
   z.array(typeReferenceRowSchema.partial().required({ index: true })),
   z.array(codeGenModuleRowSchema.partial().required({ index: true })),
+  z.array(genericInstanceRowSchema.partial().required({ index: true })),
 ]);
 
 export const il2cppMetadataViewContextSchema = z.strictObject({
@@ -290,6 +317,17 @@ const parseMetadataReport = (
         report.binary == null ? null : (report.field_types?.length ?? null),
       parameter_types:
         report.binary == null ? null : (report.parameter_types?.length ?? null),
+      generic_method_instances: report.generic_method_instances?.length ?? null,
+      generic_method_instance_states:
+        report.generic_method_instances?.reduce(
+          (states, row) => {
+            if (row.state === "code") states.code++;
+            else if (row.state === "no-body") states.no_body++;
+            else states.unknown++;
+            return states;
+          },
+          { code: 0, no_body: 0, unknown: 0 },
+        ) ?? null,
     },
   };
   if (reusable) checkedReports.set(key, checked);
@@ -332,20 +370,26 @@ const selection = (view: Request, report: Report) => {
       ? undefined
       : new Set(view.declaring_types);
   const addresses =
-    view.collection === "method_addresses" && view.addresses !== undefined
+    (view.collection === "method_addresses" ||
+      view.collection === "generic_method_instances") &&
+    view.addresses !== undefined
       ? new Set(view.addresses.map((value) => BigInt(value).toString(16)))
       : undefined;
   const states =
-    view.collection === "method_addresses" && view.states !== undefined
+    (view.collection === "method_addresses" ||
+      view.collection === "generic_method_instances") &&
+    view.states !== undefined
       ? new Set<string>(view.states)
       : undefined;
   const methods =
     (view.collection === "parameters" ||
-      view.collection === "parameter_types") &&
+      view.collection === "parameter_types" ||
+      view.collection === "generic_method_instances") &&
     view.method_indices !== undefined
       ? new Set(view.method_indices)
       : undefined;
-  // A parameter type row is owned by the method of the parameter at its index.
+  // A parameter type row is owned by the method of the parameter at its
+  // index; parameter and generic instance rows name their method.
   const parameterOwner = (row: Row, index: number) =>
     "method" in row
       ? row.method
@@ -454,7 +498,7 @@ export const projectIl2cppMetadataView = (
           path: ["view"],
           reason: "invalid_value",
           message:
-            "IL2CPP metadata Evidence supports summary and selected sections, images, types, methods, member, parameter, string literal, method address and type reference pages.",
+            "IL2CPP metadata Evidence supports summary and selected sections, images, types, methods, member, parameter, string literal, method address, type reference and generic method instance pages.",
         },
       ]),
     );
@@ -491,6 +535,7 @@ export const projectIl2cppMetadataView = (
     return_types,
     field_types,
     parameter_types,
+    generic_method_instances,
     ...identity
   } = report;
   const allRows = {
@@ -508,6 +553,7 @@ export const projectIl2cppMetadataView = (
     return_types,
     field_types,
     parameter_types,
+    generic_method_instances,
   };
   const shared = {
     parent_evidence_id: parent.evidenceId,
@@ -530,9 +576,20 @@ export const projectIl2cppMetadataView = (
           (name) =>
             `Retained Evidence did not collect ${name}; its count is unknown. Reinspect the metadata to acquire these facts.`,
         ),
+      ...(report.binary != null && report.generic_method_instances === undefined
+        ? [
+            "Retained Evidence did not collect generic_method_instances; its count is unknown. Reinspect with generic_instances to acquire these facts.",
+          ]
+        : report.generic_method_instances === null
+          ? [
+              "Generic method instances were not requested; their count is unknown.",
+            ]
+          : []),
       report.binary == null
         ? "Names come from unencrypted metadata only; native code addresses and runtime registration remain unknown."
-        : "Addresses come from static binary tables; runtime behavior and generic instance code remain unknown.",
+        : report.binary.generic_methods == null
+          ? "Addresses come from static binary tables; runtime behavior and generic instance code remain unknown."
+          : "Addresses come from static binary tables; runtime behavior and generic instances outside genericMethodTable remain unknown.",
       ...(parent.subject == null
         ? [
             "The parent has no recorded subject; its normalized artifact identity cannot be cross-checked against a subject digest.",
@@ -566,6 +623,17 @@ export const projectIl2cppMetadataView = (
       "parameter_types",
     ].includes(view.collection);
   const rows = nativeUnavailable ? undefined : allRows[view.collection];
+  if (rows === null)
+    return err(
+      analysisViewInputError([
+        {
+          path: ["view", "collection"],
+          reason: "invalid_value",
+          message:
+            "Generic method instances were not requested for this Evidence, so they are unknown; inspect again with generic_instances and binary_path.",
+        },
+      ]),
+    );
   if (rows === undefined)
     return err(
       analysisViewInputError([

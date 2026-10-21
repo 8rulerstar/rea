@@ -1,0 +1,361 @@
+import type { Il2cppGenericMethodInstance } from "../domain/il2cpp/il2cppMetadata.js";
+import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
+import {
+  hasPointerArrayCoverage,
+  isExecutable,
+  readPointer,
+  readSlot,
+  readUInt32,
+  type NativeImage,
+} from "./Il2cppBinaryImage.js";
+import { createMethodSpecNamer } from "./Il2cppBinaryTypes.js";
+import type { Il2cppBinaryReadOptions } from "./Il2cppBinaryFile.js";
+import type {
+  Il2cppMetadataDecoded,
+  Il2cppMetadataLinkFacts,
+} from "./Il2cppMetadataFile.js";
+
+/** A record that contradicts another table, located by the record's address. */
+export interface Il2cppGenericMethodIssue {
+  readonly address: string;
+  readonly message: string;
+}
+
+/** Registration facts and rows of the linked genericMethodTable. */
+export interface Il2cppGenericMethodLink {
+  /**
+   * Address of CodeRegistration's genericMethodPointersCount field; null with
+   * its count and the row stride when the table is empty, since no row then
+   * tells the candidate layouts apart.
+   */
+  readonly generic_method_pointers_field: bigint | null;
+  readonly generic_method_pointers_count: number | null;
+  readonly generic_method_table: bigint;
+  readonly generic_method_table_count: number;
+  /** Bytes per genericMethodTable row: 12, or 16 with adjustor thunk indices. */
+  readonly generic_method_table_stride: 12 | 16 | null;
+  readonly method_specs_count: number;
+  readonly generic_insts_count: number;
+  /** Report rows; position is the genericMethodTable index. */
+  readonly instances: Il2cppGenericMethodInstance[];
+  readonly issues: Il2cppGenericMethodIssue[];
+}
+
+/**
+ * Distance from CodeRegistration's start to codeGenModulesCount, with the
+ * genericMethodTable row size each layout implies (Il2CppDumper's
+ * Il2CppCodeRegistration): 27.0 = 96, 27.1/27.2/29 = 104
+ * (genericAdjustorThunks), 29.1/31 = 120 (unresolved call pointers). Header
+ * versions do not separate these minor versions, so every listed layout is
+ * tried and exactly one must agree with the tables. Version 24 is left out:
+ * its type-definition container offset and generic class layout are unchecked
+ * against a real build. Version 39 container records are not decoded.
+ */
+const CODE_REGISTRATION_LAYOUTS: Readonly<
+  Record<
+    number,
+    readonly { readonly modules: number; readonly stride: 12 | 16 }[]
+  >
+> = {
+  27: [
+    { modules: 96, stride: 12 },
+    { modules: 104, stride: 16 },
+  ],
+  29: [
+    { modules: 104, stride: 16 },
+    { modules: 120, stride: 16 },
+  ],
+  31: [
+    { modules: 104, stride: 16 },
+    { modules: 120, stride: 16 },
+  ],
+};
+
+/** Refuse an undecoded version before any binary table is read. */
+export const genericMethodLayouts = (version: number) => {
+  const layouts = CODE_REGISTRATION_LAYOUTS[version];
+  if (layouts === undefined)
+    throw new Il2cppBinaryFormatFailure(
+      "generic-methods-unsupported",
+      `generic method instances are not decoded for metadata version ${version}`,
+    );
+  return layouts;
+};
+
+/** Bounds a count read from the image before anything is reserved for it. */
+const GENERIC_TABLE_LIMIT = 0x1000000;
+/** Smallest serialized instance row; admitted per row before allocation. */
+const MINIMUM_ROW_BYTES = JSON.stringify({
+  state: "unknown",
+  address: null,
+  rva: null,
+  method_spec: 0,
+  method: 0,
+  name: null,
+}).length;
+const BATCH = 256;
+
+const hex = (value: bigint) => `0x${value.toString(16)}`;
+
+/**
+ * Resolve every genericMethodTable row the way Il2CppDumper does:
+ * genericMethodIndex selects an Il2CppMethodSpec, whose method definition and
+ * class/method Il2CppGenericInst give the name, and indices.methodIndex
+ * selects the genericMethodPointers slot. The CodeRegistration layout is the
+ * one candidate whose pointer, invoker and table counts bound every row.
+ */
+export function* linkGenericMethodsSteps(
+  image: NativeImage,
+  metadata: Il2cppMetadataDecoded,
+  facts: Il2cppMetadataLinkFacts,
+  modulesField: bigint | null,
+  metadataRegistration: bigint,
+  options: Il2cppBinaryReadOptions,
+): Generator<void, Il2cppGenericMethodLink> {
+  const version = metadata.metadata_version;
+  const layouts = genericMethodLayouts(version);
+  if (modulesField === null)
+    throw new Il2cppBinaryFormatFailure(
+      "generic-methods-unsupported",
+      "this binary keeps no static CodeRegistration, so genericMethodPointers cannot be located",
+    );
+  const word = (address: bigint) => readPointer(image, address);
+  const count = (address: bigint) => {
+    const value = word(address);
+    return value === null || value > BigInt(GENERIC_TABLE_LIMIT)
+      ? null
+      : Number(value);
+  };
+  // Int32 record fields; null when not file backed or zero filled.
+  const i32 = (address: bigint) => {
+    const value = readUInt32(image, address);
+    return value === null ? null : value | 0;
+  };
+  const genericInstsCount = count(metadataRegistration + 16n);
+  const genericInsts = word(metadataRegistration + 24n);
+  const tableCount = count(metadataRegistration + 32n);
+  const table = word(metadataRegistration + 40n);
+  const specsCount = count(metadataRegistration + 64n);
+  const specs = word(metadataRegistration + 72n);
+  if (
+    genericInstsCount === null ||
+    genericInsts === null ||
+    tableCount === null ||
+    table === null ||
+    specsCount === null ||
+    specs === null ||
+    (genericInstsCount > 0 &&
+      !hasPointerArrayCoverage(image, genericInsts, genericInstsCount))
+  )
+    throw new Il2cppBinaryFormatFailure(
+      "generic-method-registration-not-found",
+      `MetadataRegistration at 0x${metadataRegistration.toString(16)} holds no readable genericInsts, genericMethodTable and methodSpecs fields`,
+    );
+  // Reserve the smallest row for every table entry before resolving any.
+  options.beforeText?.(tableCount * MINIMUM_ROW_BYTES);
+  if (tableCount === 0)
+    return {
+      generic_method_pointers_field: null,
+      generic_method_pointers_count: null,
+      generic_method_table: table,
+      generic_method_table_count: 0,
+      generic_method_table_stride: null,
+      method_specs_count: specsCount,
+      generic_insts_count: genericInstsCount,
+      instances: [],
+      issues: [],
+    };
+  const candidates: {
+    field: bigint;
+    pointers: bigint;
+    pointersCount: number;
+    stride: 12 | 16;
+  }[] = [];
+  for (const layout of layouts) {
+    const start = modulesField - BigInt(layout.modules);
+    const wrappers = count(start);
+    const wrapperArray = word(start + 8n);
+    const pointersCount = count(start + 16n);
+    const pointers = word(start + 24n);
+    // genericAdjustorThunks sits between the pointers and the invokers in
+    // every layout whose table rows carry an adjustor thunk index.
+    const invokers = count(start + (layout.stride === 16 ? 40n : 32n));
+    if (
+      wrappers === null ||
+      wrapperArray === null ||
+      pointersCount === null ||
+      pointers === null ||
+      invokers === null ||
+      (wrappers > 0 &&
+        !hasPointerArrayCoverage(image, wrapperArray, wrappers)) ||
+      (pointersCount > 0 &&
+        !hasPointerArrayCoverage(image, pointers, pointersCount))
+    )
+      continue;
+    let agrees = true;
+    for (let row = 0; row < tableCount && agrees; row++) {
+      if (row % BATCH === 0) yield;
+      const at = table + BigInt(row * layout.stride);
+      const spec = i32(at);
+      const slot = i32(at + 4n);
+      const invoker = i32(at + 8n);
+      agrees =
+        spec !== null &&
+        slot !== null &&
+        invoker !== null &&
+        spec >= 0 &&
+        spec < specsCount &&
+        slot >= 0 &&
+        slot < pointersCount &&
+        invoker >= -1 &&
+        invoker < invokers;
+    }
+    if (agrees)
+      candidates.push({
+        field: start + 16n,
+        pointers,
+        pointersCount,
+        stride: layout.stride,
+      });
+  }
+  if (candidates.length === 0)
+    throw new Il2cppBinaryFormatFailure(
+      "generic-method-registration-not-found",
+      `no CodeRegistration layout before 0x${modulesField.toString(16)} bounds the ${tableCount} genericMethodTable rows`,
+    );
+  if (candidates.length > 1)
+    throw new Il2cppBinaryFormatFailure(
+      "ambiguous-generic-method-registration",
+      `${candidates.length} CodeRegistration layouts bound the ${tableCount} genericMethodTable rows`,
+    );
+  const chosen = candidates[0]!;
+  const specTable = specs;
+  const rowAt = (row: number) => table + BigInt(row * chosen.stride);
+  // Il2CppDumper keys pointers by method spec and refuses a second row, so
+  // a shared spec is a contradiction; find them before any row is admitted.
+  const specRows = new Map<number, number[]>();
+  for (let row = 0; row < tableCount; row++) {
+    if (row % BATCH === 0) yield;
+    const spec = i32(rowAt(row))!;
+    const rows = specRows.get(spec);
+    if (rows === undefined) specRows.set(spec, [row]);
+    else rows.push(row);
+  }
+  const issues: Il2cppGenericMethodIssue[] = [];
+  const issue = (address: bigint, message: string) => {
+    const entry = { address: hex(address), message };
+    options.onRow?.(entry);
+    issues.push(entry);
+  };
+  const instance = (index: number): bigint | null | undefined => {
+    if (index === -1) return null;
+    if (index < 0 || index >= genericInstsCount) return undefined;
+    return word(genericInsts + BigInt(index * 8)) ?? undefined;
+  };
+  const methodSpecName = createMethodSpecNamer(
+    image,
+    metadata,
+    facts,
+    version,
+    options.beforeText,
+  );
+  const unknown = { state: "unknown", address: null, rva: null } as const;
+  function* resolve(row: number): Generator<void, Il2cppGenericMethodInstance> {
+    const at = rowAt(row);
+    const spec = i32(at)!;
+    const slot = i32(at + 4n)!;
+    const shared = specRows.get(spec)!;
+    const specAt = specTable + BigInt(spec * 12);
+    const method = i32(specAt);
+    const classIndex = i32(specAt + 4n);
+    const methodIndex = i32(specAt + 8n);
+    if (shared.length > 1) {
+      issue(
+        at,
+        `genericMethodTable rows ${shared.join(", ")} resolve the same method spec ${spec}`,
+      );
+      return {
+        method_spec: spec,
+        method: method ?? -1,
+        name: null,
+        ...unknown,
+      };
+    }
+    let name: string | null = null;
+    if (method === null || classIndex === null || methodIndex === null)
+      issue(specAt, `method spec ${spec} is not file mapped`);
+    else if (method < 0 || method >= metadata.methods.length)
+      issue(
+        specAt,
+        `method spec ${spec} names method ${method} outside the ${metadata.methods.length} metadata methods`,
+      );
+    else {
+      const classInstance = instance(classIndex);
+      const methodInstance = instance(methodIndex);
+      if (classInstance === undefined || methodInstance === undefined)
+        issue(
+          specAt,
+          `method spec ${spec} names generic instances ${classIndex} and ${methodIndex}, outside the ${genericInstsCount} readable genericInsts`,
+        );
+      else
+        try {
+          name = yield* methodSpecName(method, classInstance, methodInstance);
+        } catch (cause) {
+          // Capacity is a budget refusal, never a fact about this row.
+          if (
+            !(cause instanceof Il2cppBinaryFormatFailure) ||
+            cause.kind === "capacity"
+          )
+            throw cause;
+          issue(specAt, cause.message);
+        }
+    }
+    const slotAt = chosen.pointers + BigInt(slot * 8);
+    const pointer = readSlot(image, slotAt);
+    const base = { method_spec: spec, method: method ?? -1, name };
+    if (pointer === null) {
+      issue(slotAt, `genericMethodPointers slot ${slot} is not file mapped`);
+      return { ...base, ...unknown };
+    }
+    if (pointer === "unknown") {
+      issue(
+        slotAt,
+        `genericMethodPointers slot ${slot} has an unresolved relocation`,
+      );
+      return { ...base, ...unknown };
+    }
+    if (pointer === 0n)
+      return { ...base, state: "no-body", address: null, rva: null };
+    if (pointer < image.imageBase || !isExecutable(image, pointer)) {
+      issue(
+        slotAt,
+        `genericMethodPointers slot ${slot} points outside unambiguous executable file data at 0x${pointer.toString(16)}`,
+      );
+      return { ...base, ...unknown };
+    }
+    return {
+      ...base,
+      state: "code",
+      address: hex(pointer),
+      rva: hex(pointer - image.imageBase),
+    };
+  }
+  const instances: Il2cppGenericMethodInstance[] = [];
+  for (let row = 0; row < tableCount; row++) {
+    if (row % BATCH === 0) yield;
+    const resolved = yield* resolve(row);
+    options.onRow?.(resolved);
+    instances.push(resolved);
+  }
+  return {
+    generic_method_pointers_field: chosen.field,
+    generic_method_pointers_count: chosen.pointersCount,
+    generic_method_table: table,
+    generic_method_table_count: tableCount,
+    generic_method_table_stride: chosen.stride,
+    method_specs_count: specsCount,
+    generic_insts_count: genericInstsCount,
+    instances,
+    issues,
+  };
+}
