@@ -36,6 +36,9 @@ import { createElectronFuseService } from "../composition/electronFuses.js";
 import type { ElectronFuseService } from "../application/electron/ElectronFuseService.js";
 import { registerGoTools } from "./registerGoTools.js";
 import { registerIl2cppTools } from "./registerIl2cppTools.js";
+import { registerUnityAddressablesTools } from "./registerUnityAddressablesTools.js";
+import { createUnityAddressablesService } from "../composition/unityAddressables.js";
+import type { UnityAddressablesService } from "../application/unity/UnityAddressablesService.js";
 import { createRustBinaryService } from "../composition/rust.js";
 import type { RustBinaryService } from "../application/rust/RustBinaryService.js";
 import { registerRustTools } from "./registerRustTools.js";
@@ -171,6 +174,7 @@ export interface CreateServerOptions {
   readonly binaryLayout?: BinaryLayoutService;
   readonly goBinary?: GoBinaryService;
   readonly il2cppMetadata?: Il2cppMetadataService;
+  readonly unityAddressables?: UnityAddressablesService;
   readonly rustBinary?: RustBinaryService;
   readonly electronFuses?: ElectronFuseService;
   readonly recordedCrash?: RecordedCrashService;
@@ -334,6 +338,8 @@ export const createServer = (
   const modelArtifact = createModelArtifactService();
   const il2cppMetadata =
     options.il2cppMetadata ?? createIl2cppMetadataService();
+  const unityAddressables =
+    options.unityAddressables ?? createUnityAddressablesService();
   const peResources = createPeResourcesService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const webNetworkCapture =
@@ -419,6 +425,7 @@ export const createServer = (
       goBinary.close(),
       rustBinary.close(),
       il2cppMetadata.close(),
+      unityAddressables.close(),
       modelArtifact.close(),
       peResources.close(),
       electronFuses.close(),
@@ -483,6 +490,7 @@ export const createServer = (
     goBinary,
     rustBinary,
     il2cppMetadata,
+    unityAddressables,
     peResources,
     electronFuses,
     webNetworkCapture,
@@ -706,6 +714,7 @@ const registerConfiguredAnalysisTools = (
     goBinary,
     rustBinary,
     il2cppMetadata,
+    unityAddressables,
     peResources,
     webNetworkCapture,
     artifactResources,
@@ -766,6 +775,14 @@ const registerConfiguredAnalysisTools = (
   registerIl2cppTools(
     server,
     il2cppMetadata,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+    evidenceById,
+  );
+  registerUnityAddressablesTools(
+    server,
+    unityAddressables,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -886,6 +903,7 @@ interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly goBinary: GoBinaryService;
   readonly rustBinary: RustBinaryService;
   readonly il2cppMetadata: Il2cppMetadataService;
+  readonly unityAddressables: UnityAddressablesService;
   readonly peResources: PeResourcesService;
   readonly electronFuses: ElectronFuseService;
   readonly webNetworkCapture: WebNetworkCaptureService;

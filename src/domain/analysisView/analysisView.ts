@@ -193,6 +193,13 @@ import {
   il2cppMetadataViewContextSchema,
   il2cppMetadataViewItemsSchema,
 } from "./il2cppMetadataView.js";
+import {
+  projectUnityAddressablesView,
+  unityAddressablesSummarySchema,
+  unityAddressablesViewRequestSchema,
+  unityAddressablesViewContextSchema,
+  unityAddressablesViewItemsSchema,
+} from "./unityAddressablesView.js";
 
 const summaryViewSchema = z.strictObject({ kind: z.literal("summary") });
 const facetViewSchema = z.strictObject({
@@ -302,6 +309,7 @@ export const analysisViewRequestSchema = z.discriminatedUnion("kind", [
   pcapViewRequestSchema,
   dartAotViewRequestSchema,
   il2cppMetadataViewRequestSchema,
+  unityAddressablesViewRequestSchema,
   modelArtifactViewRequestSchema,
 ]);
 
@@ -411,6 +419,7 @@ const viewResultBase = {
     "inspect_pcap_capture",
     "inspect_dart_aot",
     "inspect_il2cpp_metadata",
+    "inspect_unity_addressables",
     "inspect_model_artifact",
     ...NATIVE_INVENTORY_OPERATIONS,
     "match_native_functions",
@@ -601,6 +610,13 @@ export const il2cppMetadataSummaryViewResultSchema = z.strictObject({
   summary: il2cppMetadataSummarySchema,
 });
 
+/** Catalog identity and row counts for selected Unity Addressables delivery. */
+export const unityAddressablesSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultBase,
+  parent_operation: z.literal("inspect_unity_addressables"),
+  summary: unityAddressablesSummarySchema,
+});
+
 /** Exact inventory summary with the original observation's provider and query. */
 export const nativeInventorySummaryViewResultSchema = z.strictObject({
   ...summaryViewResultBase,
@@ -680,6 +696,7 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     pcapCaptureSummaryViewResultSchema,
     dartAotSummaryViewResultSchema,
     il2cppMetadataSummaryViewResultSchema,
+    unityAddressablesSummaryViewResultSchema,
     modelArtifactSummaryViewResultSchema,
     nativeInventorySummaryViewResultSchema,
     nativeFunctionMatchingSummaryViewResultSchema,
@@ -838,6 +855,14 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     parent_operation: z.literal("inspect_il2cpp_metadata"),
   }),
   z.strictObject({
+    kind: z.literal("unity-addressables"),
+    view: unityAddressablesViewRequestSchema,
+    items: unityAddressablesViewItemsSchema,
+    ...viewResultBase,
+    ...unityAddressablesViewContextSchema.shape,
+    parent_operation: z.literal("inspect_unity_addressables"),
+  }),
+  z.strictObject({
     kind: z.literal("inventory"),
     view: artifactInventoryViewRequestSchema,
     source_coverage: artifactInventoryCoverageSchema.exactOptional(),
@@ -967,6 +992,7 @@ const retainedViewProjectors = new Map<string, typeof projectWasmArtifactView>([
   ["inspect_android_package", projectAndroidPackageView],
   ["inspect_dart_aot", projectDartAotView],
   ["inspect_il2cpp_metadata", projectIl2cppMetadataView],
+  ["inspect_unity_addressables", projectUnityAddressablesView],
   ["inspect_model_artifact", projectModelArtifactView],
   ["match_native_functions", projectNativeFunctionMatchingView],
   ["inspect_artifact", projectArtifactInventoryView],

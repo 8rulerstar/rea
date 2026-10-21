@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { analysisViewInputError } from "./analysisViewErrors.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
-import type { JsonValue } from "../jsonValue.js";
 import { isImmutableJsonSnapshot } from "../immutableJson.js";
 import {
   il2cppMetadataImageSchema,
@@ -22,6 +21,7 @@ import {
 } from "../il2cpp/il2cppMetadata.js";
 import { err, ok, type Result } from "../result.js";
 import { parseAnalysisViewResult } from "./analysisViewParent.js";
+import { pageIndexedRows } from "./indexedRowPage.js";
 import type {
   AnalysisViewParent,
   AnalysisViewRequest,
@@ -296,31 +296,6 @@ const parseMetadataReport = (
   return ok(checked);
 };
 
-/** Direct batch lookup visits selected indices only; metadata order is stable. */
-function* rowIndices(length: number, indices: number[] | undefined) {
-  if (indices === undefined) {
-    for (let index = 0; index < length; index++) yield index;
-  } else {
-    for (const index of [...new Set(indices)].sort((a, b) => a - b))
-      if (index < length) yield index;
-  }
-}
-
-const selectFields = (
-  row: Row,
-  index: number,
-  fields: Set<string> | undefined,
-) => {
-  const item: { index: number } & Record<string, JsonValue> = { index };
-  const values: Readonly<Record<string, JsonValue>> = row;
-  for (const key of Object.keys(values)) {
-    const value = values[key];
-    if (value !== undefined && (fields === undefined || fields.has(key)))
-      item[key] = value;
-  }
-  return item;
-};
-
 /** Compile caller selections once; large batches do not multiply per-row work. */
 const selection = (view: Request, report: Report) => {
   const names =
@@ -591,25 +566,7 @@ export const projectIl2cppMetadataView = (
         },
       ]),
     );
-  const matches = selection(view, report);
-  const selectedFields =
-    view.fields === undefined ? undefined : new Set<string>(view.fields);
-  const items = [];
-  let total = 0;
-  if (matches === undefined && view.indices === undefined) {
-    total = rows.length;
-    const end = Math.min(rows.length, view.offset + view.limit);
-    for (let index = Math.min(view.offset, rows.length); index < end; index++)
-      items.push(selectFields(rows[index]!, index, selectedFields));
-  } else {
-    for (const index of rowIndices(rows.length, view.indices)) {
-      const row = rows[index]!;
-      if (matches !== undefined && !matches(row, index)) continue;
-      if (total >= view.offset && items.length < view.limit)
-        items.push(selectFields(row, index, selectedFields));
-      total++;
-    }
-  }
+  const { items, total } = pageIndexedRows(rows, view, selection(view, report));
   return ok({
     kind: "il2cpp-metadata",
     view,

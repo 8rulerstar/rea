@@ -6,6 +6,7 @@ import { DESKTOP_APPLICATION_TOOL_CONTRACTS } from "./desktopApplicationToolCont
 import { GO_TOOL_CONTRACTS } from "./go/goToolContracts.js";
 import { MODEL_TOOL_CONTRACTS } from "./model/modelToolContracts.js";
 import { IL2CPP_TOOL_CONTRACTS } from "./il2cpp/il2cppToolContracts.js";
+import { UNITY_ADDRESSABLES_TOOL_CONTRACTS } from "./unity/unityAddressablesToolContracts.js";
 import { RUST_TOOL_CONTRACTS } from "./rust/rustToolContracts.js";
 import { SQLITE_TOOL_CONTRACTS } from "./sqlite/sqliteToolContracts.js";
 import { ANALYSIS_VIEW_TOOL_CONTRACTS } from "./analysisViewToolContracts.js";
@@ -50,6 +51,7 @@ export const TOOL_CONTRACTS = [
   ...EVM_TOOL_CONTRACTS,
   ...GO_TOOL_CONTRACTS,
   ...IL2CPP_TOOL_CONTRACTS,
+  ...UNITY_ADDRESSABLES_TOOL_CONTRACTS,
   ...MODEL_TOOL_CONTRACTS,
   ...RUST_TOOL_CONTRACTS,
   ...WASM_TOOL_CONTRACTS,
