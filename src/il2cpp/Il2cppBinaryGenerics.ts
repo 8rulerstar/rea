@@ -87,7 +87,7 @@ export const genericMethodLayouts = (version: number) => {
 };
 
 /** Bounds a count read from the image before the budget is checked for it. */
-const GENERIC_TABLE_LIMIT = 0x1000000;
+export const GENERIC_TABLE_LIMIT = 0x1000000;
 const BATCH = 256;
 
 /**

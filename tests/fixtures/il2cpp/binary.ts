@@ -465,3 +465,89 @@ export const createElfFixture = (
   }
   return file;
 };
+
+export interface GenericRegistrationImageOptions {
+  /** Let the 104-byte layout bound the rows as well as the 120-byte one. */
+  readonly ambiguous?: boolean;
+  /** Leave the methodSpecs table in the segment's zero-fill tail. */
+  readonly zeroFilledSpecs?: boolean;
+  /** genericMethodTableCount written in MetadataRegistration. */
+  readonly tableCount?: bigint;
+}
+
+/** Load address of createGenericRegistrationImage, low as an ELF libil2cpp.so's. */
+export const GENERIC_IMAGE_BASE = 0x10000n;
+
+/**
+ * A Mach-O image holding only version 29/31 generic registration tables at a
+ * low base, so a pointer value also reads as a bounded count. The 120-byte
+ * CodeRegistration layout always bounds the three rows; with `ambiguous` the
+ * 104-byte layout, eight bytes later, bounds them too. MetadataRegistration
+ * records no generic instances, so no row is named.
+ */
+export const createGenericRegistrationImage = (
+  options: GenericRegistrationImageOptions = {},
+) => {
+  const size = 0x1000;
+  const specs = options.zeroFilledSpecs === true ? 0xf00 : 0xb80;
+  const bytes = Buffer.alloc(options.zeroFilledSpecs === true ? specs : size);
+  const address = (offset: number) => GENERIC_IMAGE_BASE + BigInt(offset);
+  bytes.writeUInt32LE(0xfeedfacf, 0);
+  bytes.writeUInt32LE(0x0100000c, 4);
+  bytes.writeUInt32LE(6, 12);
+  bytes.writeUInt32LE(1, 16);
+  bytes.writeUInt32LE(72, 20);
+  bytes.writeUInt32LE(0x19, 32);
+  bytes.writeUInt32LE(72, 36);
+  bytes.write("__TEXT", 40, "latin1");
+  bytes.writeBigUInt64LE(GENERIC_IMAGE_BASE, 56);
+  bytes.writeBigUInt64LE(BigInt(size), 64);
+  bytes.writeBigUInt64LE(0n, 72);
+  bytes.writeBigUInt64LE(BigInt(bytes.length), 80);
+  bytes.writeUInt32LE(5, 88);
+  bytes.writeUInt32LE(5, 92);
+  const modules = 0x600;
+  const pointers = address(0xd00);
+  // 120-byte layout from 0x588: pointer count at +16, array at +24 and
+  // invoker count at +40. The 104-byte layout starts at 0x598, so its
+  // wrapper count and array are the 120 layout's pointer count and array,
+  // and its pointer array at +40 is the 120 layout's invoker count.
+  bytes.writeBigUInt64LE(3n, 0x598);
+  bytes.writeBigUInt64LE(pointers, 0x5a0);
+  bytes.writeBigUInt64LE(3n, 0x5a8);
+  bytes.writeBigUInt64LE(pointers, 0x5b0);
+  bytes.writeBigUInt64LE(options.ambiguous === true ? 4n : 0n, 0x5c0);
+  const rows = [
+    [0, 0, 0],
+    [1, 1, 3],
+    [2, 2, -1],
+  ];
+  rows.forEach((row, index) =>
+    row.forEach((value, field) =>
+      bytes.writeInt32LE(value, 0xbc0 + index * 16 + field * 4),
+    ),
+  );
+  if (options.zeroFilledSpecs !== true)
+    [
+      [3, 0, -1],
+      [2, 0, -1],
+      [4, 0, -1],
+    ].forEach((spec, index) =>
+      spec.forEach((value, field) =>
+        bytes.writeInt32LE(value, specs + index * 12 + field * 4),
+      ),
+    );
+  [0x100, 0x110, 0].forEach((slot, index) =>
+    bytes.writeBigUInt64LE(slot === 0 ? 0n : address(slot), 0xd00 + index * 8),
+  );
+  const registration = 0x800;
+  bytes.writeBigUInt64LE(options.tableCount ?? 3n, registration + 32);
+  bytes.writeBigUInt64LE(address(0xbc0), registration + 40);
+  bytes.writeBigUInt64LE(3n, registration + 64);
+  bytes.writeBigUInt64LE(address(specs), registration + 72);
+  return {
+    bytes,
+    modulesField: address(modules),
+    metadataRegistration: address(registration),
+  };
+};

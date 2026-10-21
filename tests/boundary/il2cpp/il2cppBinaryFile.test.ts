@@ -6,9 +6,17 @@ import {
 } from "../../../src/il2cpp/Il2cppBinaryFile.js";
 import { readIl2cppMetadataForLinking } from "../../../src/il2cpp/Il2cppMetadataFile.js";
 import {
+  GENERIC_TABLE_LIMIT,
+  linkGenericMethodsSteps,
+} from "../../../src/il2cpp/Il2cppBinaryGenerics.js";
+import { openImageSteps } from "../../../src/il2cpp/Il2cppBinaryImage.js";
+import {
   createElfFixture,
   createIl2cppBinaryFixture,
   createUniversalFixture,
+  createGenericRegistrationImage,
+  GENERIC_IMAGE_BASE,
+  type GenericRegistrationImageOptions,
   createSplitPointerPeFixture,
   FIXTURE_BINARY_BASE,
   FIXTURE_GENERIC_INSTANCES,
@@ -759,4 +767,122 @@ it("returns no instances for an empty genericMethodTable without picking a layou
     instances: [],
     issues: [],
   });
+});
+
+const drain = <T>(steps: Generator<void, T>, onYield = () => {}): T => {
+  for (;;) {
+    const step = steps.next();
+    if (step.done === true) return step.value;
+    onYield();
+  }
+};
+// Link a low-base image of generic tables only, recording yields and rows.
+const linkLowBase = (
+  options: GenericRegistrationImageOptions = {},
+  events: string[] = [],
+  checked: number[] = [],
+) => {
+  const fixture = createGenericRegistrationImage(options);
+  const decoded = genericFacts(31);
+  return drain(
+    linkGenericMethodsSteps(
+      drain(openImageSteps(fixture.bytes, undefined)),
+      decoded.metadata,
+      decoded.link,
+      fixture.modulesField,
+      fixture.metadataRegistration,
+      {
+        beforeText: (bytes) => checked.push(bytes),
+        onRow: (row) => events.push("method_spec" in row ? "row" : "issue"),
+      },
+    ),
+    () => events.push("yield"),
+  );
+};
+const lowBaseFailure = (options: GenericRegistrationImageOptions) => {
+  try {
+    linkLowBase(options);
+  } catch (cause) {
+    if (cause instanceof Il2cppBinaryFormatFailure) return cause.reason;
+    throw cause;
+  }
+  throw new Error("expected a link failure");
+};
+
+it("refuses generic rows that two CodeRegistration layouts both bound", () => {
+  // The 120-byte layout alone is chosen when the 104-byte one disagrees.
+  expect(linkLowBase()).toMatchObject({
+    generic_method_pointers_field: GENERIC_IMAGE_BASE + 0x600n - 120n + 16n,
+    generic_method_table_stride: 16,
+  });
+  // A low base lets a pointer double as a count, so both 29/31 layouts agree.
+  expect(lowBaseFailure({ ambiguous: true })).toBe(
+    "ambiguous-generic-method-registration",
+  );
+});
+
+it("treats a zero-filled method spec as unobserved, not as method 0", () => {
+  const generic = linkLowBase({ zeroFilledSpecs: true });
+  expect(generic.instances.map(({ state, name }) => ({ state, name }))).toEqual(
+    Array.from({ length: 3 }, () => ({ state: "unknown", name: null })),
+  );
+  expect(generic.issues.map(({ row, message }) => ({ row, message }))).toEqual(
+    [0, 1, 2].map((row) => ({
+      row,
+      message: `method spec ${row} is not file backed`,
+    })),
+  );
+});
+
+it("yields before each pass over the genericMethodTable", () => {
+  const events: string[] = [];
+  linkLowBase({}, events);
+  // Two candidate layouts, the shared-spec pass, then rows with their issues.
+  expect(events).toEqual([
+    "yield",
+    "yield",
+    "yield",
+    "yield",
+    ...Array.from({ length: 3 }, () => ["issue", "row"]).flat(),
+  ]);
+});
+
+it("refuses a genericMethodTable count past the table limit before checking the budget", () => {
+  const checked: number[] = [];
+  expect(() =>
+    linkLowBase({ tableCount: BigInt(GENERIC_TABLE_LIMIT) + 1n }, [], checked),
+  ).toThrow("generic-method-registration-not-found");
+  expect(checked).toEqual([]);
+});
+
+it("keeps a capacity refusal while naming a generic row a refusal", () => {
+  const decoded = genericFacts(31);
+  let tableChecked = false;
+  const failure = (() => {
+    try {
+      linkIl2cppBinary(
+        createIl2cppBinaryFixture({ genericMethods: {} }),
+        decoded.metadata,
+        decoded.link,
+        undefined,
+        {
+          genericInstances: true,
+          beforeText: (bytes) => {
+            if (tableChecked)
+              throw new Il2cppBinaryFormatFailure(
+                "native-type-text-capacity",
+                "budget",
+              );
+            tableChecked = bytes === 3 * minimumGenericRow;
+          },
+        },
+      );
+    } catch (cause) {
+      return cause;
+    }
+    return undefined;
+  })();
+  expect(tableChecked).toBe(true);
+  expect(failure).toBeInstanceOf(Il2cppBinaryFormatFailure);
+  expect((failure as Il2cppBinaryFormatFailure).kind).toBe("capacity");
 });
