@@ -582,7 +582,10 @@ it("reports generic method instances only when generic_instances is set", async 
   const root = await createTestTempDirectory("rea-il2cpp-provider-generic-");
   const path = join(root, "global-metadata.dat");
   const binaryPath = join(root, "GameAssembly.dylib");
-  await writeFile(path, createIl2cppMetadataFixture({ version: 31 }).bytes);
+  await writeFile(
+    path,
+    createIl2cppMetadataFixture({ version: 31, genericOwners: true }).bytes,
+  );
   await writeFile(
     binaryPath,
     createIl2cppBinaryFixture({ genericMethods: {} }),
@@ -622,7 +625,10 @@ it("refuses generic rows that exceed the report budget and keeps the requested p
   const root = await createTestTempDirectory("rea-il2cpp-generic-budget-");
   const path = join(root, "global-metadata.dat");
   const binary_path = join(root, "GameAssembly.dylib");
-  await writeFile(path, createIl2cppMetadataFixture({ version: 31 }).bytes);
+  await writeFile(
+    path,
+    createIl2cppMetadataFixture({ version: 31, genericOwners: true }).bytes,
+  );
   await writeFile(
     binary_path,
     createIl2cppBinaryFixture({ genericMethods: {} }),

@@ -173,6 +173,8 @@ export function* linkGenericMethodsSteps(
     const wrapperArray = word(start + 8n);
     const pointersCount = count(start + 16n);
     const pointers = word(start + 24n);
+    // genericMethodPointers coverage is not part of the layout: each row
+    // reads its own slot, so one unmapped slot leaves only that row unknown.
     // genericAdjustorThunks sits between the pointers and the invokers in
     // every layout whose table rows carry an adjustor thunk index.
     const invokers = count(start + (layout.stride === 16 ? 40n : 32n));
@@ -182,10 +184,7 @@ export function* linkGenericMethodsSteps(
       pointersCount === null ||
       pointers === null ||
       invokers === null ||
-      (wrappers > 0 &&
-        !hasPointerArrayCoverage(image, wrapperArray, wrappers)) ||
-      (pointersCount > 0 &&
-        !hasPointerArrayCoverage(image, pointers, pointersCount))
+      (wrappers > 0 && !hasPointerArrayCoverage(image, wrapperArray, wrappers))
     )
       continue;
     let agrees = true;
@@ -255,6 +254,23 @@ export function* linkGenericMethodsSteps(
     version,
     options.beforeText,
   );
+  // Arguments must fill the container their owner declares; a damaged spec
+  // would otherwise name an instance that cannot exist. A null instance is
+  // left to the namer, as Il2CppDumper names it. Null when consistent.
+  const argumentMismatch = (
+    kind: "type" | "method",
+    owner: number,
+    container: number | undefined,
+    instance: bigint | null,
+  ) => {
+    if (instance === null || container === undefined) return null;
+    const given = readUInt32(image, instance);
+    const declared =
+      container === -1 ? 0 : facts.genericContainer(container)?.count;
+    return given === null || declared === undefined || given === declared
+      ? null
+      : `gives ${kind} ${owner} ${given} generic arguments, but it declares ${declared}`;
+  };
   const unknown = { state: "unknown", address: null, rva: null } as const;
   function* resolve(row: number): Generator<void, Il2cppGenericMethodInstance> {
     const at = rowAt(row);
@@ -300,18 +316,36 @@ export function* linkGenericMethodsSteps(
           specAt,
           `method spec ${spec} names generic instances ${classIndex} and ${methodIndex}, outside the ${genericInstsCount} readable genericInsts`,
         );
-      else
-        try {
-          name = yield* methodSpecName(method, classInstance, methodInstance);
-        } catch (cause) {
-          // Capacity is a budget refusal, never a fact about this row.
-          if (
-            !(cause instanceof Il2cppBinaryFormatFailure) ||
-            cause.kind === "capacity"
-          )
-            throw cause;
-          issue(row, specAt, cause.message);
-        }
+      else {
+        const owner = metadata.methods[method]!.declaring_type;
+        const mismatch =
+          argumentMismatch(
+            "type",
+            owner,
+            facts.typeGenericContainer(owner),
+            classInstance,
+          ) ??
+          argumentMismatch(
+            "method",
+            method,
+            facts.methodGenericContainers[method],
+            methodInstance,
+          );
+        if (mismatch !== null)
+          issue(row, specAt, `method spec ${spec} ${mismatch}`);
+        else
+          try {
+            name = yield* methodSpecName(method, classInstance, methodInstance);
+          } catch (cause) {
+            // Capacity is a budget refusal, never a fact about this row.
+            if (
+              !(cause instanceof Il2cppBinaryFormatFailure) ||
+              cause.kind === "capacity"
+            )
+              throw cause;
+            issue(row, specAt, cause.message);
+          }
+      }
     }
     if (name === null) return { ...base, name, ...unknown };
     const named = { ...base, name };

@@ -508,8 +508,11 @@ it("reads type attributes without requiring file-backed alignment padding", () =
   );
 });
 
+// The generic owners declare the containers the fixture's instances fill.
 const genericFacts = (version: 24 | 27 | 31 | 39) =>
-  readIl2cppMetadataForLinking(createIl2cppMetadataFixture({ version }).bytes);
+  readIl2cppMetadataForLinking(
+    createIl2cppMetadataFixture({ version, genericOwners: true }).bytes,
+  );
 const linkGeneric = (
   options: GenericMethodFixtureOptions = {},
   version: 24 | 27 | 31 | 39 = 31,
@@ -730,6 +733,31 @@ it("keeps contradicting rows unknown and reports the record address", () => {
   ]);
 });
 
+it.each<[string, GenericMethodFixtureOptions, string]>([
+  [
+    "class arguments for a type without a generic container",
+    { firstSpecMethod: 2 },
+    "method spec 0 gives type 1 1 generic arguments, but it declares 0",
+  ],
+  [
+    "class arguments that disagree with the container's count",
+    { firstSpecClass: 1 },
+    "method spec 0 gives type 3 2 generic arguments, but it declares 1",
+  ],
+  [
+    "method arguments for a method without a generic container",
+    { firstSpecMethodInstance: 0 },
+    "method spec 0 gives method 3 1 generic arguments, but it declares 0",
+  ],
+])("keeps a method spec with %s unnamed", (_, options, message) => {
+  const generic = linkGeneric(options).generic_methods!;
+  expect(generic.instances[0]).toMatchObject({ name: null, ...unknownRow });
+  expect(generic.instances.slice(1)).toEqual(
+    FIXTURE_GENERIC_INSTANCES.slice(1),
+  );
+  expect(generic.issues).toEqual([{ row: 0, address: at(0xb80n), message }]);
+});
+
 it("keeps a generic slot with an unresolved relocation unknown", () => {
   // An ELF symbol relocation on slot 1 leaves its pointer unresolved.
   const bytes = createElfFixture(
@@ -750,6 +778,23 @@ it("keeps a generic slot with an unresolved relocation unknown", () => {
       row: 1,
       address: at(0xd08n),
       message: "genericMethodPointers slot 1 has an unresolved relocation",
+    },
+  ]);
+});
+
+it("keeps the other generic rows when one pointer slot is unmapped", () => {
+  // Slot 2 lies past the only segment; rows 0 and 1 keep their code.
+  const generic = linkGeneric({ unmappedLastSlot: true }).generic_methods!;
+  expect(generic.instances).toEqual([
+    FIXTURE_GENERIC_INSTANCES[0],
+    FIXTURE_GENERIC_INSTANCES[1],
+    { ...FIXTURE_GENERIC_INSTANCES[2], ...unknownRow },
+  ]);
+  expect(generic.issues).toEqual([
+    {
+      row: 2,
+      address: at(0x1000n),
+      message: "genericMethodPointers slot 2 is not file mapped",
     },
   ]);
 });

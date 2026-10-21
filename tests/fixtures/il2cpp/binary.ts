@@ -48,12 +48,16 @@ export interface GenericMethodFixtureOptions {
   readonly firstSpecMethod?: number;
   /** classIndexIndex of method spec 0; 2 or more is past genericInstsCount. */
   readonly firstSpecClass?: number;
+  /** methodIndexIndex of method spec 0; -1 (none) by default. */
+  readonly firstSpecMethodInstance?: number;
   /** Point row 2 at method spec 0 as well. */
   readonly duplicateSpec?: boolean;
   /** Pointer written in slot 0 instead of a code address. */
   readonly firstSlot?: bigint;
   /** Write genericMethodTableCount 0, as a build without generic instances. */
   readonly emptyTable?: boolean;
+  /** Place genericMethodPointers at the last 16 bytes, leaving slot 2 unmapped. */
+  readonly unmappedLastSlot?: boolean;
 }
 
 /**
@@ -246,7 +250,11 @@ const writeGenericMethods = (
   });
   // Il2CppMethodSpec: methodDefinitionIndex, classIndexIndex, methodIndexIndex.
   const specs = [
-    [options.firstSpecMethod ?? 3, options.firstSpecClass ?? 0, -1],
+    [
+      options.firstSpecMethod ?? 3,
+      options.firstSpecClass ?? 0,
+      options.firstSpecMethodInstance ?? -1,
+    ],
     [2, -1, 1],
     [4, -1, 0],
   ];
@@ -270,9 +278,12 @@ const writeGenericMethods = (
     ),
   );
   const slots = [options.firstSlot ?? address(0x240), address(0x200), 0n];
-  slots.forEach((slot, index) =>
-    bytes.writeBigUInt64LE(slot, GENERIC_METHOD_POINTERS + index * 8),
-  );
+  const pointers =
+    options.unmappedLastSlot === true ? SIZE - 16 : GENERIC_METHOD_POINTERS;
+  slots.forEach((slot, index) => {
+    if (pointers + index * 8 < SIZE)
+      bytes.writeBigUInt64LE(slot, pointers + index * 8);
+  });
   const metadataWord = (slot: number, value: bigint) =>
     bytes.writeBigUInt64LE(value, METADATA_REGISTRATION + slot * 8);
   metadataWord(2, BigInt(instances.length));
@@ -291,7 +302,7 @@ const writeGenericMethods = (
   // which leaves every candidate layout readable.
   const empty = options.emptyTable === true;
   codeWord(16, empty ? 0n : BigInt(slots.length));
-  codeWord(24, empty ? 0n : address(GENERIC_METHOD_POINTERS));
+  codeWord(24, empty ? 0n : address(pointers));
   // invokerPointersCount follows genericAdjustorThunks when rows carry one.
   codeWord(stride === 16 ? 40 : 32, 4n);
 };

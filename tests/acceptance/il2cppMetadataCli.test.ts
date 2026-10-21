@@ -914,7 +914,10 @@ cliTest(
     const path = join(root, "global-metadata.dat");
     const binaryPath = join(root, "libil2cpp.so");
     const seeds = join(root, "seeds.tsv");
-    await writeFile(path, createIl2cppMetadataFixture({ version: 31 }).bytes);
+    await writeFile(
+      path,
+      createIl2cppMetadataFixture({ version: 31, genericOwners: true }).bytes,
+    );
     await writeFile(
       binaryPath,
       createElfFixture(createIl2cppBinaryFixture({ genericMethods: {} })),

@@ -607,6 +607,11 @@ function* readMethods({
         widths.parameter +
         widths.generic_container;
       linkFacts.returnTypes[index] = readIndex(bytes, returnAt, widths.type);
+      linkFacts.methodGenericContainers[index] = readIndex(
+        bytes,
+        tokenAt - widths.generic_container,
+        widths.generic_container,
+      );
       linkFacts.methodTokens[index] = bytes.readUInt32LE(tokenAt);
     }
     parameterRanges.push({
@@ -719,6 +724,8 @@ export interface Il2cppMetadataLinkFacts {
   readonly methodTokens: Uint32Array;
   /** Il2CppType table index of each method's return type. */
   readonly returnTypes: Int32Array;
+  /** GenericContainerIndex per method index; -1 for a non-generic method. */
+  readonly methodGenericContainers: Int32Array;
   readonly fieldTypes: Int32Array;
   readonly parameterTypes: Int32Array;
   /** Demand-read names from this stable metadata snapshot, by GenericParameterIndex. */
@@ -873,6 +880,7 @@ function* readMetadataCoreSteps(
       linkFacts: {
         methodTokens: new Uint32Array(tables.counts.methods),
         returnTypes: new Int32Array(tables.counts.methods),
+        methodGenericContainers: new Int32Array(tables.counts.methods),
         fieldTypes: new Int32Array(tables.members.counts.fields),
         parameterTypes: new Int32Array(tables.members.counts.parameters),
         genericParameterName: createGenericParameterReader(tables),
