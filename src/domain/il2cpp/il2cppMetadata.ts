@@ -223,7 +223,9 @@ export const il2cppCodeGenModuleSchema = z.strictObject({
 
 /** A genericMethodTable, method spec or pointer record that contradicts another table. */
 export const il2cppGenericMethodIssueSchema = z.strictObject({
-  /** Address of the contradicting record. */
+  /** genericMethodTable index of the row this issue leaves unknown. */
+  row: count,
+  /** Address of the contradicting record: the row, its method spec or its pointer slot. */
   address: il2cppAddressSchema,
   message: z.string(),
 });
@@ -251,8 +253,8 @@ export const il2cppGenericMethodLinkSchema = z.strictObject({
 
 /**
  * One generic method instance; row position is its genericMethodTable index.
- * state is `code`, `no-body` for a zero pointer slot, or `unknown` when an
- * issue names the row.
+ * state is `code`, `no-body` for a zero pointer slot, or `unknown` exactly
+ * when an issue names the row; an issued row keeps no address.
  */
 export const il2cppGenericMethodInstanceSchema =
   il2cppMethodAddressSchema.extend({
@@ -260,7 +262,7 @@ export const il2cppGenericMethodInstanceSchema =
     method_spec: count,
     /** Metadata method index of the generic definition; may be out of range when an issue names it. */
     method: z.number().int(),
-    /** Il2CppDumper-style name; null when an issue prevents rendering it. */
+    /** Il2CppDumper-style name; null only on an unknown row whose method spec an issue names. */
     name: z.string().nullable(),
   });
 
@@ -524,13 +526,29 @@ const validateMetadataFacts = (
       path: ["generic_method_instances"],
       message: "Generic registration facts need their instance rows.",
     });
+  // Exactly the rows an issue names are unknown, and only they lose a name.
+  const issued = new Set(
+    report.binary?.generic_methods?.issues.map((issue) => issue.row),
+  );
+  const unmatched = new Set(issued);
   report.generic_method_instances?.forEach((row, index) => {
+    unmatched.delete(index);
     if (codeRowContradicts(row, report.binary?.image_base))
       context.addIssue({
         code: "custom",
         path: ["generic_method_instances", index],
         message:
           "Only a code row carries an address and RVA; both are then present.",
+      });
+    if (
+      (row.state === "unknown") !== issued.has(index) ||
+      (row.name === null && row.state !== "unknown")
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["generic_method_instances", index, "state"],
+        message:
+          "A row is unknown exactly when an issue names it, and only then may its name be null.",
       });
     if (
       row.name !== null &&
@@ -543,6 +561,12 @@ const validateMetadataFacts = (
           "A named generic instance needs a definition inside the retained methods.",
       });
   });
+  if (unmatched.size > 0)
+    context.addIssue({
+      code: "custom",
+      path: ["binary", "generic_methods", "issues"],
+      message: "Every generic method issue names an existing instance row.",
+    });
   report.string_literals?.forEach((row, index) => {
     if ((row.value === null) === (row.value_base64 === null))
       context.addIssue({

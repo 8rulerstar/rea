@@ -148,7 +148,7 @@ it("seeds generic instances after definitions and folds shared code", () => {
         row(2, "Game.Player.Slot$$Add<long, string>", "0x130"),
         row(3, "Game.Player.Slot$$Add<bool, string>", "no-body"),
         row(4, "Game.Player.Slot$$Add<char, string>", "unknown"),
-        row(5, null, "0x140"),
+        row(5, null, "unknown"),
       ],
     },
     0x100000n,

@@ -279,11 +279,14 @@ counts. The result adds:
 
 - `binary.generic_methods`: `generic_method_pointers_field` (the address of
   `genericMethodPointersCount`), the pointer, table, method spec and generic
-  instance counts, `generic_method_table_stride` and `issues`;
+  instance counts, `generic_method_table_stride` and `issues` (each with the
+  `row` it leaves unknown, the `address` of the contradicting row, method spec
+  or pointer slot record, and a `message`);
 - `generic_method_instances`: one row per table entry (row position is the
   table index) with `method_spec`, `method` (the definition's metadata index),
   `name`, and `state`, `address` and `rva` as in `method_addresses`: `code`,
-  `no-body` for a zero pointer slot, or `unknown` when an issue names the row.
+  `no-body` for a zero pointer slot, or `unknown` exactly when an issue names
+  the row.
 
 Names follow Il2CppDumper's `GetMethodSpecName`, for example
 `System.Collections.Generic.Dictionary<int, string>$$TryGetValue` or
@@ -312,12 +315,15 @@ After the layout is fixed, rows that contradict another table do not fail the
 whole link: a method spec naming a method or generic instance out of range, a
 name that cannot be rendered, or a pointer slot that is unmapped, has an
 unresolved relocation or points outside unambiguous executable file data adds
-an `issues` entry with the record's address, and that row's `name` is `null` or
-its `state` is `unknown`. Capacity refusals are never turned into issues. Rows that share one method spec (Il2CppDumper refuses
-such a table) each get an issue at their row address, and all of them lose
-`name` and become `unknown`. A zero pointer slot is a `no-body` row and has no
-issue. Every table entry is reserved against the report budget before any row
-is resolved, and each row and issue is admitted before it is retained. Like
+an `issues` entry, and that row is `unknown` with no address. A method spec
+issue also leaves `name` `null`, even when the pointer slot is valid: the slot
+would otherwise be reported under a definition nothing confirms. Capacity
+refusals are never turned into issues. Rows that share one method spec
+(Il2CppDumper refuses such a table) each get an issue at their row address that
+names one other sharing row, and all of them lose `name` and become `unknown`.
+A zero pointer slot is a `no-body` row and has no issue. Before any row is
+resolved, the smallest row for every table entry is checked against the
+remaining report budget; each row and issue is then admitted as it is retained. Like
 method addresses, these rows are derived from static tables; layout agreement
 is structural evidence, not proof of runtime use.
 

@@ -2,6 +2,7 @@ import type { Il2cppGenericMethodInstance } from "../domain/il2cpp/il2cppMetadat
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import {
   hasPointerArrayCoverage,
+  hexAddress as hex,
   isExecutable,
   readPointer,
   readSlot,
@@ -10,6 +11,7 @@ import {
 } from "./Il2cppBinaryImage.js";
 import { createMethodSpecNamer } from "./Il2cppBinaryTypes.js";
 import type { Il2cppBinaryReadOptions } from "./Il2cppBinaryFile.js";
+import { IL2CPP_GENERIC_INSTANCE_MINIMUM_BYTES } from "./Il2cppMetadataAdmission.js";
 import type {
   Il2cppMetadataDecoded,
   Il2cppMetadataLinkFacts,
@@ -17,6 +19,8 @@ import type {
 
 /** A record that contradicts another table, located by the record's address. */
 export interface Il2cppGenericMethodIssue {
+  /** genericMethodTable index of the row the record leaves unknown. */
+  readonly row: number;
   readonly address: string;
   readonly message: string;
 }
@@ -82,20 +86,9 @@ export const genericMethodLayouts = (version: number) => {
   return layouts;
 };
 
-/** Bounds a count read from the image before anything is reserved for it. */
+/** Bounds a count read from the image before the budget is checked for it. */
 const GENERIC_TABLE_LIMIT = 0x1000000;
-/** Smallest serialized instance row; admitted per row before allocation. */
-const MINIMUM_ROW_BYTES = JSON.stringify({
-  state: "unknown",
-  address: null,
-  rva: null,
-  method_spec: 0,
-  method: 0,
-  name: null,
-}).length;
 const BATCH = 256;
-
-const hex = (value: bigint) => `0x${value.toString(16)}`;
 
 /**
  * Resolve every genericMethodTable row the way Il2CppDumper does:
@@ -126,7 +119,9 @@ export function* linkGenericMethodsSteps(
       ? null
       : Number(value);
   };
-  // Int32 record fields; null when not file backed or zero filled.
+  // Int32 record fields; null when not file backed. readUInt32 refuses plain
+  // zero-fill, so a .bss record never reads as index 0; only a relocated
+  // pointer written into zero-fill would read, as its low 32 bits.
   const i32 = (address: bigint) => {
     const value = readUInt32(image, address);
     return value === null ? null : value | 0;
@@ -151,8 +146,9 @@ export function* linkGenericMethodsSteps(
       "generic-method-registration-not-found",
       `MetadataRegistration at 0x${metadataRegistration.toString(16)} holds no readable genericInsts, genericMethodTable and methodSpecs fields`,
     );
-  // Reserve the smallest row for every table entry before resolving any.
-  options.beforeText?.(tableCount * MINIMUM_ROW_BYTES);
+  // Check the smallest row for every table entry against the remaining budget
+  // before resolving any; each row is then admitted as it is retained.
+  options.beforeText?.(tableCount * IL2CPP_GENERIC_INSTANCE_MINIMUM_BYTES);
   if (tableCount === 0)
     return {
       generic_method_pointers_field: null,
@@ -242,8 +238,8 @@ export function* linkGenericMethodsSteps(
     else rows.push(row);
   }
   const issues: Il2cppGenericMethodIssue[] = [];
-  const issue = (address: bigint, message: string) => {
-    const entry = { address: hex(address), message };
+  const issue = (row: number, address: bigint, message: string) => {
+    const entry = { row, address: hex(address), message };
     options.onRow?.(entry);
     issues.push(entry);
   };
@@ -270,9 +266,11 @@ export function* linkGenericMethodsSteps(
     const classIndex = i32(specAt + 4n);
     const methodIndex = i32(specAt + 8n);
     if (shared.length > 1) {
+      // Name one other row, not all of them, so k sharing rows cost O(k).
       issue(
+        row,
         at,
-        `genericMethodTable rows ${shared.join(", ")} resolve the same method spec ${spec}`,
+        `method spec ${spec} is shared by ${shared.length} genericMethodTable rows, including row ${shared[0] === row ? shared[1] : shared[0]}`,
       );
       return {
         method_spec: spec,
@@ -281,11 +279,15 @@ export function* linkGenericMethodsSteps(
         ...unknown,
       };
     }
+    // A method spec that contradicts the metadata leaves the row unknown: its
+    // slot address would be reported under a definition nothing confirms.
+    const base = { method_spec: spec, method: method ?? -1 };
     let name: string | null = null;
     if (method === null || classIndex === null || methodIndex === null)
-      issue(specAt, `method spec ${spec} is not file mapped`);
+      issue(row, specAt, `method spec ${spec} is not file backed`);
     else if (method < 0 || method >= metadata.methods.length)
       issue(
+        row,
         specAt,
         `method spec ${spec} names method ${method} outside the ${metadata.methods.length} metadata methods`,
       );
@@ -294,6 +296,7 @@ export function* linkGenericMethodsSteps(
       const methodInstance = instance(methodIndex);
       if (classInstance === undefined || methodInstance === undefined)
         issue(
+          row,
           specAt,
           `method spec ${spec} names generic instances ${classIndex} and ${methodIndex}, outside the ${genericInstsCount} readable genericInsts`,
         );
@@ -307,34 +310,41 @@ export function* linkGenericMethodsSteps(
             cause.kind === "capacity"
           )
             throw cause;
-          issue(specAt, cause.message);
+          issue(row, specAt, cause.message);
         }
     }
+    if (name === null) return { ...base, name, ...unknown };
+    const named = { ...base, name };
     const slotAt = chosen.pointers + BigInt(slot * 8);
     const pointer = readSlot(image, slotAt);
-    const base = { method_spec: spec, method: method ?? -1, name };
     if (pointer === null) {
-      issue(slotAt, `genericMethodPointers slot ${slot} is not file mapped`);
-      return { ...base, ...unknown };
+      issue(
+        row,
+        slotAt,
+        `genericMethodPointers slot ${slot} is not file mapped`,
+      );
+      return { ...named, ...unknown };
     }
     if (pointer === "unknown") {
       issue(
+        row,
         slotAt,
         `genericMethodPointers slot ${slot} has an unresolved relocation`,
       );
-      return { ...base, ...unknown };
+      return { ...named, ...unknown };
     }
     if (pointer === 0n)
-      return { ...base, state: "no-body", address: null, rva: null };
+      return { ...named, state: "no-body", address: null, rva: null };
     if (pointer < image.imageBase || !isExecutable(image, pointer)) {
       issue(
+        row,
         slotAt,
         `genericMethodPointers slot ${slot} points outside unambiguous executable file data at 0x${pointer.toString(16)}`,
       );
-      return { ...base, ...unknown };
+      return { ...named, ...unknown };
     }
     return {
-      ...base,
+      ...named,
       state: "code",
       address: hex(pointer),
       rva: hex(pointer - image.imageBase),

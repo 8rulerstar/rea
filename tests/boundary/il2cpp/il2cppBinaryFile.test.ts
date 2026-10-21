@@ -528,7 +528,7 @@ const genericFailure = (
 const at = (offset: bigint) =>
   `0x${(FIXTURE_BINARY_BASE + offset).toString(16)}`;
 const unknownRow = { state: "unknown", address: null, rva: null } as const;
-// Smallest serialized generic row, reserved per table entry before resolving.
+// Smallest serialized generic row, checked per table entry before resolving.
 const minimumGenericRow = JSON.stringify({
   ...unknownRow,
   method_spec: 0,
@@ -559,7 +559,7 @@ it("links generic method instances only when asked", () => {
 it("admits every generic row and issue before retention", () => {
   const decoded = genericFacts(31);
   const rows: Readonly<Record<string, unknown>>[] = [];
-  const reserved: number[] = [];
+  const checked: number[] = [];
   linkIl2cppBinary(
     createIl2cppBinaryFixture({ genericMethods: { firstSpecMethod: 9 } }),
     decoded.metadata,
@@ -568,17 +568,18 @@ it("admits every generic row and issue before retention", () => {
     {
       genericInstances: true,
       onRow: (row) => rows.push(row),
-      beforeText: (bytes) => reserved.push(bytes),
+      beforeText: (bytes) => checked.push(bytes),
     },
   );
-  // The whole table is reserved before the first row is resolved.
-  expect(reserved).toContain(3 * minimumGenericRow);
+  // The whole table is checked before the first row is resolved.
+  expect(checked).toContain(3 * minimumGenericRow);
   expect(rows.filter((row) => "method_spec" in row)).toHaveLength(3);
   expect(rows).toContainEqual({
+    row: 0,
     address: at(0xb80n),
     message: "method spec 0 names method 9 outside the 5 metadata methods",
   });
-  // A refused reservation stops before any generic row is retained.
+  // A refused budget check stops before any generic row is retained.
   const refused: unknown[] = [];
   expect(() =>
     linkIl2cppBinary(
@@ -657,19 +658,27 @@ it("keeps contradicting rows unknown and reports the record address", () => {
     const generic = linkGeneric(options).generic_methods!;
     return { first: generic.instances[0], issues: generic.issues };
   };
+  // A contradicting method spec keeps no address, although its slot is valid.
   expect(issues({ firstSpecMethod: 9 })).toEqual({
-    first: { ...FIXTURE_GENERIC_INSTANCES[0], method: 9, name: null },
+    first: {
+      ...FIXTURE_GENERIC_INSTANCES[0],
+      ...unknownRow,
+      method: 9,
+      name: null,
+    },
     issues: [
       {
+        row: 0,
         address: at(0xb80n),
         message: "method spec 0 names method 9 outside the 5 metadata methods",
       },
     ],
   });
   expect(issues({ firstSpecClass: 2 })).toEqual({
-    first: { ...FIXTURE_GENERIC_INSTANCES[0], name: null },
+    first: { ...FIXTURE_GENERIC_INSTANCES[0], ...unknownRow, name: null },
     issues: [
       {
+        row: 0,
         address: at(0xb80n),
         message:
           "method spec 0 names generic instances 2 and -1, outside the 2 readable genericInsts",
@@ -681,6 +690,7 @@ it("keeps contradicting rows unknown and reports the record address", () => {
     first: { ...FIXTURE_GENERIC_INSTANCES[0], ...unknownRow },
     issues: [
       {
+        row: 0,
         address: at(0xd00n),
         message: `genericMethodPointers slot 0 points outside unambiguous executable file data at 0x${outside.toString(16)}`,
       },
@@ -696,12 +706,20 @@ it("keeps contradicting rows unknown and reports the record address", () => {
     { name: FIXTURE_GENERIC_INSTANCES[1]!.name, state: "code" },
     { name: null, state: "unknown" },
   ]);
-  expect(duplicate.issues).toEqual(
-    [0n, 32n].map((offset) => ({
-      address: at(0xbc0n + offset),
-      message: "genericMethodTable rows 0, 2 resolve the same method spec 0",
-    })),
-  );
+  expect(duplicate.issues).toEqual([
+    {
+      row: 0,
+      address: at(0xbc0n),
+      message:
+        "method spec 0 is shared by 2 genericMethodTable rows, including row 2",
+    },
+    {
+      row: 2,
+      address: at(0xbc0n + 32n),
+      message:
+        "method spec 0 is shared by 2 genericMethodTable rows, including row 0",
+    },
+  ]);
 });
 
 it("keeps a generic slot with an unresolved relocation unknown", () => {
@@ -721,6 +739,7 @@ it("keeps a generic slot with an unresolved relocation unknown", () => {
   });
   expect(generic.issues).toEqual([
     {
+      row: 1,
       address: at(0xd08n),
       message: "genericMethodPointers slot 1 has an unresolved relocation",
     },

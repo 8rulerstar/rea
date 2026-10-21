@@ -568,7 +568,13 @@ const genericLinked = (): Il2cppMetadata => {
         generic_method_table_stride: 16,
         method_specs_count: 4,
         generic_insts_count: 2,
-        issues: [{ address: "0x1800", message: "method spec 3 is shared" }],
+        issues: [
+          {
+            row: 2,
+            address: "0x1800",
+            message: "method spec 2 is not file backed",
+          },
+        ],
       },
     },
     generic_method_instances: [
@@ -734,10 +740,35 @@ it("refuses generic rows that break the address or definition invariants", () =>
   expect(variant({ address: null })).toBe(false);
   // Other states carry neither.
   expect(variant({ state: "no-body" })).toBe(false);
-  expect(variant({ state: "unknown", address: null, rva: null })).toBe(true);
-  // A named row needs a retained definition; an unnamed one may not have one.
+  // unknown exactly when an issue names the row, and an issued row keeps no
+  // address even if its slot was valid.
+  expect(variant({ state: "unknown", address: null, rva: null })).toBe(false);
+  // A named row needs a retained definition; an unnamed one may not have one,
+  // but is then unknown.
   expect(variant({ method: 9 })).toBe(false);
-  expect(variant({ method: 9, name: null })).toBe(true);
+  expect(variant({ method: 9, name: null })).toBe(false);
+  // A method spec issue on row 0: its row is unknown and keeps no address.
+  const issued = (rows: number[], state: "code" | "unknown" = "unknown") => {
+    const linked = genericLinked();
+    linked.binary!.generic_methods!.issues = rows.map((row) => ({
+      row,
+      address: "0x1800",
+      message: `method spec ${row} contradicts the metadata`,
+    }));
+    linked.generic_method_instances![0] = {
+      ...linked.generic_method_instances![0]!,
+      method: 9,
+      name: null,
+      ...(state === "code" ? {} : { state, address: null, rva: null }),
+    };
+    return projectIl2cppMetadataView(parent(linked, false), {
+      kind: "summary",
+    }).ok;
+  };
+  expect(issued([0, 2])).toBe(true);
+  expect(issued([2])).toBe(false);
+  expect(issued([0, 2], "code")).toBe(false);
+  expect(issued([0, 2, 4])).toBe(false);
   // A nonempty table selects every layout fact; an empty one selects none.
   for (const field of [
     "generic_method_pointers_field",
@@ -759,6 +790,7 @@ it("refuses generic rows that break the address or definition invariants", () =>
     generic_method_pointers_field: null,
     generic_method_pointers_count: null,
     generic_method_table_stride: null,
+    issues: [],
   };
   expect(
     projectIl2cppMetadataView(parent(empty, false), { kind: "summary" }).ok,

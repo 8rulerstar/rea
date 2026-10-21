@@ -22,6 +22,7 @@ import type { Il2cppMetadataPort } from "../application/il2cpp/Il2cppMetadataPor
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { createEvidence } from "../domain/evidence.js";
 import { createIl2cppMetadataAdmission } from "./Il2cppMetadataAdmission.js";
+import { hexAddress as hex } from "./Il2cppBinaryImage.js";
 import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import {
   AnalysisAccessDeniedError,
@@ -199,8 +200,6 @@ const failureFor = (
   bindArtifactFileCleanup(cause, error);
   return error;
 };
-
-const hex = (value: bigint) => `0x${value.toString(16)}`;
 
 /** Report fields for a linked binary, with addresses as exact hexadecimal strings. */
 const binaryReport = (
@@ -569,7 +568,7 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
               : `Method addresses come from the binary's code-generation module methodPointers, matched by module name, method count and metadata token; ${input.generic_instances === true ? "" : "generic method instances (see generic_instances), "}adjustor thunks and invokers are not linked, no-body means an observed zero slot, and unknown means no module claimed the method or its slot has an unresolved relocation.`,
             ...(binaryPath !== undefined && input.generic_instances === true
               ? [
-                  "Generic method instances come from genericMethodTable, methodSpecs, genericInsts and genericMethodPointers, with names following Il2CppDumper's GetMethodSpecName (namespace on the declaring type, nested types joined with '.', arity cut, IntPtr/UIntPtr, no byref mark). The CodeRegistration layout is the only one of the known 27.0 to 31 layouts whose counts bound every genericMethodTable row; metadata versions 24 and 39 and builds without a static CodeRegistration are refused. A generic row is no-body for an observed zero pointer slot and unknown when an issue names it: a contradicting method spec, a shared method spec, an unmapped or non-executable pointer, or an unresolved relocation.",
+                  "Generic method instances come from genericMethodTable, methodSpecs, genericInsts and genericMethodPointers, with names following Il2CppDumper's GetMethodSpecName (namespace on the declaring type, nested types joined with '.', arity cut, IntPtr/UIntPtr, no byref mark). The CodeRegistration layout is the only one of the known 27.0 to 31 layouts whose counts bound every genericMethodTable row; metadata versions 24 and 39 and builds without a static CodeRegistration are refused. A generic row is no-body for an observed zero pointer slot and unknown, with no address, exactly when an issue names its row: a contradicting method spec (its name is then null), a shared method spec, an unmapped or non-executable pointer, or an unresolved relocation.",
                 ]
               : []),
             binaryPath === undefined
