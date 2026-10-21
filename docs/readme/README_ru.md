@@ -163,6 +163,7 @@ REA требует Node.js 22.x (>=22.19), 24.x (>=24.11) или 26+, а так�
 | Пакеты и ресурсы                    | Списки файлов, хеши, plist, структура пакетов Apple и извлечённые ресурсы                                                  | [Руководство по артефактам и JavaScript](../javascript-artifact-reconstruction.md), [приложения Apple](../apple-application-analysis.md) |
 | Поведение процессов                 | Вывод терминала, взаимодействия, наблюдения за завершением и файловой системой, сравнения запусков                         | Linux/macOS с нативным PTY; [захват процессов](../process-capture.md)                                                                    |
 | PyInstaller                         | CArchive, PYZ, Python bytecode                                                                                             | Static inspection; [Python packaged applications](../python-packaged-applications.md)                                                    |
+| Unity Addressables                  | Catalog keys, locations, dependencies, bundle hash/CRC                                                                     | Static inspection; [Unity Addressables](../unity-addressables.md)                                                                        |
 
 Статическое исследование JavaScript и .NET читает предоставленные файлы, не запуская приложение. Захват во время выполнения запускает выбранную цель или взаимодействует с ней с правами вашего пользователя; соответствующие руководства описывают последствия.
 
