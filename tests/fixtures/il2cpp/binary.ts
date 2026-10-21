@@ -29,6 +29,8 @@ export interface Il2cppBinaryFixtureOptions {
   readonly codeReference?: boolean;
   /** Write `adrp x8, page; add x8, x8, #pageoff` at each file offset, loading the target offset. */
   readonly adrpAdd?: readonly (readonly [at: number, target: number])[];
+  /** 4 KiB pages in the Mach-O image; extra pages are zero, past every table. */
+  readonly pages?: number;
   /** Omit the MetadataRegistration type table. */
   readonly metadataRegistration?: boolean;
   /** Byte written before each image name instead of NUL (MSVC pads with 0xFF). */
@@ -54,10 +56,14 @@ const MODULE_ARRAY = 0x500;
 const REGISTRATION = 0x600;
 const DUPLICATE = 0x700;
 
+const imageSize = (options: Il2cppBinaryFixtureOptions) =>
+  SIZE * (options.pages ?? 1);
+
 export const createIl2cppBinaryFixture = (
   options: Il2cppBinaryFixtureOptions = {},
 ): Buffer => {
-  const bytes = Buffer.alloc(SIZE);
+  const size = imageSize(options);
+  const bytes = Buffer.alloc(size);
   const address = (offset: number) => FIXTURE_BINARY_BASE + BigInt(offset);
   const chained = options.chainedFixups === true;
   // Mach-O 64-bit header: arm64 dylib with one or two load commands.
@@ -71,9 +77,9 @@ export const createIl2cppBinaryFixture = (
   bytes.writeUInt32LE(72, 36);
   bytes.write("__TEXT", 40, "latin1");
   bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE, 56);
-  bytes.writeBigUInt64LE(BigInt(SIZE), 64);
+  bytes.writeBigUInt64LE(BigInt(size), 64);
   bytes.writeBigUInt64LE(0n, 72);
-  bytes.writeBigUInt64LE(BigInt(SIZE), 80);
+  bytes.writeBigUInt64LE(BigInt(size), 80);
   bytes.writeUInt32LE(5, 88);
   bytes.writeUInt32LE(5, 92);
   if (chained) {

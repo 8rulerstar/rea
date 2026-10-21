@@ -338,6 +338,11 @@ it.each([
     "the loaded run is shorter than the referenced type indices",
     { short: true },
   ],
+  ["a record's kind is past the Il2CppTypeEnum range", { kind: 0x1f }],
+  [
+    "a value-type record names a type definition past the metadata",
+    { definition: 4n },
+  ],
 ] as const)(
   "keeps metadata-registration-not-found when %s",
   (
@@ -347,6 +352,8 @@ it.each([
       before?: boolean;
       second?: boolean;
       short?: boolean;
+      kind?: number;
+      definition?: bigint;
     },
   ) => {
     const bytes = createIl2cppBinaryFixture({
@@ -362,8 +369,16 @@ it.each([
       bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x9b0n, 0x8f8);
     // Kind 0 ends the run after two entries; the facts below reference type 3.
     if (variant.short === true) bytes.writeUInt32LE(0, 0x980 + 2 * 16 + 8);
+    // Either record breaks the four-entry run into pieces shorter than four.
+    if (variant.kind !== undefined)
+      bytes.writeUInt32LE(variant.kind << 16, 0x980 + 16 + 8);
+    if (variant.definition !== undefined)
+      bytes.writeBigUInt64LE(variant.definition, 0x980 + 2 * 16);
+    // Facts referencing type 3 require a four-entry run.
     const required =
-      variant.short === true
+      variant.short === true ||
+      variant.kind !== undefined ||
+      variant.definition !== undefined
         ? { ...facts, returnTypes: Int32Array.from(facts.returnTypes, () => 3) }
         : facts;
     let reason: string | undefined;
@@ -376,6 +391,87 @@ it.each([
     expect(reason).toBe("metadata-registration-not-found");
   },
 );
+
+it.each([
+  ["a later page", { pages: 2, code: 0xc00, array: 0x1500 }],
+  ["an earlier page", { pages: 3, code: 0x2c00, array: 0x500 }],
+] as const)(
+  "follows an arm64 ADRP page delta to a module array on %s",
+  (_, layout) => {
+    const bytes = createIl2cppBinaryFixture({
+      codeRegistration: false,
+      pages: layout.pages,
+      adrpAdd: [[layout.code, layout.array]],
+    });
+    if (layout.array !== 0x500) {
+      bytes.copy(bytes, layout.array, 0x500, 0x510);
+      bytes.fill(0, 0x500, 0x510);
+    }
+    const linked = link(bytes);
+    expect(linked.code_gen_modules_array).toBe(
+      FIXTURE_BINARY_BASE + BigInt(layout.array),
+    );
+    expect(linked.method_addresses).toEqual(expectedAddresses);
+  },
+);
+
+it("follows a negative arm64 ADRP page delta to the type table", () => {
+  const linked = link(
+    createIl2cppBinaryFixture({
+      metadataRegistration: false,
+      pages: 3,
+      adrpAdd: [[0x2c20, 0x900]],
+    }),
+  );
+  expect(linked.types_field).toBeNull();
+  expect(linked.types_count).toBe(4);
+});
+
+it.each([
+  ["destination", 0],
+  ["source", 5],
+] as const)(
+  "keeps code-registration-not-found when the ADD %s register differs from the ADRP register",
+  (_, shift) => {
+    const bytes = createIl2cppBinaryFixture({
+      codeRegistration: false,
+      adrpAdd: [[0xc00, 0x500]],
+    });
+    const add = bytes.readUInt32LE(0xc04);
+    // The fixture pair uses x8; write x9 into one register field of the ADD.
+    bytes.writeUInt32LE(((add & ~(0x1f << shift)) | (9 << shift)) >>> 0, 0xc04);
+    expect(failure(bytes).reason).toBe("code-registration-not-found");
+  },
+);
+
+it("bounds type-table candidates when the metadata references few type indices", () => {
+  const bytes = createIl2cppBinaryFixture({
+    metadataRegistration: false,
+    pages: 2,
+    adrpAdd: [[0xc20, 0x900]],
+  });
+  // 65 isolated pointers to the int record, each a one-entry run.
+  for (let index = 0; index < 65; index++)
+    bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0x9b0n, 0x1000 + index * 16);
+  const outcome = (required: typeof facts) => {
+    try {
+      return linkIl2cppBinary(bytes, metadata, required).types_count;
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      return cause.reason;
+    }
+  };
+  // Fixture methods reference only type 0, so every isolated pointer is a
+  // candidate run, and the bound fails before the loaded run is chosen.
+  expect(outcome(facts)).toBe("native-index-capacity");
+  // Referencing type 3 requires four entries; the isolated pointers drop out.
+  expect(
+    outcome({
+      ...facts,
+      returnTypes: Int32Array.from(facts.returnTypes, () => 3),
+    }),
+  ).toBe(4);
+});
 
 it("refuses to choose among too many candidate module arrays", () => {
   const base = createIl2cppBinaryFixture({
