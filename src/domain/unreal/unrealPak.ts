@@ -88,6 +88,8 @@ export const UNREAL_PAK_ISSUE_KINDS = [
   "duplicate-path",
   "entry-count-mismatch",
   "unknown-compression-slot",
+  "malformed-directory-name",
+  "path-hash-mismatch",
 ] as const;
 
 /** One contradiction between redundant facts, at the file offset that records it. */

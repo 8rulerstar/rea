@@ -72,7 +72,11 @@ const LIMITATIONS = [
   "Compression names come from the footer table (version 8+) or legacy flag values (Zlib, Gzip, Custom); they name methods, not verified codecs. The pak version is not attributed to an engine release.",
 ];
 
-const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
+const failureForPrimary = (
+  cause: unknown,
+  path: string,
+  outputBytes: number,
+): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
   if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
     return new AnalysisArtifactChangedError(OPERATION, path, cause.message, {
@@ -88,6 +92,18 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
         OPERATION,
         path,
         cause.message,
+        { cause },
+      );
+    // Path text is report text, so its limit is the output budget.
+    if (cause.reason === "paths-too-large")
+      return new AnalysisResourceConstraintError(
+        OPERATION,
+        "transport",
+        cause.message,
+        {
+          maximum_output_bytes: outputBytes,
+          maximum_path_utf16_units: outputBytes,
+        },
         { cause },
       );
     if (cause.kind === "resource")
@@ -145,12 +161,20 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
   });
 };
 
-const failureFor = (cause: unknown, path: string): AnalysisError => {
+const failureFor = (
+  cause: unknown,
+  path: string,
+  outputBytes: number,
+): AnalysisError => {
   const primary =
     cause instanceof ArtifactFileCleanupFailure &&
     cause.fileCleanupFailure.outcome.kind === "failed"
-      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path)
-      : failureForPrimary(cause, path);
+      ? failureForPrimary(
+          cause.fileCleanupFailure.outcome.cause,
+          path,
+          outputBytes,
+        )
+      : failureForPrimary(cause, path, outputBytes);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -313,7 +337,7 @@ export class UnrealPakProvider implements UnrealPakPort {
       assertArtifactReadActive(options?.signal);
       return ok(parsed.data);
     } catch (cause: unknown) {
-      const failure = failureFor(cause, input.path);
+      const failure = failureFor(cause, input.path, this.outputBytes);
       if (artifact !== undefined && failure.partialObservation === undefined)
         failure.retainPartialObservation(pakSourceEvidence(artifact));
       return err(failure);

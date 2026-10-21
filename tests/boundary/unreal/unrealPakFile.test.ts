@@ -583,3 +583,83 @@ describe("Unreal pak record and resource guards", () => {
     });
   });
 });
+
+describe("Unreal pak listings checked against each other", () => {
+  it.each(["v11", "v12"] as const)(
+    "accepts %s path hashes computed the way FPakFile::HashPath does",
+    async (layout) => {
+      const pak = await read(createPakFixture({ layout }).bytes);
+      expect(pak.issues).toEqual([]);
+      expect(pak.entries.map((entry) => entry.path)).toEqual(
+        PAK_FIXTURE_FILES.map((file) => file.path),
+      );
+    },
+  );
+
+  it("leaves version 10 path hashes unchecked", async () => {
+    const pak = await read(
+      createPakFixture({ layout: "v10", mismatchedPathHash: true }).bytes,
+    );
+    expect(pak.issues).toEqual([]);
+    expect(pak.entries.map((entry) => entry.path)).toEqual(
+      PAK_FIXTURE_FILES.map((file) => file.path),
+    );
+  });
+
+  it("does not invent a path from a directory name without its closing slash", async () => {
+    const pak = await read(
+      createPakFixture({ layout: "v11", unslashedDirectories: true }).bytes,
+    );
+    expect(pak.entries.map((entry) => entry.path)).toEqual([null, null, null]);
+    expect(pak.issues.map((issue) => issue.kind)).toContain(
+      "malformed-directory-name",
+    );
+  });
+
+  it("nulls a directory-index path whose hash the path hash index does not hold", async () => {
+    const pak = await read(
+      createPakFixture({ layout: "v11", mismatchedPathHash: true }).bytes,
+    );
+    expect(pak.entries.map((entry) => entry.path)).toEqual([
+      null,
+      ...PAK_FIXTURE_FILES.slice(1).map((file) => file.path),
+    ]);
+    expect(pak.issues).toEqual([
+      {
+        kind: "path-hash-mismatch",
+        offset: expect.any(Number),
+        message: expect.stringContaining(PAK_FIXTURE_FILES[0]!.path),
+      },
+    ]);
+  });
+
+  it("reports no compression slot issue for records no listing references", async () => {
+    const { bytes } = createPakFixture({
+      layout: "v11",
+      files: [],
+      declaredEntries: 0,
+      unreferencedRecords: 50_000,
+    });
+    // Clear slot 1 (Zlib), which every unreferenced record names.
+    bytes.fill(0, bytes.length - 160, bytes.length - 128);
+    const pak = await read(bytes, { ...LIMITS, entries: 100_000 });
+    expect(pak.entries).toEqual([]);
+    expect(pak.issues).toEqual([]);
+  }, 60_000);
+
+  it("bounds the index regions held at once by one shared byte budget", async () => {
+    const { bytes, indexSize } = createPakFixture({ layout: "v11" });
+    const clean = await read(Buffer.from(bytes));
+    if (clean.index.state !== "decoded") throw new Error("expected an index");
+    const largest = Math.max(
+      indexSize,
+      clean.index.path_hash_index!.region.size,
+      clean.index.full_directory_index!.region.size,
+    );
+    // Every region fits alone, but the three together do not.
+    expect(await failure(bytes, { ...LIMITS, regionBytes: largest })).toEqual({
+      reason: "region-too-large",
+      kind: "resource",
+    });
+  });
+});

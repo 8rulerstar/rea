@@ -6,6 +6,7 @@ import {
   type UnrealPakFooter,
   type UnrealPakIssue,
 } from "../domain/unreal/unrealPak.js";
+import { pathHasher } from "./UnrealPakPathHash.js";
 
 export const UNREAL_PAK_MAGIC = 0x5a6f12e1;
 
@@ -53,7 +54,7 @@ export interface UnrealPakSource {
 
 /** Bounds that keep a hostile index from allocating without limit. */
 export interface UnrealPakLimits {
-  /** Largest index, path hash index or directory index region read. */
+  /** Largest total of index, path hash index and directory index bytes read for one pak. */
   readonly regionBytes: number;
   /** Largest number of entries decoded. */
   readonly entries: number;
@@ -326,17 +327,21 @@ const readFooter = async (
   );
 };
 
+/** Index region bytes already read, so the regions of one pak share one limit. */
+type RegionBudget = { used: number };
+
 /** Reject a region the footer or index names outside the file or the limit. */
 const checkRegion = (
   region: { offset: number; size: number },
   limits: UnrealPakLimits,
   label: string,
   end: number,
+  held: RegionBudget = { used: 0 },
 ) => {
-  if (region.size > limits.regionBytes)
+  if (held.used + region.size > limits.regionBytes)
     throw new UnrealPakFormatFailure(
       "region-too-large",
-      `${label} is ${region.size} bytes, above the ${limits.regionBytes}-byte limit`,
+      `${label} is ${region.size} bytes; with ${held.used} index region bytes already read that exceeds the ${limits.regionBytes}-byte limit`,
     );
   if (region.offset + region.size > end)
     throw new UnrealPakFormatFailure(
@@ -353,8 +358,10 @@ const readRegion = async (
   label: string,
   end: number,
   sink: IssueSink,
+  held: RegionBudget,
 ): Promise<Cursor> => {
-  checkRegion(region, limits, label, end);
+  checkRegion(region, limits, label, end, held);
+  held.used += region.size;
   const bytes = await source.read(region.offset, region.size);
   if (createHash("sha1").update(bytes).digest("hex") !== region.sha1)
     sink.report(
@@ -544,9 +551,19 @@ const readDirectoryListing = async (
   // Directories produce no rows, so only the count limit applies.
   checkCountLimit(directories, limits, cursor.label);
   const seen = new Set<string>();
-  const listed: [string, number][] = [];
+  const listed: ListedFile[] = [];
   for (let d = 0; d < directories; d++) {
+    const directoryAt = cursor.at;
     const directory = cursor.string("directory name");
+    // UE stores directories with a closing slash; without one the joined
+    // text is not a path the pak names, so those paths stay unknown.
+    const joinable = directory.endsWith("/");
+    if (!joinable)
+      cursor.sink.report(
+        "malformed-directory-name",
+        directoryAt,
+        `${cursor.label} directory name "${directory}" does not end with "/"`,
+      );
     const fileCount = cursor.u32();
     checkEntryCount(listed.length + fileCount, limits, cursor.label);
     for (let f = 0; f < fileCount; f++) {
@@ -556,15 +573,17 @@ const readDirectoryListing = async (
           ? cursor.utf8Name("file name")
           : cursor.string("file name");
       spendPath(budget, limits, directory.length + name.length, cursor.label);
-      const path = joinPath(directory, name);
-      if (seen.has(path))
-        cursor.sink.report(
-          "duplicate-path",
-          record,
-          `${cursor.label} lists ${path} again`,
-        );
-      seen.add(path);
-      listed.push([path, cursor.i32()]);
+      const path = joinable ? joinPath(directory, name) : null;
+      if (path !== null) {
+        if (seen.has(path))
+          cursor.sink.report(
+            "duplicate-path",
+            record,
+            `${cursor.label} lists ${path} again`,
+          );
+        seen.add(path);
+      }
+      listed.push({ path, reference: cursor.i32(), record });
       await pace();
     }
     // Count the directory too, so runs of empty directories still yield.
@@ -572,6 +591,14 @@ const readDirectoryListing = async (
   }
   return { directories, listed };
 };
+
+/** One file row of a directory listing, with the file offset of its name. */
+interface ListedFile {
+  /** null when the directory name cannot be joined (see issues). */
+  readonly path: string | null;
+  readonly reference: number;
+  readonly record: number;
+}
 
 /** Join a full-directory-index directory and file name as the pak stores them. */
 const joinPath = (directory: string, file: string) =>
@@ -598,6 +625,7 @@ export const readUnrealPak = async (
     return { footer, index: { state: "encrypted" }, entries: [], issues: [] };
   }
   const sink = new IssueSink();
+  const held: RegionBudget = { used: 0 };
   const index = await readRegion(
     source,
     footer.index,
@@ -605,6 +633,7 @@ export const readUnrealPak = async (
     "index",
     dataEnd,
     sink,
+    held,
   );
   const mountPoint = index.string("mount point");
   // The mount point is returned text too, so it shares the path budget.
@@ -646,6 +675,8 @@ export const readUnrealPak = async (
   }
 
   const seed = index.u64Hex();
+  const hashPath =
+    footer.version >= 11 ? pathHasher(BigInt(`0x${seed}`)) : null;
   const region = (label: string) => ({
     offset: index.u64(),
     size: index.u64(),
@@ -671,8 +702,11 @@ export const readUnrealPak = async (
   );
   index.position += encodedSize;
   // Walk the encoded records so references can only name a record start.
+  // Records are reported only when a listing resolves them, so the walk and
+  // the full-record pre-read below write no issues.
+  const unreported = new IssueSink();
   const recordStarts = new Set<number>();
-  const walk = new Cursor(encoded, "encoded entries", encodedBase, sink);
+  const walk = new Cursor(encoded, "encoded entries", encodedBase, unreported);
   while (walk.position < encoded.length) {
     checkCountLimit(recordStarts.size + 1, limits, "encoded entries");
     recordStarts.add(walk.position);
@@ -682,10 +716,14 @@ export const readUnrealPak = async (
   const fullCount = index.u32();
   checkEntryCount(fullCount, limits, "non-encoded entry list");
   const fullEntries: { bytes: Buffer; base: number }[] = [];
+  // Pre-read with a cursor that reports nothing, then continue after it.
+  const preRead = new Cursor(index.bytes, index.label, index.base, unreported);
   for (let at = 0; at < fullCount; at++) {
     const start = index.position;
     const base = index.at;
-    readFullEntry(index, footer, null, null);
+    preRead.position = start;
+    readFullEntry(preRead, footer, null, null);
+    index.position = preRead.position;
     fullEntries.push({
       bytes: index.bytes.subarray(start, index.position),
       base,
@@ -694,11 +732,13 @@ export const readUnrealPak = async (
   }
   finished(index);
 
+  /** Resolve one listing reference and check where its bytes are placed. */
   const resolve = (
     reference: number,
     path: string | null,
     hash: string | null,
   ) => {
+    let entry: UnrealPakEntry;
     if (reference >= 0) {
       if (!recordStarts.has(reference))
         throw new UnrealPakFormatFailure(
@@ -707,25 +747,30 @@ export const readUnrealPak = async (
         );
       const cursor = new Cursor(encoded, "encoded entries", encodedBase, sink);
       cursor.position = reference;
-      return readEncodedEntry(cursor, footer, path, hash);
-    }
-    const record = fullEntries[-reference - 1];
-    if (record === undefined)
-      throw new UnrealPakFormatFailure(
-        "entry-reference-out-of-range",
-        `entry reference ${reference} names no non-encoded entry`,
+      entry = readEncodedEntry(cursor, footer, path, hash);
+    } else {
+      const record = fullEntries[-reference - 1];
+      if (record === undefined)
+        throw new UnrealPakFormatFailure(
+          "entry-reference-out-of-range",
+          `entry reference ${reference} names no non-encoded entry`,
+        );
+      entry = readFullEntry(
+        new Cursor(record.bytes, "non-encoded entry", record.base, sink),
+        footer,
+        path,
+        hash,
       );
-    return readFullEntry(
-      new Cursor(record.bytes, "non-encoded entry", record.base, sink),
-      footer,
-      path,
-      hash,
-    );
+    }
+    checkPlacement([entry], footer.index.offset);
+    return entry;
   };
 
   const entries: UnrealPakEntry[] = [];
   let directoryIndex = null;
   let pathHashIndex = null;
+  /** Path hash to the reference the path hash index gives it; null once repeated. */
+  let referenceByHash: Map<string, number | null> | null = null;
   if (pathHashRegion !== null) {
     const phi = await readRegion(
       source,
@@ -734,41 +779,36 @@ export const readUnrealPak = async (
       "path hash index",
       dataEnd,
       sink,
+      held,
     );
     const phiCount = phi.u32();
     checkEntryCount(phiCount, limits, "path hash index");
-    const hashed: [string, number][] = [];
-    const seenHashes = new Set<string>();
+    const hashed = new Map<string, number | null>();
     for (let at = 0; at < phiCount; at++) {
       const record = phi.at;
       const hash = phi.u64Hex();
-      if (seenHashes.has(hash))
+      const reference = phi.i32();
+      if (hashed.has(hash)) {
         sink.report(
           "duplicate-path",
           record,
           `path hash index lists hash ${hash} again`,
         );
-      seenHashes.add(hash);
-      hashed.push([hash, phi.i32()]);
+        hashed.set(hash, null);
+      } else hashed.set(hash, reference);
+      // Every reference must name a placed record, even when the full
+      // directory index is the one that names the returned entries.
+      const entry = resolve(reference, null, hash);
+      if (directoryRegion === null) entries.push(entry);
       await pace();
     }
     // The pruned directory index follows the hashes inside the same region.
     const pruned = await readDirectoryListing(phi, footer, limits, budget);
     finished(phi);
-    // Every reference must name a placed record, even when the full
-    // directory index is the one that names the returned entries.
-    const prunedEntries: UnrealPakEntry[] = [];
-    for (const [path, reference] of pruned.listed) {
-      prunedEntries.push(resolve(reference, path, null));
+    for (const { path, reference } of pruned.listed) {
+      resolve(reference, path, null);
       await pace();
     }
-    checkPlacement(prunedEntries, footer.index.offset);
-    const fromHashes: UnrealPakEntry[] = [];
-    for (const [hash, reference] of hashed) {
-      fromHashes.push(resolve(reference, null, hash));
-      await pace();
-    }
-    checkPlacement(fromHashes, footer.index.offset);
     pathHashIndex = {
       region: {
         offset: pathHashRegion.offset,
@@ -779,8 +819,7 @@ export const readUnrealPak = async (
       pruned_directories: pruned.directories,
       pruned_files: pruned.listed.length,
     };
-    if (directoryRegion === null)
-      for (const entry of fromHashes) entries.push(entry);
+    referenceByHash = hashed;
   }
   if (directoryRegion !== null) {
     const fdi = await readRegion(
@@ -790,6 +829,7 @@ export const readUnrealPak = async (
       "full directory index",
       dataEnd,
       sink,
+      held,
     );
     const { directories, listed } = await readDirectoryListing(
       fdi,
@@ -797,8 +837,25 @@ export const readUnrealPak = async (
       limits,
       budget,
     );
-    for (const [path, reference] of listed) {
-      entries.push(resolve(reference, path, null));
+    for (const { path, reference, record } of listed) {
+      let named = path;
+      // With both listings, the directory path must hash to a row of the path
+      // hash index that names the same record; otherwise the path is unknown.
+      if (path !== null && referenceByHash !== null && hashPath !== null) {
+        const hash = hashPath(path);
+        const hashedReference = referenceByHash.get(hash);
+        if (hashedReference !== null && hashedReference !== reference) {
+          sink.report(
+            "path-hash-mismatch",
+            record,
+            hashedReference === undefined
+              ? `full directory index path ${path} hashes to ${hash}, which the path hash index does not hold`
+              : `full directory index path ${path} names entry ${reference}, but its hash ${hash} names entry ${hashedReference}`,
+          );
+          named = null;
+        }
+      }
+      entries.push(resolve(reference, named, null));
       await pace();
     }
     const files = listed.length;
@@ -829,7 +886,6 @@ export const readUnrealPak = async (
         `the index declares ${entryCount} entries but the ${label} holds ${listedCount}`,
       );
     }
-  checkPlacement(entries, footer.index.offset);
   return {
     footer,
     index: {

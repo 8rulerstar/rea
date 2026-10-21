@@ -206,3 +206,29 @@ it.each(["v7", "v11"] as const)(
     await provider.close();
   },
 );
+
+it("reports the path budget, not a file size, when path text exceeds it", async () => {
+  const { path } = await writePak(
+    "paths.pak",
+    createPakFixture({
+      layout: "v11",
+      files: [],
+      mountPoint: "M".repeat(4096),
+    }).bytes,
+  );
+  const provider = new UnrealPakProvider(2048);
+  try {
+    const result = await provider.inspect({ path });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error).toMatchObject({
+        resource: "transport",
+        reportedLimits: {
+          maximum_output_bytes: 2048,
+          maximum_path_utf16_units: 2048,
+        },
+      });
+  } finally {
+    await provider.close();
+  }
+});

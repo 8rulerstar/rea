@@ -28,7 +28,7 @@ the session:
 
 The summary has the footer, the index facts and `counts` (`entries`,
 `encoded_records`, `full_records`, `compressed`, `encrypted`, `deleted`,
-`without_path`). Select entries without reopening the file. Every row keeps its
+`without_path`, `issues`). Select entries without reopening the file. Every row keeps its
 original `index` in the pak index; `indices` and `paths` select exact entries,
 `fields` selects row fields, and filters intersect before paging:
 
@@ -80,7 +80,14 @@ writes the complete Evidence to a new file and returns the summary.
   also holds a pruned directory index after the hashes; its directory and file
   counts are reported and its references are checked. The header entry count,
   the path hash count, the directory index file count and the decoded entries
-  must all agree.
+  are compared; a disagreement is recorded as an `entry-count-mismatch` issue.
+  Directory names must end with `/`, as Unreal writes them. In version 11+,
+  when both indexes are present, each directory index path is hashed the way
+  `FPakFile::HashPath` does in Unreal Engine 5.8 (ASCII lowercase, UTF-16LE
+  code units, FNV-64 with the path hash seed added to the offset basis) and must
+  name the same record in the path hash index. Version 10 hashes are not
+  checked: Unreal hashes them with legacy FNV constants, repak 0.2.3 writes the
+  version 11 hash instead, and no Unreal-written version 10 pak was available.
 - **Integrity.** The index, path hash index and full directory index bytes are
   checked against the SHA-1 recorded for them; a mismatch is an issue, not a
   rejection. Every entry's offset plus stored size must end before the index. The per-entry SHA-1 of file data is reported, not
@@ -98,7 +105,9 @@ writes the complete Evidence to a new file and returns the summary.
 - **Compression names.** `compression_method` 0 means stored, with
   `compression_name: null`. In version 8+ any other value counts from 1 into the
   footer table (`compression_methods[method - 1]`); a method naming an empty
-  or missing slot keeps the entry with `compression_name: null` and an issue. Before version 8, from the legacy
+  or missing slot keeps the entry with `compression_name: null` and an issue.
+  Only records a listing references are reported; encoded or full records no
+  listing names are walked for their bounds but produce no issue. Before version 8, from the legacy
   flag values (1 `Zlib`, 2 `Gzip`, 4 `Custom`); other legacy values keep their
   raw `compression_method` with `compression_name: null`. Names identify
   methods; no data is decompressed, so they are not codec verification.
@@ -109,8 +118,8 @@ writes the complete Evidence to a new file and returns the summary.
 
 Two facts the pak records separately can disagree while the structure stays
 readable. Decoding then continues with the effect the table below gives for
-each kind (only `entry-count-mismatch` and `unknown-compression-slot` make a
-fact null), and `issues` records each contradiction once with its `kind`, the
+each kind (`entry-count-mismatch`, `unknown-compression-slot`,
+`malformed-directory-name` and `path-hash-mismatch` make a fact null), and `issues` records each contradiction once with its `kind`, the
 file `offset` of the record that shows it, and a `message`:
 
 | Kind                       | Offset                                 | Effect                                                                |
@@ -119,6 +128,8 @@ file `offset` of the record that shows it, and a `message`:
 | `duplicate-path`           | The repeated path name or path hash    | Every entry is kept in index order; a path no longer names one entry. |
 | `entry-count-mismatch`     | The index header entry count           | `index.entry_count` is null; each listing keeps its own count.        |
 | `unknown-compression-slot` | The entry record naming the empty slot | That entry's `compression_name` is null.                              |
+| `malformed-directory-name` | The directory name                     | Entries listed under it keep `path: null`.                            |
+| `path-hash-mismatch`       | The directory index file name          | That entry's `path` is null.                                          |
 
 The summary counts issues, and `inspect_analysis_view` collection `issues`
 selects them by `indices`, `kinds` and `fields`, each row with its source
@@ -132,20 +143,20 @@ Structure that cannot be trusted for further reads is rejected with a reason
 and no partial success: offsets and sizes outside the file, truncated records,
 references that name no record, and counts above the resource limits.
 
-| Reason                         | Kind        | Meaning                                                                                |
-| ------------------------------ | ----------- | -------------------------------------------------------------------------------------- |
-| `unrecognized-footer`          | unsupported | No pak footer layout matches the end of the file.                                      |
-| `frozen-index`                 | unsupported | Version 9 frozen indexes store a serialized memory image.                              |
-| `region-out-of-bounds`         | corrupt     | An index region ends past the footer or a 64-bit value exceeds the safe integer range. |
-| `truncated-record`             | corrupt     | A record or declared block list ends past its region.                                  |
-| `invalid-string`               | corrupt     | A string lacks its terminator or is not valid UTF-8.                                   |
-| `invalid-flag`                 | corrupt     | A boolean field is neither 0 nor 1.                                                    |
-| `index-trailing-bytes`         | corrupt     | The index or a listing region has bytes after its last record.                         |
-| `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record start.                                  |
-| `entry-out-of-bounds`          | corrupt     | An entry's stored bytes would end past the data area.                                  |
-| `region-too-large`             | resource    | An index region exceeds 256 MiB.                                                       |
-| `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                         |
-| `paths-too-large`              | resource    | Directory and file names would build more path text than the 64 MiB report allows.     |
+| Reason                         | Kind        | Meaning                                                                                 |
+| ------------------------------ | ----------- | --------------------------------------------------------------------------------------- |
+| `unrecognized-footer`          | unsupported | No pak footer layout matches the end of the file.                                       |
+| `frozen-index`                 | unsupported | Version 9 frozen indexes store a serialized memory image.                               |
+| `region-out-of-bounds`         | corrupt     | An index region ends past the footer or a 64-bit value exceeds the safe integer range.  |
+| `truncated-record`             | corrupt     | A record or declared block list ends past its region.                                   |
+| `invalid-string`               | corrupt     | A string lacks its terminator or is not valid UTF-8.                                    |
+| `invalid-flag`                 | corrupt     | A boolean field is neither 0 nor 1.                                                     |
+| `index-trailing-bytes`         | corrupt     | The index or a listing region has bytes after its last record.                          |
+| `entry-reference-out-of-range` | corrupt     | A directory or path hash entry names no record start.                                   |
+| `entry-out-of-bounds`          | corrupt     | An entry's stored bytes would end past the data area.                                   |
+| `region-too-large`             | resource    | The index regions read for one pak exceed 256 MiB together.                             |
+| `too-many-entries`             | resource    | An index declares more than 1,000,000 entries.                                          |
+| `paths-too-large`              | resource    | The mount point and paths would exceed 67,108,864 UTF-16 code units, the report budget. |
 
 Long index decodes yield every 4,096 records and stop there when the request is
 cancelled. Each reader admits one inspection at a time. A reader failure after
@@ -155,8 +166,20 @@ cancellation observed after the reader returned its complete report keeps the
 decoded report as partial Evidence.
 
 The complete report is limited to 64 MiB. It is refused from the declared entry
-count before entries are built when even minimal rows would exceed it. There is
-no partial success.
+count before entries are built when even minimal rows would exceed it; that
+refusal comes before the file is hashed, so it keeps no partial Evidence. A
+finished report above the limit is refused after hashing and keeps the hashed
+source identity only. There is no partial success.
+
+`region-too-large` and `too-many-entries` report resource `file-size` with
+`maximum_region_bytes` and `maximum_entries`. `paths-too-large` reports
+resource `transport` with `maximum_output_bytes` and
+`maximum_path_utf16_units`, because path text is report text.
+
+The 256 MiB region limit is shared: the index, the path hash index and the full
+directory index count against one total, because all three can be held at
+once. Decoding also keeps one listing's file rows, the path hash table and the
+returned entries; peak memory has not been measured.
 
 ## Outside this tool
 

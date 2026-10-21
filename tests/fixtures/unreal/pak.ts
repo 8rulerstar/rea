@@ -57,6 +57,12 @@ export interface PakFixtureOptions {
   readonly strayHashOffset?: number;
   /** Version 10+: empty directories added to the full directory index. */
   readonly emptyDirectories?: number;
+  /** Version 10+: write directory names without their closing slash. */
+  readonly unslashedDirectories?: boolean;
+  /** Version 10+: flip one bit of the first path hash. */
+  readonly mismatchedPathHash?: boolean;
+  /** Version 10+: compressed encoded records appended that no listing references. */
+  readonly unreferencedRecords?: number;
 }
 
 export const PAK_FIXTURE_FILES: readonly PakFixtureFile[] = [
@@ -161,14 +167,22 @@ const encodedRecord = (file: Placed) => {
   return Buffer.concat(parts);
 };
 
-const fnv64 = (path: string) => {
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of Buffer.from(path.toLowerCase(), "utf8")) {
+/**
+ * FPakFile::HashPath for version 11+ (UE 5.8 PakFile.cpp): ASCII-lowercased
+ * UTF-16LE units, FNV-64 with the seed added to the offset basis. Version 10
+ * paks get the same hash, as repak 0.2.3 writes them.
+ */
+const pathHash = (path: string, seed: bigint) => {
+  const lower = path.replace(/[A-Z]/gu, (c) => c.toLowerCase());
+  let hash = (0xcbf29ce484222325n + seed) & 0xffffffffffffffffn;
+  for (const byte of Buffer.from(lower, "utf16le")) {
     hash ^= BigInt(byte);
     hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
   }
   return hash;
 };
+
+const PATH_HASH_SEED = 0x1234n;
 
 const footer = (
   options: PakFixtureOptions,
@@ -197,6 +211,19 @@ const footer = (
   }
   return Buffer.concat(parts);
 };
+
+/** Compressed encoded records that no listing references. */
+const unreferenced = (count: number) =>
+  Array.from({ length: count }, () =>
+    encodedRecord({
+      path: "",
+      size: 0,
+      offset: 0,
+      stored: 0,
+      uncompressed: 0,
+      method: 1,
+    }),
+  );
 
 /** Build one pak file; returns the bytes and the placed files for assertions. */
 export const createPakFixture = (options: PakFixtureOptions) => {
@@ -264,12 +291,13 @@ export const createPakFixture = (options: PakFixtureOptions) => {
         }),
       );
     }
+    encodedParts.push(...unreferenced(options.unreferencedRecords ?? 0));
     const encoded = Buffer.concat(encodedParts);
     // Region offsets are absolute, after the data area and the main index.
     const directories = new Map<string, [string, number][]>();
     placed.forEach((file, at) => {
       const slash = file.path.lastIndexOf("/");
-      const directory = `/${file.path.slice(0, slash + 1)}`;
+      const directory = `/${file.path.slice(0, options.unslashedDirectories === true ? slash : slash + 1)}`;
       const list = directories.get(directory) ?? [];
       list.push([file.path.slice(slash + 1), references[at]!]);
       directories.set(directory, list);
@@ -294,7 +322,10 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     const phi = Buffer.concat([
       u32(placed.length),
       ...placed.flatMap((file, at) => [
-        u64(fnv64(file.path)),
+        u64(
+          pathHash(file.path, PATH_HASH_SEED) ^
+            (at === 0 && options.mismatchedPathHash === true ? 1n : 0n),
+        ),
         i32(hashReferences[at]!),
       ]),
       // An empty pruned directory index, as repak writes it.
@@ -307,7 +338,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       Buffer.concat([
         mount,
         u32(options.declaredEntries ?? placed.length),
-        u64(0x1234),
+        u64(PATH_HASH_SEED),
         u32(withPhi ? 1 : 0),
         ...(withPhi ? [u64(phiOffset), u64(phi.length), digest(phi)] : []),
         u32(withFdi ? 1 : 0),
