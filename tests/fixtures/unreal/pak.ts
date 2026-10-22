@@ -63,6 +63,8 @@ export interface PakFixtureOptions {
   readonly mismatchedPathHash?: boolean;
   /** Version 10+: compressed encoded records appended that no listing references. */
   readonly unreferencedRecords?: number;
+  /** Version 1: the FDateTime tick count every record stores (default 0). */
+  readonly timestamp?: bigint;
 }
 
 export const PAK_FIXTURE_FILES: readonly PakFixtureFile[] = [
@@ -124,6 +126,7 @@ const fullRecord = (
   layout: PakFixtureLayout,
   file: Placed,
   seed: number,
+  timestamp = 0n,
 ) => {
   const parts = [
     u64(file.offset),
@@ -131,7 +134,7 @@ const fullRecord = (
     u64(file.uncompressed),
     layout === "v8a" ? Buffer.of(file.method) : u32(file.method),
   ];
-  if (version === 1) parts.push(u64(0));
+  if (version === 1) parts.push(u64(timestamp));
   parts.push(sha1(seed));
   if (version >= 3) {
     if (file.method !== 0) {
@@ -261,7 +264,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       u32(placed.length),
       ...placed.flatMap((file, at) => [
         fstring(file.path),
-        fullRecord(version, options.layout, file, at),
+        fullRecord(version, options.layout, file, at, options.timestamp),
       ]),
     ]);
   } else {
@@ -270,7 +273,9 @@ export const createPakFixture = (options: PakFixtureOptions) => {
     let encodedLength = 0;
     const references = placed.map((file, at) => {
       if (file.fullRecord === true) {
-        fullParts.push(fullRecord(version, options.layout, file, at));
+        fullParts.push(
+          fullRecord(version, options.layout, file, at, options.timestamp),
+        );
         return -fullParts.length;
       }
       const reference = encodedLength;
@@ -291,7 +296,8 @@ export const createPakFixture = (options: PakFixtureOptions) => {
         }),
       );
     }
-    encodedParts.push(...unreferenced(options.unreferencedRecords ?? 0));
+    for (const record of unreferenced(options.unreferencedRecords ?? 0))
+      encodedParts.push(record);
     const encoded = Buffer.concat(encodedParts);
     // Region offsets are absolute, after the data area and the main index.
     const directories = new Map<string, [string, number][]>();

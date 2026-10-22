@@ -361,6 +361,16 @@ describe("inconsistent Unreal pak indexes", () => {
     },
   );
 
+  it("skips a version 1 timestamp above the safe integer range", async () => {
+    // 2024-01-01 as FDateTime ticks (100 ns since 0001-01-01), about 6.4e17.
+    const timestamp = 638_396_640_000_000_000n;
+    const plain = await read(createPakFixture({ layout: "v1" }).bytes);
+    const pak = await read(createPakFixture({ layout: "v1", timestamp }).bytes);
+    expect(timestamp).toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
+    expect(pak.entries).toEqual(plain.entries);
+    expect(pak.issues).toEqual([]);
+  });
+
   it("nulls the compression name of an entry naming an empty slot", async () => {
     const { bytes } = createPakFixture({ layout: "v11" });
     // The five 32-byte compression names end the footer; clear slot 1 (Zlib).

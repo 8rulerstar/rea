@@ -124,7 +124,14 @@ const LEGACY_COMPRESSION = new Map([
  * Contradictions between redundant facts that leave the structure readable.
  * Each is recorded once at its file offset, and decoding continues.
  */
-class IssueSink {
+interface IssueReporter {
+  report(kind: UnrealPakIssue["kind"], offset: number, message: string): void;
+}
+
+/** For structure-only walks whose issues are never returned: keeps nothing. */
+const discardIssues: IssueReporter = { report: () => undefined };
+
+class IssueSink implements IssueReporter {
   readonly issues: UnrealPakIssue[] = [];
   readonly #seen = new Set<string>();
   report(kind: UnrealPakIssue["kind"], offset: number, message: string) {
@@ -142,7 +149,7 @@ class Cursor {
     readonly label: string,
     /** File offset of bytes[0], so issues name file offsets. */
     readonly base: number,
-    readonly sink: IssueSink,
+    readonly sink: IssueReporter,
   ) {}
   /** File offset of the current position. */
   get at() {
@@ -159,6 +166,10 @@ class Cursor {
     this.position += length;
     return at;
   }
+  /** Bytes the reader does not interpret, still bounded by the region. */
+  skip = (length: number) => {
+    this.take(length);
+  };
   u8 = () => this.bytes.readUInt8(this.take(1));
   u32 = () => this.bytes.readUInt32LE(this.take(4));
   i32 = () => this.bytes.readInt32LE(this.take(4));
@@ -278,12 +289,12 @@ const readFooter = async (
       (layoutShape.encryptedFlag ? 1 : 0);
     if (tail.readUInt32LE(magicAt) !== UNREAL_PAK_MAGIC) continue;
     if (tail.readUInt32LE(magicAt + 4) !== layoutShape.version) continue;
-    // The footer has no redundant facts, so its sink is never read.
+    // The footer has no redundant facts, so it reports nothing.
     const cursor = new Cursor(
       tail.subarray(start),
       "footer",
       source.size - tailLength + start,
-      new IssueSink(),
+      discardIssues,
     );
     const keyGuid = layoutShape.keyGuid ? cursor.hex(16) : null;
     const indexEncrypted = layoutShape.encryptedFlag
@@ -430,7 +441,8 @@ const readFullEntry = (
   const size = cursor.u64();
   const uncompressed = cursor.u64();
   const method = footer.layout === "v8a" ? cursor.u8() : cursor.u32();
-  if (footer.version === 1) cursor.u64();
+  // FDateTime ticks exceed the safe integer range and are not reported.
+  if (footer.version === 1) cursor.skip(8);
   const sha1 = sha1Hex(cursor);
   let blocks = 0;
   if (footer.version >= 3 && method !== 0) {
@@ -703,10 +715,14 @@ export const readUnrealPak = async (
   index.position += encodedSize;
   // Walk the encoded records so references can only name a record start.
   // Records are reported only when a listing resolves them, so the walk and
-  // the full-record pre-read below write no issues.
-  const unreported = new IssueSink();
+  // the full-record pre-read below keep no issues.
   const recordStarts = new Set<number>();
-  const walk = new Cursor(encoded, "encoded entries", encodedBase, unreported);
+  const walk = new Cursor(
+    encoded,
+    "encoded entries",
+    encodedBase,
+    discardIssues,
+  );
   while (walk.position < encoded.length) {
     checkCountLimit(recordStarts.size + 1, limits, "encoded entries");
     recordStarts.add(walk.position);
@@ -717,7 +733,12 @@ export const readUnrealPak = async (
   checkEntryCount(fullCount, limits, "non-encoded entry list");
   const fullEntries: { bytes: Buffer; base: number }[] = [];
   // Pre-read with a cursor that reports nothing, then continue after it.
-  const preRead = new Cursor(index.bytes, index.label, index.base, unreported);
+  const preRead = new Cursor(
+    index.bytes,
+    index.label,
+    index.base,
+    discardIssues,
+  );
   for (let at = 0; at < fullCount; at++) {
     const start = index.position;
     const base = index.at;
