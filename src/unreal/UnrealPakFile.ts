@@ -62,6 +62,8 @@ export interface UnrealPakLimits {
   readonly pathChars: number;
   /** Called with each declared entry count before its entries are built; may throw. */
   readonly beforeEntries?: (count: number) => void;
+  /** Called with the JSON bytes of all returned issues before each one is kept; may throw. */
+  readonly beforeIssues?: (bytes: number) => void;
   /** Awaited every YIELD_EVERY decoded records so long decodes yield and observe cancellation. */
   readonly pause?: () => Promise<void>;
 }
@@ -134,11 +136,18 @@ const discardIssues: IssueReporter = { report: () => undefined };
 class IssueSink implements IssueReporter {
   readonly issues: UnrealPakIssue[] = [];
   readonly #seen = new Set<string>();
+  #bytes = 0;
+  constructor(readonly limits: UnrealPakLimits) {}
   report(kind: UnrealPakIssue["kind"], offset: number, message: string) {
     const key = `${kind}:${offset}`;
     if (this.#seen.has(key)) return;
+    const issue = { kind, offset, message };
+    // Issues are report rows too: charge each one before its message and
+    // deduplication key are kept, so a hostile index cannot grow them unbounded.
+    this.#bytes += Buffer.byteLength(JSON.stringify(issue)) + 1;
+    this.limits.beforeIssues?.(this.#bytes);
     this.#seen.add(key);
-    this.issues.push({ kind, offset, message });
+    this.issues.push(issue);
   }
 }
 
@@ -636,7 +645,7 @@ export const readUnrealPak = async (
     checkRegion(footer.index, limits, "index", dataEnd);
     return { footer, index: { state: "encrypted" }, entries: [], issues: [] };
   }
-  const sink = new IssueSink();
+  const sink = new IssueSink(limits);
   const held: RegionBudget = { used: 0 };
   const index = await readRegion(
     source,

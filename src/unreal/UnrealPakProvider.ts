@@ -299,6 +299,9 @@ export class UnrealPakProvider implements UnrealPakPort {
                 if (count * ENTRY_ROW > limit)
                   throw outputLimit(input.path, limit);
               },
+              beforeIssues: (issueBytes) => {
+                if (issueBytes > limit) throw outputLimit(input.path, limit);
+              },
             }),
           options?.signal,
           this.#resources,

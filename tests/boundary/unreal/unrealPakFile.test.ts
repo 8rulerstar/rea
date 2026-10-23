@@ -673,3 +673,30 @@ describe("Unreal pak listings checked against each other", () => {
     });
   });
 });
+
+describe("Unreal pak issue budget", () => {
+  it("charges each issue to the issue hook before keeping it", async () => {
+    const seen: number[] = [];
+    await expect(
+      read(
+        createPakFixture({
+          layout: "v11",
+          emptyDirectories: 100,
+          unslashedDirectories: true,
+        }).bytes,
+        {
+          ...LIMITS,
+          beforeIssues: (bytes) => {
+            seen.push(bytes);
+            if (seen.length === 5) throw new Error("refused");
+          },
+        },
+      ),
+    ).rejects.toThrow("refused");
+    // Empty malformed directories produce no rows, but their issues are charged.
+    expect(seen).toHaveLength(5);
+    expect(seen.every((bytes, at) => at === 0 || bytes > seen[at - 1]!)).toBe(
+      true,
+    );
+  });
+});

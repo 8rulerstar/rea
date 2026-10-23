@@ -57,7 +57,7 @@ export interface PakFixtureOptions {
   readonly strayHashOffset?: number;
   /** Version 10+: empty directories added to the full directory index. */
   readonly emptyDirectories?: number;
-  /** Version 10+: write directory names without their closing slash. */
+  /** Version 10+: write directory names, empty ones too, without their closing slash. */
   readonly unslashedDirectories?: boolean;
   /** Version 10+: flip one bit of the first path hash. */
   readonly mismatchedPathHash?: boolean;
@@ -309,7 +309,10 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       directories.set(directory, list);
     });
     for (let at = 0; at < (options.emptyDirectories ?? 0); at++)
-      directories.set(`/Empty${at}/`, []);
+      directories.set(
+        `/Empty${at}${options.unslashedDirectories === true ? "" : "/"}`,
+        [],
+      );
     const fdi = Buffer.concat([
       u32(directories.size),
       ...[...directories].flatMap(([directory, list]) => [
