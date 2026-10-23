@@ -8,7 +8,7 @@ import { parseProcessCaptureEvidence } from "../application/process/ProcessEvide
 import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
 import type { PromptCompletionKind } from "../contracts/promptContracts.js";
 import { addressedValueSchema } from "../domain/native/nativeInventory.js";
-import { currentMcpRequestSignal } from "./EvidenceMcpServer.js";
+import { currentMcpRequestSignal } from "./EvidenceMcpServerCore.js";
 import { parseArtifactInventoryEvidence } from "../domain/artifactInventoryEvidence.js";
 import { EvidenceIntegrityError } from "../domain/evidenceErrors.js";
 
@@ -205,12 +205,7 @@ const artifactInventoryValues = (
       ? [inventory.manifest.manifest_id]
       : inventory.occurrences.map(({ occurrence_id: id }) => id);
   } catch (cause: unknown) {
-    if (
-      cause instanceof TypeError ||
-      cause instanceof z.ZodError ||
-      cause instanceof EvidenceIntegrityError
-    )
-      return [];
+    if (cause instanceof EvidenceIntegrityError) return [];
     throw cause;
   }
 };
@@ -224,11 +219,7 @@ const isProcessCaptureEvidence = (evidence: LedgerEvidence): boolean => {
       return false;
     case "invalid-evidence":
     case "invalid-capture":
-      if (
-        parsed.error.cause instanceof TypeError ||
-        parsed.error.cause instanceof z.ZodError
-      )
-        return false;
+      if (parsed.error.cause instanceof z.ZodError) return false;
       throw parsed.error.cause;
   }
 };

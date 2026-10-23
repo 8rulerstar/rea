@@ -4,6 +4,7 @@ import {
   type JavaScriptSemanticAnalysisState,
 } from "./javascriptSemanticState.js";
 import {
+  isRuntimeJavaScriptClassProperty,
   semanticStaticPropertyKey,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
@@ -118,7 +119,7 @@ const instanceFieldReferences = (
         ? current.klass.body.body
         : current.klass.body.body.slice(0, before);
     for (const member of [...members].reverse()) {
-      if (!t.isClassProperty(member) || member.static) continue;
+      if (!isRuntimeJavaScriptClassProperty(member) || member.static) continue;
       const key = semanticStaticPropertyKey(member.key, member.computed);
       if (key !== null && shadowed.has(key)) continue;
       if (key !== null) shadowed.add(key);
@@ -169,10 +170,15 @@ const classPropertyDescriptors = (
       ? -1
       : klass.body.body.indexOf(initializedBefore);
   klass.body.body.forEach((member, index) => {
-    if (before >= 0 && index >= before && t.isClassProperty(member)) return;
+    if (
+      before >= 0 &&
+      index >= before &&
+      isRuntimeJavaScriptClassProperty(member)
+    )
+      return;
     if (
       (t.isClassMethod(member) ||
-        (kind === "static" && t.isClassProperty(member))) &&
+        (kind === "static" && isRuntimeJavaScriptClassProperty(member))) &&
       member.static === isStatic
     )
       indexedMembers.push({
@@ -690,6 +696,19 @@ class ObjectReferenceWalk {
     property: t.ObjectMethod | t.ObjectProperty,
     name: string | null,
   ): void {
+    // An earlier unknown computed key cannot replace a later definite slot.
+    // Spreads obey the same overwrite proof; paired named accessors below
+    // retain their separate getter/setter semantics.
+    if (
+      name === null &&
+      this.#key != null &&
+      typeof this.#key !== "object" &&
+      (t.isObjectMethod(property, { kind: "get" })
+        ? this.#data.has(String(this.#key)) ||
+          this.#getters.has(String(this.#key))
+        : this.#overwritten.has(String(this.#key)))
+    )
+      return;
     if (
       name !== null &&
       !semanticPropertyPathKeyMatches(this.#key ?? null, name)

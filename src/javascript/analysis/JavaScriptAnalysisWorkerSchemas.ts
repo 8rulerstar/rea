@@ -2,6 +2,7 @@ import { javaScriptSemanticUnknownOmissionsSchema } from "../../domain/javascrip
 import { z } from "zod";
 import { digestSchema } from "../../domain/digests.js";
 import type { JavaScriptStaticAnalysis } from "../../domain/javascript/javascriptStaticAnalysisTypes.js";
+import { javaScriptRouteSourceFactsSchema } from "../../domain/javascript/javascriptRouteFacts.js";
 import { JAVASCRIPT_AST_FINGERPRINT_ALGORITHM } from "../../domain/javascript/javascriptStaticAnalysisTypes.js";
 import type {
   JavaScriptSemanticProperty,
@@ -17,7 +18,7 @@ import {
 
 const range =
   javaScriptSemanticNodeSchema.shape.identity.shape.source_range.unwrap();
-const count = z.number().int().nonnegative();
+const count = z.int().nonnegative();
 const strings = z.array(z.string());
 const pathContext = z.enum(["module-specifier", "filesystem-expression"]);
 const findingContext = {
@@ -308,6 +309,7 @@ const referenceShape = {
 export const javaScriptWorkerStaticAnalysisSchema = z
   .strictObject({
     parse_status: z.enum(["complete", "partial", "failed"]),
+    routes: javaScriptRouteSourceFactsSchema.exactOptional(),
     parse_error_count: count,
     visited_ast_nodes: count,
     references: z.array(

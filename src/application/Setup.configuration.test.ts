@@ -7,7 +7,10 @@ import { setupRegistrationCommand } from "./SetupHost.js";
 import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 import { discoverSetupState } from "./SetupPlan.js";
 import type { MsixPackageView } from "./MsixPackageStorage.js";
-import type { SetupClient } from "./SupportedClients.js";
+import {
+  registrationWriteBlocker,
+  type SetupClient,
+} from "./SupportedClients.js";
 
 // Host joins keep containment checks meaningful on POSIX test hosts too.
 const PROFILE = String.raw`C:\Users\a`;
@@ -102,20 +105,6 @@ describe("setup workflow", () => {
     );
   });
 
-  it("reports a failed Hopper installation without configuring clients", async () => {
-    const host = new FakeSetupHost();
-    host.hopperInstallSucceeds = false;
-    host.clients = [{ name: "cursor", configPath: "/cursor.json" }];
-    const result = await runSetup(
-      { ...options(true, true), clientIds: [] },
-      host,
-    );
-    expect(result.status).toBe("needs_human");
-    expect(result.code).toBe("download_failed");
-    expect(result.remediation).toBe("Download failed.");
-    expect(host.configurations).toBe(0);
-  });
-
   it("blocks malformed client configuration before Hopper or file mutation", async () => {
     const host = new FakeSetupHost();
     host.clients = [
@@ -190,6 +179,63 @@ describe("setup workflow", () => {
       operation: "update",
     });
     expect(host.configurations).toBe(0);
+  });
+});
+
+describe("optional Hopper installation failures", () => {
+  it("reports a failed Hopper installation and still configures the selected clients", async () => {
+    // Hopper is optional; a package conflict must not cost the approved client
+    // registrations and skill (#5113).
+    const host = new FakeSetupHost();
+    host.hopperInstallSucceeds = false;
+    host.clients = [{ name: "cursor", configPath: "/cursor.json" }];
+    const result = await runSetup(
+      {
+        ...options(true, true),
+        clientIds: ["cursor"],
+        skillClientIds: ["cursor"],
+      },
+      host,
+    );
+    expect(result.status).toBe("needs_human");
+    expect(result.code).toBe("download_failed");
+    expect(result.remediation).toBe("Download failed.");
+    expect(result.appliedActions).not.toContain("installed_hopper");
+    expect(host.configurations).toBe(1);
+    expect(host.configuredProviderEnvironments).toEqual([{}]);
+    expect(host.skillInstalls).toBe(1);
+  });
+
+  it("keeps the Hopper failure when a client write also fails", async () => {
+    const host = new FakeSetupHost();
+    host.hopperInstallSucceeds = false;
+    host.clients = [{ name: "cursor", configPath: "/cursor.json" }];
+    host.clientResults.set("cursor", { status: "failed", reason: "write" });
+    const result = await runSetup(
+      { ...options(true, true), clientIds: ["cursor"] },
+      host,
+    );
+    expect(result.code).toBe("download_failed");
+    expect(result.remediation).toMatch(/^Download failed\. ./);
+    expect(host.configurations).toBe(1);
+  });
+
+  it("keeps the Hopper repair steps when the skill install also fails", async () => {
+    const host = new FakeSetupHost();
+    host.hopperInstallSucceeds = false;
+    host.skill = "failed";
+    host.clients = [{ name: "cursor", configPath: "/cursor.json" }];
+    const result = await runSetup(
+      {
+        ...options(true, true),
+        clientIds: ["cursor"],
+        skillClientIds: ["cursor"],
+      },
+      host,
+    );
+    expect(result.code).toBe("skill_install_failed");
+    expect(result.remediation).toMatch(/^Download failed\. ./);
+    expect(host.skillInstalls).toBe(1);
   });
 });
 
@@ -416,6 +462,17 @@ describe("MSIX Claude Desktop setup", () => {
     );
     expect(action?.detail).toContain(
       "Quit Claude Desktop fully before approving; closing its window is not enough.",
+    );
+  });
+
+  it("names the files to edit by hand when the process view is unknown", () => {
+    // The package reads its private copy, so a manual setup edit belongs there.
+    const client = msixClaudeDesktop("unknown");
+    expect(registrationWriteBlocker(client, "setup")).toContain(
+      `Add REA's entry to ${PRIVATE_CONFIG} by hand`,
+    );
+    expect(registrationWriteBlocker(client, "uninstall")).toContain(
+      `Remove REA's entry by hand from each of ${PRIVATE_CONFIG} and ${APPDATA_CONFIG} that has one`,
     );
   });
 

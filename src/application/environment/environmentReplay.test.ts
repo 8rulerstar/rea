@@ -17,6 +17,7 @@ import {
   type RecordedExchange,
 } from "./environmentSource.js";
 import {
+  pathValueMatches,
   replayEnvironmentTool,
   selectReplayExchange,
 } from "./environmentReplay.js";
@@ -40,7 +41,7 @@ const replay = (
 };
 
 /** The fixture source with /api/users/2's response replaced by HAR base64 content the decoder retained. */
-const base64Source = (bytes: Buffer): EnvironmentSource => {
+const base64Source = async (bytes: Buffer): Promise<EnvironmentSource> => {
   const capture = environmentManifestCaptureFixture();
   const record = capture.records.find(
     (entry) =>
@@ -67,7 +68,7 @@ const base64Source = (bytes: Buffer): EnvironmentSource => {
     },
   ];
   const evidence = analysisViewCaptureEvidence(capture);
-  const manifest = inspectAnalysisView({
+  const manifest = await inspectAnalysisView({
     source: { kind: "inline", evidence },
     view: { kind: "environment-manifest" },
   });
@@ -111,6 +112,16 @@ describe("replay argument mapping and query admission", () => {
     expect(
       selectReplayExchange(long, source.exchanges, { path_1: "3" }),
     ).toMatchObject({ exchange: { path: "/api/users/3" }, exact: true });
+  });
+});
+
+describe("pathValueMatches", () => {
+  it("matches one decode of either side and not a second decode of both", () => {
+    expect(pathValueMatches("2", "%32")).toBe(true);
+    expect(pathValueMatches("%32", "2")).toBe(true);
+    expect(pathValueMatches("book1", "book%2531")).toBe(false);
+    expect(pathValueMatches("book%2531", "book1")).toBe(false);
+    expect(pathValueMatches("book%31", "book%2531")).toBe(true);
   });
 });
 
@@ -367,15 +378,17 @@ describe("replayEnvironmentTool bodies", () => {
     ).toMatchObject({ body: exact, replay: { truncated: false } });
   });
 
-  it("decodes retained HAR base64 bytes that are UTF-8 and keeps other bytes as base64", () => {
-    const decoded = base64Source(Buffer.from('{"login":"decoded"}', "utf8"));
+  it("decodes retained HAR base64 bytes that are UTF-8 and keeps other bytes as base64", async () => {
+    const decoded = await base64Source(
+      Buffer.from('{"login":"decoded"}', "utf8"),
+    );
     expect(replay("get_users_by_id", { id: "2" }, decoded)).toMatchObject({
       body: { login: "decoded" },
       replay: { body_encoding: "utf-8" },
     });
     const binary = Buffer.from([0xff, 0xfe, 0x00, 0x41]);
     expect(
-      replay("get_users_by_id", { id: "2" }, base64Source(binary)),
+      replay("get_users_by_id", { id: "2" }, await base64Source(binary)),
     ).toMatchObject({
       body: binary.toString("base64"),
       replay: { body_encoding: "base64", body_recorded: true },
@@ -385,12 +398,12 @@ describe("replayEnvironmentTool bodies", () => {
       replay(
         "get_users_by_id",
         { id: "2" },
-        base64Source(Buffer.from([0xef, 0xbb, 0xbf, 0x41])),
+        await base64Source(Buffer.from([0xef, 0xbb, 0xbf, 0x41])),
       ).body,
     ).toBe("\uFEFFA");
   });
 
-  it("decodes only the replayable prefix of a large retained base64 body and flags it truncated", () => {
+  it("decodes only the replayable prefix of a large retained base64 body and flags it truncated", async () => {
     for (const [fill, encoding] of [
       [0x61, "utf-8"],
       [0xff, "base64"],
@@ -399,7 +412,7 @@ describe("replayEnvironmentTool bodies", () => {
       const result = replay(
         "get_users_by_id",
         { id: "2" },
-        base64Source(large),
+        await base64Source(large),
       );
       expect(result.replay).toMatchObject({
         truncated: true,
@@ -416,7 +429,7 @@ describe("replayEnvironmentTool bodies", () => {
     // Under the limit in recorded bytes, even though its base64 spelling is longer.
     const small = Buffer.alloc(200 * 1024, 0xff);
     expect(
-      replay("get_users_by_id", { id: "2" }, base64Source(small)),
+      replay("get_users_by_id", { id: "2" }, await base64Source(small)),
     ).toMatchObject({
       body: small.toString("base64"),
       replay: { truncated: false, body_encoding: "base64" },

@@ -23,6 +23,7 @@ import {
   validateArtifactInventorySubject,
   parseArtifactInspectionInventoryResult,
   parseArtifactInventoryResult,
+  ArtifactInventoryValidationError,
   type InventorySet,
 } from "../artifactInventoryEvidence.js";
 import type { ArtifactInspectionResult } from "../artifactInspection.js";
@@ -35,6 +36,7 @@ import {
   completeWithinViewCoverage,
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
+import { analysisViewResultInputError } from "./analysisViewParent.js";
 
 const page = {
   kind: z.literal("inventory"),
@@ -172,7 +174,7 @@ const parseSource = (
         cached.source.inventory.manifest,
       );
     } catch (cause: unknown) {
-      return sourceFailure(cause);
+      return sourceFailure(parent.normalizedResult, cause);
     }
     return ok(cached.source);
   }
@@ -208,13 +210,17 @@ const parseSourceUncached = (
       inspection: parsed.inspection,
     });
   } catch (cause: unknown) {
-    return sourceFailure(cause);
+    return sourceFailure(parent.normalizedResult, cause);
   }
 };
 
-const sourceFailure = (cause: unknown): Result<never, AnalysisError> => {
-  if (!(cause instanceof TypeError) && !(cause instanceof z.ZodError))
-    throw cause;
+const sourceFailure = (
+  input: unknown,
+  cause: unknown,
+): Result<never, AnalysisError> => {
+  if (cause instanceof z.ZodError)
+    return err(analysisViewResultInputError(input, cause));
+  if (!(cause instanceof ArtifactInventoryValidationError)) throw cause;
   return err(inputError(cause.message));
 };
 

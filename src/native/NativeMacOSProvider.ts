@@ -46,8 +46,10 @@ import {
   isMachOFormat,
   type BinaryTarget,
 } from "../domain/binaryTargetTypes.js";
-import { isAppleDispatchMetadataTarget } from "../domain/native/objcSwiftMetadata.js";
-import { toolContract } from "../contracts/toolContracts.js";
+import {
+  isAppleDispatchMetadataTarget,
+  nativeDispatchMetadataInputSchema,
+} from "../domain/native/objcSwiftMetadata.js";
 import { analysisInputErrorFromIssues } from "../domain/inputIssueProjection.js";
 import type { EvidenceLocation } from "../domain/evidence.js";
 import {
@@ -59,6 +61,7 @@ import {
   AnalysisTimeoutError,
 } from "../domain/analysisErrorCore.js";
 import {
+  DEFAULT_NATIVE_COMMAND_TIMEOUT_MS,
   DEFAULT_NATIVE_UI_DEADLINE_MS,
   MAX_NATIVE_TIMER_MS,
   fixedNativeAllowance,
@@ -95,7 +98,6 @@ import {
 } from "../domain/native/nativeInspection.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
-  NATIVE_COMMAND_TIMEOUT_MS,
   NATIVE_COMMAND_OUTPUT_BUDGET_BYTES,
   NATIVE_FAILURE_DIAGNOSTIC_BYTES,
   NativeCommandFailure,
@@ -270,7 +272,7 @@ class NativeMacOSClient implements AnalysisClient {
         ),
       );
     if (operation === "inspect_native_dispatch_metadata") {
-      const input = toolContract(operation).inputSchema.safeParse(parameters);
+      const input = nativeDispatchMetadataInputSchema.safeParse(parameters);
       if (!input.success)
         return err(
           analysisInputErrorFromIssues(
@@ -296,9 +298,13 @@ class NativeMacOSClient implements AnalysisClient {
             this.target,
             input.data.max_records,
             this.#dispatchResources,
-            options?.signal,
-            input.data.objc_class_import_addresses,
-            input.data.objc_class_import_addresses_complete ?? true,
+            {
+              signal: options?.signal,
+              objcClassImportAddresses: input.data.objc_class_import_addresses,
+              objcClassImportAddressesComplete:
+                input.data.objc_class_import_addresses_complete ?? true,
+              maxInputBytes: input.data.max_input_bytes,
+            },
           ),
         );
         return ok(
@@ -603,7 +609,7 @@ class NativeMacOSClient implements AnalysisClient {
   ): Promise<Result<NativeObservation, AnalysisError>> {
     const timeout = readNativeDeadline(
       parameters.native_command_timeout_ms,
-      NATIVE_COMMAND_TIMEOUT_MS,
+      DEFAULT_NATIVE_COMMAND_TIMEOUT_MS,
     );
     if (!timeout.ok)
       return Promise.resolve(
@@ -1295,7 +1301,7 @@ const isNativeOperation = (
 const translateCommandFailure = (
   operation: NativeToolName,
   failure: NativeCommandFailure,
-  timeoutMs = NATIVE_COMMAND_TIMEOUT_MS,
+  timeoutMs = DEFAULT_NATIVE_COMMAND_TIMEOUT_MS,
 ): AnalysisError => {
   const cleanupOwners = [
     ...failure.cleanupFailures,
@@ -1367,7 +1373,7 @@ const translateCommandFailure = (
                 timeoutMs,
                 setting: "native_command_timeout_ms",
                 cliFlag: "--native-command-timeout-ms",
-                defaultMs: NATIVE_COMMAND_TIMEOUT_MS,
+                defaultMs: DEFAULT_NATIVE_COMMAND_TIMEOUT_MS,
                 phase: "macOS native command deadline",
                 unchanged: `The ${String(NATIVE_COMMAND_OUTPUT_BUDGET_BYTES)}-byte command output allowance and the ${String(NATIVE_FAILURE_DIAGNOSTIC_BYTES)}-byte failure-diagnostic excerpt have no runtime override.`,
               }),
@@ -1429,7 +1435,7 @@ const translateCommandFailure = (
           timeoutMs,
           setting: "native_command_timeout_ms",
           cliFlag: "--native-command-timeout-ms",
-          defaultMs: NATIVE_COMMAND_TIMEOUT_MS,
+          defaultMs: DEFAULT_NATIVE_COMMAND_TIMEOUT_MS,
           phase: "macOS native command deadline",
           unchanged: `The ${String(NATIVE_COMMAND_OUTPUT_BUDGET_BYTES)}-byte command output allowance and the ${String(NATIVE_FAILURE_DIAGNOSTIC_BYTES)}-byte failure-diagnostic excerpt have no runtime override.`,
         }),

@@ -62,6 +62,51 @@ const refusal = (
   return projectAnalysisError(result.error);
 };
 
+/** A list with one proved whole line keeps an entity added to an empty later page off that page. */
+const expectAddedEntityStaysOffPage = (
+  query: string,
+  args: Readonly<Record<string, unknown>>,
+  membership: "recorded" | "query" = "query",
+): void => {
+  const alpha = { id: 1, name: "Alpha" };
+  const serving = servingFrom([
+    ["GET", "/api/orgs/1/books", [alpha]],
+    ["GET", "/api/orgs/1/books/1", alpha],
+    ["GET", `/api/orgs/2/books?${query}`, []],
+  ]);
+  expect(serving.store.state.views.get("get_orgs_books_by_id")).toMatchObject({
+    shape: "list",
+    membership: "recorded",
+  });
+  load(serving, (entities) => [
+    ...entities,
+    {
+      type: "/api/orgs/{numeric}/books",
+      collection: "/api/orgs/2/books",
+      id: "9",
+      fields: { id: 9, name: "Added" },
+    },
+  ]);
+  expect(
+    answer(serving, "get_orgs_books_by_id", { id: "2", ...args }),
+  ).toMatchObject({
+    body: [],
+    state: { source: "state", membership, listed: 0 },
+  });
+  // Without a proved whole line here, the argument-less call keeps recorded members.
+  expect(answer(serving, "get_orgs_books_by_id", { id: "2" })).toMatchObject({
+    body: [],
+    state:
+      membership === "query"
+        ? { source: "state", membership: "recorded", listed: 0 }
+        : { source: "recording", reason: "unrecorded-request" },
+  });
+};
+
+/** A list with one proved whole line keeps an entity added to an empty start page off that page. */
+const expectAddedEntityStaysOffStartPage = (name: string): void =>
+  expectAddedEntityStaysOffPage(`${name}=1`, { [name]: "1" });
+
 /** Replace the served state with the initial one changed by `edit`. */
 const load = (
   serving: ReturnType<typeof servingOf>,
@@ -182,6 +227,21 @@ describe("item answers", () => {
   });
 });
 
+describe("loaded later pages", () => {
+  it.each(["offset", "start", "_start"])(
+    "skips an entity added under an empty ?%s=1 page without whole-collection evidence",
+    expectAddedEntityStaysOffStartPage,
+  );
+
+  it("does not list an entity added under an empty ?page=2&per_page=1 page", () => {
+    expectAddedEntityStaysOffPage(
+      "page=2&per_page=1",
+      { page: "2", per_page: "1" },
+      "recorded",
+    );
+  });
+});
+
 describe("list answers", () => {
   it("lists every entity of the collection in state order when membership is all", () => {
     const serving = servingOf();
@@ -265,6 +325,41 @@ describe("list answers", () => {
       replay: { record_ordinal: 0 },
       state: { source: "state", listed: 1 },
     });
+  });
+
+  it("answers an unfiltered call from a paging-only line of the parent its path arguments name", () => {
+    const books = servingFrom([
+      ["GET", "/api/orgs/1/books?limit=50", [{ id: 1 }, { id: 2 }]],
+      ["GET", "/api/orgs/2/books?limit=50", [{ id: 3 }]],
+      ["GET", "/api/orgs/3/books?limit=50", [{ id: 4 }]],
+    ]);
+    expect(answer(books, "get_orgs_books_by_id", { id: "2" })).toMatchObject({
+      body: [{ id: 3 }],
+      replay: { record_ordinal: 1, exact_match: false },
+      state: {
+        source: "state",
+        collection: "/api/orgs/2/books",
+        membership: "all",
+        listed: 1,
+      },
+    });
+    expect(answer(books, "get_orgs_books_by_id", { id: "9" })).toMatchObject({
+      state: { source: "recording", reason: "unrecorded-request" },
+    });
+  });
+
+  it("answers a recorded call that pages by two parameters as it recorded, whatever order they are supplied in", () => {
+    const books = servingFrom([
+      ["GET", "/api/books", [{ id: 1 }, { id: 2 }, { id: 3 }]],
+      ["GET", "/api/books?size=2&limit=1", [{ id: 1 }]],
+    ]);
+    expect(answer(books, "get_books", { size: "2", limit: "1" })).toMatchObject(
+      {
+        body: [{ id: 1 }],
+        replay: { record_ordinal: 1, exact_match: true },
+        state: { source: "state", membership: "query", listed: 1 },
+      },
+    );
   });
 
   it("refuses a list whose member lacks a field every recording carried, never answering a partial body", () => {

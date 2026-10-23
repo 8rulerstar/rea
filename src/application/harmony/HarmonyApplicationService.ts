@@ -1,8 +1,5 @@
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
-import {
-  harmonyApplicationProjectionInputSchema,
-  projectHarmonyApplication,
-} from "../../domain/harmony/harmonyApplication.js";
+import { projectHarmonyInventory } from "../../domain/harmony/harmonyApplication.js";
 import type { Result } from "../../domain/result.js";
 import { HARMONY_APPLICATION_PROVIDER } from "../InvestigationProviders.js";
 import {
@@ -18,13 +15,10 @@ export const projectHarmonyApplicationEvidence = (
 ): Result<InventoryProjectionEvidenceResult, AnalysisError> => {
   return projectInventoryEvidence({
     rawInput,
-    schema: harmonyApplicationProjectionInputSchema,
-    project: projectHarmonyApplication,
+    project: projectHarmonyInventory,
     operation: OPERATION,
     predicateType: "rea.harmony-application-graph",
     provider: HARMONY_APPLICATION_PROVIDER,
     subjectFormat: (first) => first.subject?.format ?? "unknown",
-    protocolError:
-      "HarmonyOS application projection produced an invalid result",
   });
 };

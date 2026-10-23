@@ -5,19 +5,50 @@ import {
   analysisViewCaptureFixture,
   environmentManifestCaptureFixture,
 } from "../../../tests/fixtures/analysisView.js";
+import { scenarioCaptureEvidence } from "../../../tests/fixtures/browserScenarioCapture.js";
 import {
   environmentServeFixture,
   environmentServeSource,
 } from "../../../tests/fixtures/environmentServe.js";
+import { AnalysisInputError } from "../../domain/analysisErrorCore.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
+import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import { inspectAnalysisView } from "../analysisView/AnalysisViewService.js";
 import { loadEnvironmentSource } from "./environmentSource.js";
 
-const refusal = (manifest: unknown, evidence: unknown) => {
-  const loaded = loadEnvironmentSource(manifest, evidence);
+const refusal = (manifest: unknown, evidence: unknown, operation?: string) => {
+  const loaded = loadEnvironmentSource(manifest, evidence, operation);
   if (loaded.ok) throw new Error("Expected the pair to be refused");
   return projectAnalysisError(loaded.error);
 };
+
+/** Authenticated Evidence whose payload is rewritten; createEvidence recomputes the digest. */
+const resealed = (
+  evidence: Evidence,
+  edit: (result: Record<string, unknown>) => void,
+  operation: string = evidence.operation,
+): Evidence => {
+  const result = structuredClone(evidence.normalized_result) as Record<
+    string,
+    unknown
+  >;
+  edit(result);
+  return createEvidence(undefined, evidence.provider, {
+    operation,
+    parameters: structuredClone(evidence.parameters),
+    result: result as never,
+    confidence: evidence.confidence,
+  });
+};
+
+/** Re-cite a manifest's parent so pairing passes and the capture parse alone decides. */
+const citing = (manifest: Evidence, capture: Evidence): Evidence =>
+  resealed(manifest, (result) => {
+    result.parent_evidence_id = capture.evidence_id;
+  });
+
+const record = (value: unknown, key: string): Record<string, unknown> =>
+  (value as Record<string, Record<string, unknown>>)[key] ?? {};
 
 describe("loadEnvironmentSource", () => {
   it("authenticates the pair and indexes every cited record as a replayable exchange", () => {
@@ -92,9 +123,9 @@ describe("loadEnvironmentSource", () => {
     expect(projected.message).toContain("different capture");
   });
 
-  it("refuses manifests of another view kind, non-capture evidence and non-Evidence JSON", () => {
+  it("refuses manifests of another view kind, non-capture evidence and non-Evidence JSON", async () => {
     const fixture = environmentServeFixture();
-    const surface = inspectAnalysisView({
+    const surface = await inspectAnalysisView({
       source: { kind: "inline", evidence: fixture.capture },
       view: { kind: "api-surface" },
     });
@@ -130,14 +161,14 @@ describe("loadEnvironmentSource", () => {
     );
   });
 
-  it("indexes nothing for a manifest that cites no records and leaves tampered captures to authentication", () => {
+  it("indexes nothing for a manifest that cites no records and leaves tampered captures to authentication", async () => {
     const fixture = environmentServeFixture();
     const capture = analysisViewCaptureEvidence({
       ...analysisViewCaptureFixture(),
       records: [],
       total_records: 0,
     });
-    const manifest = inspectAnalysisView({
+    const manifest = await inspectAnalysisView({
       source: { kind: "inline", evidence: capture },
       view: { kind: "environment-manifest" },
     });
@@ -165,8 +196,113 @@ describe("loadEnvironmentSource", () => {
   });
 });
 
+describe("loadEnvironmentSource payload attribution", () => {
+  it("reports capture payload failures beneath normalized_result instead of the supported operation", () => {
+    const fixture = environmentServeFixture();
+    for (const operation of [
+      "inspect_web_network_capture",
+      "capture_browser_scenario",
+    ]) {
+      const capture = createEvidence(undefined, fixture.capture.provider, {
+        operation,
+        parameters: {},
+        result: {},
+        confidence: "observed",
+      });
+      for (const command of ["environment-serve", "environment-export"]) {
+        const loaded = loadEnvironmentSource(
+          citing(fixture.manifest, capture),
+          capture,
+          command,
+        );
+        if (loaded.ok || !(loaded.error instanceof AnalysisInputError))
+          throw new Error("Expected an input refusal");
+        expect(loaded.error.issues.length).toBeGreaterThan(0);
+        for (const issue of loaded.error.issues)
+          expect(issue.path.slice(0, 2)).toEqual([
+            "evidence",
+            "normalized_result",
+          ]);
+        expect(loaded.error.cause).toBeInstanceOf(Error);
+        expect(projectAnalysisError(loaded.error)).toMatchObject({
+          code: "invalid_request",
+          category: "invalid_input",
+          details: { operation: command },
+        });
+      }
+    }
+  });
+
+  it("reports the full path of a nested capture payload field", () => {
+    const fixture = environmentServeFixture();
+    const har = resealed(fixture.capture, (result) => {
+      record(result, "artifact").sha256 = 42;
+    });
+    expect(refusal(citing(fixture.manifest, har), har).details?.issues).toEqual(
+      [
+        expect.objectContaining({
+          path: ["evidence", "normalized_result", "artifact", "sha256"],
+          reason: "invalid_type",
+        }),
+      ],
+    );
+    const scenario = resealed(scenarioCaptureEvidence(), (result) => {
+      record(result, "browser").product = 7;
+    });
+    expect(
+      refusal(citing(fixture.manifest, scenario), scenario).details?.issues,
+    ).toEqual([
+      expect.objectContaining({
+        path: ["evidence", "normalized_result", "browser", "product"],
+        reason: "invalid_type",
+      }),
+    ]);
+  });
+
+  it("still blames the operation of Evidence no capture schema owns", () => {
+    const fixture = environmentServeFixture();
+    const other = resealed(fixture.capture, () => {}, "inspect_other_capture");
+    expect(
+      refusal(citing(fixture.manifest, other), other).details?.issues,
+    ).toEqual([
+      expect.objectContaining({
+        path: ["evidence", "operation"],
+        expected: "inspect_web_network_capture or capture_browser_scenario",
+      }),
+    ]);
+  });
+
+  it("separates the manifest operation, view kind and view payload failures", () => {
+    const fixture = environmentServeFixture();
+    expect(refusal(fixture.capture, fixture.capture).details?.issues).toEqual([
+      expect.objectContaining({
+        path: ["manifest", "operation"],
+        expected: "inspect_analysis_view",
+      }),
+    ]);
+    const malformed = resealed(fixture.manifest, (result) => {
+      result.name = 7;
+    });
+    expect(refusal(malformed, fixture.capture).details?.issues).toEqual([
+      expect.objectContaining({
+        path: ["manifest", "normalized_result", "name"],
+        reason: "invalid_type",
+      }),
+    ]);
+    const unknownKind = resealed(fixture.manifest, (result) => {
+      result.kind = "not-a-view";
+    });
+    expect(refusal(unknownKind, fixture.capture).details?.issues).toEqual([
+      expect.objectContaining({
+        path: ["manifest", "normalized_result", "kind"],
+        expected: "environment-manifest",
+      }),
+    ]);
+  });
+});
+
 describe("loadEnvironmentSource recorded request lines", () => {
-  it("keeps the delimiter of an explicit empty query in the recorded exchange", () => {
+  it("keeps the delimiter of an explicit empty query in the recorded exchange", async () => {
     const capture = environmentManifestCaptureFixture();
     const record = capture.records.find((entry) =>
       JSON.stringify(entry.reported).includes("/api/users/2"),
@@ -178,7 +314,7 @@ describe("loadEnvironmentSource recorded request lines", () => {
     reported.request.url = `${reported.request.url}?`;
     record.reported = reported;
     const evidence = analysisViewCaptureEvidence(capture);
-    const manifest = inspectAnalysisView({
+    const manifest = await inspectAnalysisView({
       source: { kind: "inline", evidence },
       view: { kind: "environment-manifest" },
     });

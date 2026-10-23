@@ -44,6 +44,18 @@ export const browserOriginSchema = z
     return origin;
   });
 
+/** Already-normalized HTTP(S) origin retained in provider output. */
+export const recordedBrowserOriginSchema = z
+  .string()
+  .superRefine((value, context) => {
+    const parsed = browserOriginSchema.safeParse(value);
+    if (parsed.success && parsed.data === value) return;
+    context.addIssue({
+      code: "custom",
+      message: "Expected one canonical HTTP(S) origin",
+    });
+  });
+
 /** Recognize the URL API's bracketed IPv6 form and normalized bare literals. */
 export const isLiteralLoopbackHostname = (hostname: string): boolean =>
   hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
@@ -183,7 +195,7 @@ const inspectWebPageInputFacts = {
   ...browserInput,
   target_id: z.string().trim().min(1),
   command_timeout_ms: webRuntimeCommandTimeoutSchema,
-  observation_ms: z.number().int().min(0).default(500),
+  observation_ms: z.int().min(0).default(500),
   include_accessibility_text: z.boolean().default(false),
   include_console_text: z.boolean().default(false),
   include_json_body_shapes: z.boolean().default(false),

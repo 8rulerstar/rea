@@ -11,6 +11,7 @@ import { unwrapJavaScriptExpression } from "./javascriptAstValues.js";
 import {
   semanticObjectPropertyReferences,
   semanticArrayPropertyReferences,
+  type JavaScriptSemanticObjectReference,
 } from "./javascriptSemanticObjectReferences.js";
 import { SEMANTIC_ALIAS_SELECTION_LIMIT } from "./javascriptSemanticResourceLimits.js";
 import {
@@ -67,6 +68,27 @@ export const semanticShiftCapturedSelections = (
   );
   return semanticNormalizeCapturedSelections(shifted);
 };
+
+/** Record an object/array property selected when a shallow copy was made. */
+export const semanticCapturedSelectionsAfterPropertyRead = (
+  selections: readonly SemanticCapturedSelection[] | undefined,
+  source: Pick<
+    JavaScriptSemanticObjectReference,
+    "path" | "capturedSelectionAt" | "ownEnumerable"
+  >,
+): readonly SemanticCapturedSelection[] => [
+  ...(semanticShiftCapturedSelections(selections, source.path.length - 1) ??
+    []),
+  ...(source.capturedSelectionAt === undefined
+    ? []
+    : [
+        {
+          at: source.capturedSelectionAt,
+          depth: source.path.length,
+          ...(source.ownEnumerable ? { ownEnumerable: true as const } : {}),
+        },
+      ]),
+];
 
 interface ProjectedSource {
   readonly node: t.Node;
@@ -212,6 +234,7 @@ const projectedSourceFactsAtRead = (
       return (
         capture !== undefined &&
         receiverAt !== undefined &&
+        replacement.receiverIdentity === "definite" &&
         t.isAssignmentExpression(replacement.node, { operator: "=" }) &&
         samePrefix(replacement, effect) &&
         semanticTopLevelEffectFollowsCapture(
@@ -268,6 +291,7 @@ const projectedSourceFactsAtRead = (
     | undefined;
   for (const effect of writes) {
     if (
+      effect.receiverIdentity === "definite" &&
       t.isAssignmentExpression(effect.node, { operator: "=" }) &&
       effect.path.every(
         (key, index) =>

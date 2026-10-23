@@ -63,6 +63,16 @@ or repeat it to select several types.
 Selection limits decoding to the selected types; member references remain an
 assembly-wide inventory, so the output can still be large.
 
+Select `--detail summary --evidence-bundle /absolute/path/members.json` to
+receive identity, selection, coverage, limitations and collection counts while
+saving the complete original Evidence in a new bundle. Summary requires that
+explicit destination; existing files are preserved. Later
+`inspect-analysis-view` calls can page the exact parent from the saved bundle
+without reopening the assembly. See
+[CLI summary and saved member rows](managed-code-analysis.md#cli-summary-and-saved-member-rows)
+for the complete command sequence. Omitted or `--detail complete` retains the
+full inline response.
+
 Choose the workflow from the artifact's contents rather than its `.exe` or
 `.dll` extension. The managed parser requires PE/CLI metadata; it does not
 unpack .NET single-file hosts or decode IL2CPP. For the image, type and method
@@ -144,6 +154,49 @@ The same workflow reports package names, versions, sources, the root package,
 dependency edges, and the section's file range. A missing `.dep-v0` section is
 null metadata, not proof that the binary has no dependencies. See
 [Rust binaries](rust-binaries.md).
+
+Inspect a PE Authenticode certificate table without executing the image or
+verifying signatures:
+
+```bash
+rea inspect-pe-certificates /absolute/path/to/application.exe --json
+```
+
+The workflow reports `WIN_CERTIFICATE` entries and, for PKCS#7 signedData,
+embedded X.509 serial, issuer, subject, and validity fields. A missing security
+directory is observed absence of that table. See
+[PE Authenticode certificate tables](pe-certificates.md).
+
+Inspect ELF PT_NOTE and SHT_NOTE tables without executing the image:
+
+```bash
+rea inspect-elf-notes /absolute/path/to/program --json
+```
+
+The workflow reports note owners, types, descriptor hashes, and GNU build-id
+or ABI-tag fields when those descriptors match. A missing note table is
+observed absence of those declarations. See [ELF note tables](elf-notes.md).
+
+Inspect a CPython 3.7–3.13 `.pyc` header and nested marshal code objects
+without executing bytecode or installing Python:
+
+```bash
+rea inspect-python-pyc /absolute/path/to/module.pyc --json
+```
+
+The workflow reports the pinned CPython version for the magic, PEP 552 hash or
+mtime/size fields, nested function names, and bytecode SHA-256. Bytecode is
+not decompiled. See [CPython pyc inspection](python-pyc.md).
+
+Inspect an Erlang BEAM file without executing bytecode:
+
+```bash
+rea inspect-erlang-beam /absolute/path/to/app.beam --json
+```
+
+The workflow reports IFF chunk names, atom tables, exports, imports, lambdas,
+and the Code chunk header. Missing optional tables stay null. See
+[Erlang BEAM files](erlang-beam.md).
 
 Configure [Hopper or Ghidra](installation.md#hopper), the
 [IDA adapter](ida-provider.md), or [Kuna](kuna-provider.md) before analyzing a
@@ -279,7 +332,12 @@ Exports preserve an existing destination unless `--overwrite` is explicit.
 For application traces and version comparisons, see
 [JavaScript application workflows](javascript-application-workflows.md).
 MCP [retained Evidence references](mcp-contracts.md#retained-application-evidence-inputs)
-belong to one connection. Separate CLI calls consume full saved records.
+belong to one connection. Separate CLI calls can consume full saved records.
+`inspect-analysis-view REQUEST.json --evidence-bundle BUNDLE.json` resolves
+the request's `retained-evidence` source ID from that authenticated bundle,
+including bundles exported from an MCP session. The same view JSON works for
+every supported parent kind; no target is reopened and no record is selected
+by file order. Omit `--evidence-bundle` when the request supplies inline Evidence.
 
 ## Import historical source
 
@@ -399,7 +457,8 @@ evidence file's `evidence_id`; otherwise the command refuses with
 `invalid_request` before binding. Before binding it derives the
 `environment-state` view of the capture with the manifest's `template_rules`,
 as `inspect-analysis-view` would, and serves from it: read tools whose views
-are state-backed answer from a live state, write tools are not served, and
+are state-backed answer from a live state, write tools are served only where
+the capture's later reads confirmed their effect, and
 `/agentenv` serves `data/reset`, `data/add` and `data/get`. When the state
 cannot be derived, or its catalog exceeds the discovery reservation, it logs a
 warning with the error code and message and serves replay; `--replay-only` serves replay without deriving. In replay every
@@ -454,6 +513,22 @@ the pinned package source, the served `tool_count`, and `state` in the shape
 of the serve command's stopped document. See
 [agent environments](agent-environments.md#export-a-bundle) for the folder
 layout and what the smoke task checks.
+
+## Compare an environment with its application
+
+`rea environment-compare <manifest.json> --evidence <capture.json> --probe <probe.json> [--probe <probe.json> ...]`
+compares the environment the pair serves with probe captures of the application it came from. Each probe is capture
+Evidence of one call sequence recorded against the application after a reset; the environment's state is reset before
+each probe, every request to the application's origin is answered as the served environment answers it, and the
+answer is compared with the application's after ids are mapped and clocks and generated values are normalised. The command reads files only and
+makes no network call. It prints the report and exits `0`, or prints a structured `invalid_request` error and exits `1`
+for the same pair refusals as `environment-serve`, a probe that is not capture Evidence, or a browser probe captured
+without response bodies, or without the request bodies its writes need. See
+[agent environments](agent-environments.md#measure-fidelity-against-the-application) for the report.
+
+```sh
+rea environment-compare manifest.json --evidence capture.json --probe probe.json --json
+```
 
 ## Output and exit status
 
@@ -535,6 +610,14 @@ command, objdump, Rizin and GDB, and the agent environment server
 `cancelled` result can be printed before the wrapper assigns the
 signal-derived status. This describes the current source routing; it is not a
 claim that every command or provider runtime has been independently exercised.
+
+Commands with `--evidence_output` select their delivered view, then publish the
+complete Evidence bundle atomically. Cancellation before publication leaves no
+new file. A publication that has committed can win a later cancellation; the
+`cancelled` result then keeps the written path and byte count under
+`details.diagnostics.evidence_bundle`. If staging cleanup stays incomplete
+after commit, the `cleanup_incomplete` error reports the same file as
+`details.published_path` and `details.bytes`.
 
 When the reader of piped output closes early, as `rea ... | head` does, the
 CLI stops writing, prints no error and exits `141` (`128 + 13`, the status of a

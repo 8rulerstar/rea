@@ -11,6 +11,7 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactFileCleanupFailure,
+  artifactFilePrimaryFailure,
   ArtifactFileCancelled,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
@@ -68,7 +69,6 @@ const OUTPUT_BYTES = 64 * 1024 * 1024;
 const failureForPrimary = (
   cause: unknown,
   path: string,
-  signal?: AbortSignal,
   field: "path" | "binary_path" = "path",
   maximum = INPUT_BYTES,
 ): AnalysisError => {
@@ -165,23 +165,15 @@ const failureForPrimary = (
 const failureFor = (
   cause: unknown,
   path: string,
-  signal?: AbortSignal,
   field: "path" | "binary_path" = "path",
   maximum = INPUT_BYTES,
 ): AnalysisError => {
-  const primary =
-    cause instanceof ArtifactFileCleanupFailure &&
-    cause.fileCleanupFailure.outcome.kind === "failed"
-      ? failureForPrimary(
-          cause.fileCleanupFailure.outcome.cause,
-          path,
-          signal,
-          field,
-          maximum,
-        )
-      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
-        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
-        : failureForPrimary(cause, path, signal, field, maximum);
+  const primary = failureForPrimary(
+    artifactFilePrimaryFailure(cause),
+    path,
+    field,
+    maximum,
+  );
   if (
     cause instanceof ArtifactReaderFailure &&
     cause.partialObservation !== undefined &&
@@ -544,7 +536,6 @@ export class Il2cppMetadataProvider implements Il2cppMetadataPort {
             const failure = failureFor(
               cause,
               binaryPath,
-              options?.signal,
               "binary_path",
               BINARY_BYTES,
             );

@@ -1,5 +1,8 @@
 import { setImmediate } from "node:timers/promises";
+import { dispatchQueuedInterrupts } from "../../process/queuedInterrupts.js";
+import { readImmutableEvidenceBundle } from "../EvidenceBundleFiles.js";
 import { INSPECT_ANALYSIS_VIEW_OPERATION } from "../../domain/analysisView/analysisViewErrors.js";
+import { jsonValueSchema } from "../../domain/jsonValue.js";
 import { z } from "zod";
 
 import { ANALYSIS_VIEW_PROVIDER } from "../InvestigationProviders.js";
@@ -9,6 +12,7 @@ import type { EvidenceWriter } from "../investigation/InvestigationRecordPort.js
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
+  AnalysisInputError,
   AnalysisCapabilityUnavailableError,
 } from "../../domain/analysisErrorCore.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
@@ -25,7 +29,6 @@ import {
   type AnalysisViewRequest,
   type InspectAnalysisViewInput,
 } from "../../domain/analysisView/analysisView.js";
-import { jsonValueSchema } from "../../domain/jsonValue.js";
 import {
   immutableJsonSnapshotMember,
   isImmutableJsonSnapshot,
@@ -40,29 +43,25 @@ import {
   type EvidenceFileReadOptions,
 } from "./evidenceFileSource.js";
 
-/** Authenticate a selected-view request and project already completed Evidence. */
-export const inspectAnalysisView = (
-  rawInput: unknown,
-  lookup?: EvidenceLookup,
-): Result<Evidence, AnalysisError> => {
-  const parsed = inspectAnalysisViewInputSchema.safeParse(rawInput);
-  if (!parsed.success)
-    return err(
-      analysisInputErrorFromIssues(
-        INSPECT_ANALYSIS_VIEW_OPERATION,
-        parsed.error.issues,
-        rawInput,
-        { cause: parsed.error },
-      ),
-    );
-  return inspectAnalysisViewValidated(parsed.data, lookup);
-};
+/** A parsed request whose source can be projected without filesystem access. */
+export interface ReadyAnalysisViewInput {
+  readonly source: Exclude<
+    InspectAnalysisViewInput["source"],
+    { kind: "evidence-file" }
+  >;
+  readonly view: AnalysisViewRequest;
+}
 
-/** Validate a request whose source may be an Evidence file, then project it. */
-export const inspectAnalysisViewWithFiles = async (
+/** Source acquisition controls shared by CLI and MCP; bundles are selected by the CLI. */
+export interface AnalysisViewReadOptions extends EvidenceFileReadOptions {
+  readonly evidenceBundlePath?: string;
+}
+
+/** Validate one view request, resolve its selected source, then project completed Evidence. */
+export const inspectAnalysisView = async (
   rawInput: unknown,
   lookup?: EvidenceLookup,
-  options: EvidenceFileReadOptions = {},
+  options: AnalysisViewReadOptions = {},
 ): Promise<Result<Evidence, AnalysisError>> => {
   const parsed = inspectAnalysisViewInputSchema.safeParse(rawInput);
   if (!parsed.success)
@@ -74,21 +73,29 @@ export const inspectAnalysisViewWithFiles = async (
         { cause: parsed.error },
       ),
     );
-  return inspectAnalysisViewValidatedWithFiles(parsed.data, lookup, options);
+  if (options.evidenceBundlePath !== undefined)
+    return inspectBundleView(parsed.data, options.evidenceBundlePath, options);
+  const source = parsed.data.source;
+  if (source.kind === "evidence-file")
+    return inspectFileView({ ...parsed.data, source }, lookup, options);
+  return inspectAnalysisViewValidated({ ...parsed.data, source }, lookup);
 };
 
 /**
  * Read and authenticate an Evidence-file source, then project it as retained
  * Evidence: its strings are bounded by the file reader rather than charged as
- * inline input. Other sources project unchanged.
+ * inline input.
  */
-export const inspectAnalysisViewValidatedWithFiles = async (
-  input: InspectAnalysisViewInput,
+const inspectFileView = async (
+  input: InspectAnalysisViewInput & {
+    readonly source: Extract<
+      InspectAnalysisViewInput["source"],
+      { kind: "evidence-file" }
+    >;
+  },
   lookup?: EvidenceLookup,
   options: EvidenceFileReadOptions = {},
 ): Promise<Result<Evidence, AnalysisError>> => {
-  if (input.source.kind !== "evidence-file")
-    return inspectAnalysisViewValidated(input, lookup);
   const loaded = await readEvidenceFileSource(input.source.path, options);
   // Authentication and projection are synchronous; yield so a pending abort is dispatched before each check.
   const cancelled = async (): Promise<boolean> => {
@@ -118,9 +125,56 @@ export const inspectAnalysisViewValidatedWithFiles = async (
   return projected;
 };
 
-/** Authenticate borrowed inline Evidence after adapter envelope validation. */
-export const inspectAnalysisViewValidated = (
+/** Resolve the caller's exact retained parent from an authenticated portable bundle. */
+const inspectBundleView = async (
   input: InspectAnalysisViewInput,
+  bundlePath: string,
+  { resources, signal }: EvidenceFileReadOptions,
+): Promise<Result<Evidence, AnalysisError>> => {
+  if (input.source.kind !== "retained-evidence")
+    return err(
+      new AnalysisInputError("inspect_analysis_view", undefined, [
+        {
+          path: ["source", "kind"],
+          reason: "invalid_value",
+          message:
+            "--evidence-bundle requires a retained-evidence source with the exact parent evidence_id; inline Evidence already supplies its source",
+        },
+      ]),
+    );
+  const loaded = await readImmutableEvidenceBundle(
+    bundlePath,
+    signal,
+    resources,
+    "inspect_analysis_view",
+  );
+  // Authentication and projection are synchronous; dispatch queued interrupts before accepting either result.
+  await dispatchQueuedInterrupts();
+  if (!loaded.ok) return loaded;
+  if (signal?.aborted)
+    return err(
+      new AnalysisCancelledError("inspect_analysis_view", {
+        cause: signal.reason,
+      }),
+    );
+  const projected = inspectAnalysisViewValidated(
+    { source: input.source, view: input.view },
+    (id) => loaded.value.records.find((record) => record.evidence_id === id),
+  );
+  await dispatchQueuedInterrupts();
+  if (projected.ok && signal?.aborted)
+    return err(
+      new AnalysisCancelledError("inspect_analysis_view", {
+        cause: signal.reason,
+        partialObservation: projected.value,
+      }),
+    );
+  return projected;
+};
+
+/** Project a parsed request whose selected source is inline or retained. */
+export const inspectAnalysisViewValidated = (
+  input: ReadyAnalysisViewInput,
   lookup?: EvidenceLookup,
 ): Result<Evidence, AnalysisError> => {
   const apiSurfaceAccumulator =
@@ -265,20 +319,11 @@ export const projectRetainedAnalysis = (
 };
 
 const resolveAnalysisViewSource = (
-  source: InspectAnalysisViewInput["source"],
+  source: ReadyAnalysisViewInput["source"],
   lookup: EvidenceLookup | undefined,
 ): Result<Evidence, AnalysisError> => {
   if (source.kind === "retained-evidence")
     return resolveEvidenceInput(source, lookup);
-  // Files are read by inspectAnalysisViewValidatedWithFiles, which the CLI and MCP adapters call.
-  if (source.kind === "evidence-file")
-    return err(
-      new AnalysisCapabilityUnavailableError(
-        ANALYSIS_VIEW_PROVIDER.id,
-        INSPECT_ANALYSIS_VIEW_OPERATION,
-        "evidence-file sources are read before projection",
-      ),
-    );
   return authenticateEvidence(source.evidence, ["source", "evidence"], {
     source,
   });
@@ -317,7 +362,7 @@ const authenticateEvidence = (
 };
 
 const createAnalysisViewEvidence = (
-  input: InspectAnalysisViewInput,
+  input: ReadyAnalysisViewInput,
   parent: Evidence,
   result: AnalysisViewResult,
 ): Evidence => {
@@ -332,39 +377,44 @@ const createAnalysisViewEvidence = (
             ? {}
             : { architecture: parent.subject.architecture }),
         };
-  return createEvidence(target, ANALYSIS_VIEW_PROVIDER, {
-    predicateType: "rea.analysis-view",
-    operation: INSPECT_ANALYSIS_VIEW_OPERATION,
-    parameters: {
-      parent_evidence_id: parent.evidence_id,
-      view: jsonValueSchema.parse(input.view),
+  return createEvidence(
+    target,
+    ANALYSIS_VIEW_PROVIDER,
+    {
+      predicateType: "rea.analysis-view",
+      operation: INSPECT_ANALYSIS_VIEW_OPERATION,
+      parameters: {
+        parent_evidence_id: parent.evidence_id,
+        view: jsonValueSchema.parse(input.view),
+      },
+      result: jsonValueSchema.parse(result),
+      rawResult: null,
+      confidence:
+        // Grouping is whole-capture, so any templated group or parameter makes the result inferred;
+        // entity types and identity in an extracted state always are.
+        result.kind === "environment-state" ||
+        ((result.kind === "api-surface" ||
+          result.kind === "environment-manifest") &&
+          result.templated_groups > 0)
+          ? "inferred"
+          : "derived",
+      authority: parent.authority,
+      limitations: result.limitations,
+      ...(result.kind === "native" && parent.relationship_coverage !== null
+        ? { relationshipCoverage: parent.relationship_coverage }
+        : {}),
+      locations: [
+        ...(result.artifact != null && result.artifact.path.length > 0
+          ? [{ kind: "artifact-path" as const, path: result.artifact.path }]
+          : []),
+        ...(result.kind === "native" &&
+        result.procedure_address !== null &&
+        result.procedure_address.length > 0
+          ? [{ kind: "address" as const, address: result.procedure_address }]
+          : []),
+      ],
+      evidenceLinks: [parent.evidence_id],
     },
-    result: jsonValueSchema.parse(result),
-    rawResult: null,
-    confidence:
-      // Grouping is whole-capture, so any templated group or parameter makes the result inferred;
-      // entity types and identity in an extracted state always are.
-      result.kind === "environment-state" ||
-      ((result.kind === "api-surface" ||
-        result.kind === "environment-manifest") &&
-        result.templated_groups > 0)
-        ? "inferred"
-        : "derived",
-    authority: parent.authority,
-    limitations: result.limitations,
-    ...(result.kind === "native" && parent.relationship_coverage !== null
-      ? { relationshipCoverage: parent.relationship_coverage }
-      : {}),
-    locations: [
-      ...(result.artifact != null && result.artifact.path.length > 0
-        ? [{ kind: "artifact-path" as const, path: result.artifact.path }]
-        : []),
-      ...(result.kind === "native" &&
-      result.procedure_address !== null &&
-      result.procedure_address.length > 0
-        ? [{ kind: "address" as const, address: result.procedure_address }]
-        : []),
-    ],
-    evidenceLinks: [parent.evidence_id],
-  });
+    { immutable: true },
+  );
 };

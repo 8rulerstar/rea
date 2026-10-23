@@ -131,6 +131,9 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   inspect_model_artifact: evidence,
   inspect_gpu_code_objects: evidence,
   inspect_rust_binary: evidence,
+  inspect_apk_signature: evidence,
+  inspect_python_pyc: evidence,
+  inspect_erlang_beam: evidence,
   inspect_sqlite_database: effects({
     mutatesSession: true,
     writesFilesystem: true,
@@ -251,7 +254,11 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     executesForeignCode: true,
     idempotent: false,
   }),
+  inspect_byte_entropy: evidence,
   inspect_pe_resources: evidence,
+  inspect_pe_certificates: evidence,
+  inspect_native_exports: evidence,
+  inspect_elf_notes: evidence,
   inspect_analysis_view: evidence,
   inspect_firmware_regions: effects({
     mutatesSession: true,

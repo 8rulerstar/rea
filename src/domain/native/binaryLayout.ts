@@ -2,12 +2,12 @@ import { z } from "zod";
 import { canBorrowParsedJsonSnapshot } from "../immutableJson.js";
 
 import { pwntoolsTimeoutField } from "./nativeDeadlines.js";
-import { localPathStringSchema } from "../localPath.js";
+import { absoluteLocalPathStringSchema } from "../localPath.js";
 import { canonicalBase64Schema } from "../stringPatterns.js";
 
 const unsignedHex = z.string().regex(/^0x(?:0|[1-9a-f][0-9a-f]{0,15})$/);
-const index = z.number().int().nonnegative();
-const scalar = z.union([z.string(), z.number().int()]);
+const index = z.int().nonnegative();
+const scalar = z.union([z.string(), z.int()]);
 const range = z.strictObject({ offset: unsignedHex, bytes: unsignedHex });
 const canonicalBase64 = canonicalBase64Schema;
 const name = z.strictObject({
@@ -19,7 +19,7 @@ const name = z.strictObject({
 
 /** Explicit local object selection, independent of an active disassembler target. */
 export const inspectBinaryLayoutInputSchema = z.strictObject({
-  path: localPathStringSchema.describe(
+  path: absoluteLocalPathStringSchema.describe(
     "Absolute filesystem path to the selected binary",
   ),
   pwntools_timeout_ms: pwntoolsTimeoutField,
@@ -426,17 +426,11 @@ const validatePackedRelativeTables = (
       tableIndex,
       "location",
     ]);
-    const encodedBytes =
-      (table.encoded_bytes_base64.length * 3) / 4 -
-      (table.encoded_bytes_base64.endsWith("==")
-        ? 2
-        : table.encoded_bytes_base64.endsWith("=")
-          ? 1
-          : 0);
-    if (
-      !Number.isInteger(encodedBytes) ||
-      BigInt(encodedBytes) !== BigInt(table.location.bytes)
-    )
+    const encodedBytes = Buffer.byteLength(
+      table.encoded_bytes_base64,
+      "base64",
+    );
+    if (BigInt(encodedBytes) !== BigInt(table.location.bytes))
       context.addIssue({
         code: "custom",
         path: ["packed_relative_relocations", tableIndex],

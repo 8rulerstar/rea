@@ -67,10 +67,8 @@ const SOURCE_MAP_OUTPUT_BYTES = WEB_SOURCE_MAP_LIMITS.outputBytes;
 const SOURCE_MAP_FAILURE_LIMITATION_RESERVE = 512;
 const SOURCE_MAP_COLLECTION_ENVELOPE_RESERVE = 1_024;
 
-type SourceMaps = WebSourceMaps;
-type SourceMapItem = WebSourceMapItem;
 type ParsedSourceMapItem = Extract<
-  SourceMapItem,
+  WebSourceMapItem,
   { status: "included" | "partial" }
 >;
 interface SourceMapDecodeContext {
@@ -90,7 +88,7 @@ export const fetchWebSourceMaps = async (
   input: AnalyzeWebBundleInput,
   signal?: AbortSignal,
   host: SourceMapFetchHost = { fetch: globalThis.fetch },
-): Promise<SourceMaps> => {
+): Promise<WebSourceMaps> => {
   throwIfAborted(signal);
   if (requests.length === 0)
     return webSourceMapsSchema.parse({
@@ -99,7 +97,7 @@ export const fetchWebSourceMaps = async (
       processed: 0,
       items: [],
     });
-  const items: SourceMapItem[] = [];
+  const items: WebSourceMapItem[] = [];
   const operationController = new AbortController();
   const fetchTimeoutMs =
     host.timeoutMs ??
@@ -203,9 +201,9 @@ const sourceMapOutputLimitation = (unprocessed: number): string =>
   `source-map output budget could not retain results for ${String(unprocessed)} requested map${unprocessed === 1 ? "" : "s"}. their results are unknown.`;
 
 const sourceMapsStatus = (
-  items: readonly SourceMapItem[],
+  items: readonly WebSourceMapItem[],
   omitted: boolean,
-): SourceMaps["status"] => {
+): WebSourceMaps["status"] => {
   const retained = items.filter(
     ({ status }) => status === "included" || status === "partial",
   ).length;
@@ -264,7 +262,7 @@ const fetchOne = async (
       resolvedSourceBytes: number;
     };
   },
-): Promise<SourceMapItem> => {
+): Promise<WebSourceMapItem> => {
   if (!approvedUrl(request.fetchUrl, input.allowed_origins))
     return emptySourceMapItem(
       request,
@@ -522,7 +520,6 @@ const promiseWithAbort = (
   signal: AbortSignal | undefined,
 ): Promise<Response> => {
   if (signal === undefined) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = (): void => signal.removeEventListener("abort", abort);
@@ -555,6 +552,7 @@ const promiseWithAbort = (
         reject(cause);
       },
     );
+    if (signal.aborted) abort();
   });
 };
 
@@ -563,7 +561,7 @@ const normalizeSourceMap = (
   text: string,
   fetchedUrl: string,
   context: SourceMapDecodeContext,
-): SourceMapItem => {
+): WebSourceMapItem => {
   const parsedJson = safeParseJson(sourceMapJsonText(text));
   if (!parsedJson.ok)
     return emptySourceMapItem(
@@ -624,6 +622,7 @@ const normalizeSourceMap = (
         const sanitized =
           resolved === null ? null : cachedSanitized(sourcesByRaw, resolved);
         const content = leaf.map.sourcesContent?.[index] ?? null;
+        const mediaType = sourceMediaType(resolved ?? rawSource);
         consumeExpandedBytes(
           context.budget,
           (sanitized === null
@@ -634,7 +633,7 @@ const normalizeSourceMap = (
             (content === null
               ? 0
               : jsonBytes(content) +
-                artifactMetadataBytes(sourceMediaType(rawSource), content) -
+                artifactMetadataBytes(mediaType, content) -
                 4),
         );
         originalSources.push({
@@ -642,9 +641,7 @@ const normalizeSourceMap = (
           declaration_index: declarationIndex++,
           source: sanitized,
           artifact:
-            content === null
-              ? null
-              : createWebTextArtifact(content, sourceMediaType(rawSource)),
+            content === null ? null : createWebTextArtifact(content, mediaType),
         });
       }
     }
@@ -778,7 +775,7 @@ const originalModuleEdges = (
     }
     const parsed = parseJavaScriptSource(
       source.artifact.text,
-      sourceParserPath(sourceName),
+      originalSourcePath(sourceName),
     );
     check();
     if (parsed === null) {
@@ -833,8 +830,8 @@ const originalModuleEdges = (
   return { edges, incomplete };
 };
 
-/** Select parser semantics from the source URL path, excluding query/fragment. */
-const sourceParserPath = (source: string): string => {
+/** Select source language from the URL path, excluding query/fragment. */
+const originalSourcePath = (source: string): string => {
   try {
     return new URL(source).pathname;
   } catch (cause: unknown) {
@@ -886,10 +883,10 @@ const sourceMapContext = (
 
 const emptySourceMapItem = (
   request: WebSourceMapRequest,
-  status: Extract<SourceMapItem, { readonly artifact: null }>["status"],
+  status: Extract<WebSourceMapItem, { readonly artifact: null }>["status"],
   limitation: string,
   effectiveUrl: string | null = null,
-): Extract<SourceMapItem, { readonly artifact: null }> => ({
+): Extract<WebSourceMapItem, { readonly artifact: null }> => ({
   ...sourceMapContext(request, effectiveUrl),
   status,
   artifact: null,
@@ -1023,7 +1020,7 @@ const sourceMapFailureReservation = (
   effectiveUrl: string | null = null,
   limitation?: string,
   status: Extract<
-    SourceMapItem,
+    WebSourceMapItem,
     { readonly artifact: null }
   >["status"] = "fetch_failed",
 ): number =>
@@ -1090,13 +1087,15 @@ const resolveOriginalSource = (
   }
 };
 
-const sourceMediaType = (source: string | null): string =>
-  source?.endsWith(".ts") ||
-  source?.endsWith(".tsx") ||
-  source?.endsWith(".mts") ||
-  source?.endsWith(".cts")
+const sourceMediaType = (source: string | null): string => {
+  const path = source === null ? null : originalSourcePath(source);
+  return path?.endsWith(".ts") ||
+    path?.endsWith(".tsx") ||
+    path?.endsWith(".mts") ||
+    path?.endsWith(".cts")
     ? "text/typescript"
     : "text/javascript";
+};
 
 const originalDependency = (
   node: t.Node,

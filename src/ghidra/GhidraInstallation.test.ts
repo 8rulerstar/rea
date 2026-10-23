@@ -1040,6 +1040,51 @@ describe("Ghidra configuration paths", () => {
     },
   );
 
+  it.each([
+    ["linux", undefined],
+    ["linux", "/opt/jdk-21"],
+    ["darwin", undefined],
+    ["win32", "C:\\Java\\jdk-21"],
+  ] as const)(
+    "does not run Java without a Ghidra installation (%s %o)",
+    async (platform, javaHome) => {
+      const probed: string[] = [];
+      const result = await inspectGhidraInstallation(
+        {
+          resourceOwner: inspectionResources.owner,
+          environment: { PATH: "/usr/bin" },
+          ...(javaHome === undefined ? {} : { javaHome }),
+          platform,
+          architecture: "x64",
+        },
+        host({
+          discoverInstallDirOnPath: () => undefined,
+          probeJava: (command) => {
+            probed.push(command);
+            return javaProbeOk<GhidraJavaObservation>(JAVA);
+          },
+        }),
+      );
+      expect(probed).toEqual([]);
+      expect(result).toMatchObject({
+        status: "unavailable",
+        installDir: null,
+        javaVersion: null,
+        rejection: { code: "not_configured" },
+      });
+      expect(projectGhidraDoctorInspection(result)).toMatchObject({
+        available: false,
+        registrationEnvironment: {},
+        checks: [
+          expect.objectContaining({
+            name: "configuration",
+            code: "not_configured",
+          }),
+        ],
+      });
+    },
+  );
+
   it("judges absolute paths by the inspected platform", async () => {
     const result = await inspectGhidraInstallation(
       {
@@ -1062,6 +1107,32 @@ describe("Ghidra FAT native decompiler admission", () => {
     {
       name: "foreign-only FAT",
       bytes: fat([0x01000007]),
+      status: "unavailable",
+      detail: "requires mach-o arm64",
+    },
+    {
+      name: "foreign-only FAT whose first slice is undersized",
+      bytes: (() => {
+        const bytes = fat([0x01000007, 0x0000000c]);
+        bytes.writeUInt32BE(31, 8 + 12);
+        return bytes;
+      })(),
+      status: "unavailable",
+      detail: "requires mach-o arm64",
+    },
+    {
+      name: "foreign-only FAT declaring one family twice",
+      bytes: fat([0x01000007, 0x01000007]),
+      status: "unavailable",
+      detail: "requires mach-o arm64",
+    },
+    {
+      name: "foreign-only FAT whose first same-family slice is undersized",
+      bytes: (() => {
+        const bytes = fat([0x01000007, 0x01000007]);
+        bytes.writeUInt32BE(31, 8 + 12);
+        return bytes;
+      })(),
       status: "unavailable",
       detail: "requires mach-o arm64",
     },

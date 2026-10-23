@@ -1,4 +1,5 @@
 import type { ElectronStaticFindings } from "./electronStaticAnalysisTypes.js";
+import type { JavaScriptRouteSourceFacts } from "./javascriptRouteFacts.js";
 
 /** Token semantics shared by bundle producers and worker admission. */
 export const JAVASCRIPT_AST_FINGERPRINT_ALGORITHM = "babel-ast-v3";
@@ -45,7 +46,10 @@ export interface JavaScriptStaticEndpoint {
   readonly kind: "route" | "network";
   readonly value: string;
   readonly mechanism: string;
-  /** An overloaded callee name suggests this value; its network receiver is unproven. */
+  /**
+   * Only a name suggests this value: an overloaded callee whose network receiver
+   * is unproven, or a `path`/`route` property outside a router record.
+   */
   readonly interpretation?: "candidate";
   /** The request target is unresolved source text rather than an exact value. */
   readonly resolution?: "partial";
@@ -121,6 +125,8 @@ export interface JavaScriptStaticAnalysis {
   readonly visited_ast_nodes: number;
   readonly references: readonly JavaScriptStaticReference[];
   readonly endpoints: readonly JavaScriptStaticEndpoint[];
+  /** Missing in historical analyses; absence means unmeasured route coverage. */
+  readonly routes?: JavaScriptRouteSourceFacts;
   readonly storage: readonly JavaScriptStaticStorage[];
   readonly bundler_registrations: readonly JavaScriptBundlerRegistration[];
   readonly role_paths: readonly JavaScriptRolePath[];

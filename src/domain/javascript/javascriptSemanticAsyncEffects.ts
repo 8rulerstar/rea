@@ -2,6 +2,7 @@ import * as t from "@babel/types";
 
 import type {
   JavaScriptSemanticCallable,
+  JavaScriptSemanticProjectedResultBinding,
   JavaScriptSemanticEventOperation,
   JavaScriptSemanticTimerOperation,
 } from "./javascriptSemanticIr.js";
@@ -15,9 +16,11 @@ import {
 } from "./javascriptSemanticState.js";
 import { semanticBindingAtRead } from "./javascriptSemanticMutationInitializers.js";
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
+import { isUnmodifiedGlobalReference } from "./javascriptSemanticAmbientWrites.js";
 import { range } from "./javascriptStaticAnalysisHelpers.js";
 import {
   builtinDataEffectMethod,
+  dataEffectArgumentBindingId,
   dataEffectLiteralString,
   dataEffectMemberCallee,
   assignedSemanticResultBindings,
@@ -71,11 +74,7 @@ interface TimerCandidate {
   readonly kind: JavaScriptSemanticTimerOperation["kind"];
   readonly ownerCallableId: string | null;
   readonly handleBindingId: string | null;
-  readonly projectedResultBindings: readonly {
-    readonly bindingId: string;
-    readonly projectionPath: readonly (string | number | null)[];
-    readonly resolution: "complete" | "partial";
-  }[];
+  readonly projectedResultBindings: readonly JavaScriptSemanticProjectedResultBinding[];
   readonly handleRead: {
     readonly origins: readonly t.Node[];
     readonly complete: boolean;
@@ -158,7 +157,7 @@ const collectEvent = (
     emitterKey: emitter.key,
     emitterBindingId: emitter.bindingId,
     eventName,
-    listenerBindingId: bindingId(listenerArgument, state),
+    listenerBindingId: dataEffectArgumentBindingId(listenerArgument, state),
     listenerLocation: t.isNode(listenerArgument)
       ? range(listenerArgument)
       : null,
@@ -264,7 +263,7 @@ const collectTimer = (input: TimerCollectionInput): void => {
     handleBindingId:
       kind === "schedule"
         ? scalarAssignedResultBinding(projectedResultBindings)
-        : bindingId(node.arguments[0], state),
+        : dataEffectArgumentBindingId(node.arguments[0], state),
     projectedResultBindings:
       kind === "schedule"
         ? semanticProjectedBindingFacts(
@@ -335,7 +334,8 @@ const timerMethod = (
     if (binding === undefined) {
       const method = admittedTimerMethod(callee.name);
       if (method === null) return null;
-      return semanticResolutionBlocked(state, callee, callee.name)
+      return semanticResolutionBlocked(state, callee, callee.name) ||
+        !isUnmodifiedGlobalReference(callee, state, callee.name)
         ? null
         : method;
     }
@@ -350,19 +350,6 @@ const admittedTimerMethod = (
   [...TIMER_SCHEDULE_METHODS, ...TIMER_CANCEL_METHODS].find(
     (candidate) => candidate === value,
   ) ?? null;
-
-const bindingId = (
-  node:
-    | t.Expression
-    | t.SpreadElement
-    | t.JSXNamespacedName
-    | t.ArgumentPlaceholder
-    | undefined,
-  state: JavaScriptSemanticAnalysisState,
-): string | null =>
-  t.isIdentifier(node)
-    ? (resolveSemanticBindingState(state, node, node.name)?.bindingId ?? null)
-    : null;
 
 const timerDelay = (candidate: TimerCandidate): number | null => {
   if (candidate.kind !== "schedule" || candidate.method === "setImmediate")

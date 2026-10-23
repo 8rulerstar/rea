@@ -19,6 +19,18 @@ import {
   type StateToolFacts,
   type StateView,
 } from "./environmentStateRules.js";
+import {
+  evaluateQuery,
+  learnQuery,
+  lineChoices,
+  queryTotalCount,
+  renderQueryList,
+  type ListQuery,
+  type QueryLine,
+} from "./environmentStateListQuery.js";
+import { singleQueryValues } from "../recordedTransportUrl.js";
+import { startsAtBeginning } from "./environmentStatePaging.js";
+import { readClock, type ClockFormat } from "./environmentStateWriteValues.js";
 import { ENTRY_BYTES, textBytes } from "./webNetworkRouteTemplates.js";
 
 /** A read tool whose recordings locate entities of one type at one pointer. */
@@ -31,6 +43,8 @@ export interface StatePlan {
   readonly recordings: readonly StateRecordFacts[];
   /** The latest of them per request line, in timeline order. */
   readonly latest: readonly StateRecordFacts[];
+  /** Item reads left to replay because they asked for some fields only. */
+  readonly projected?: readonly number[];
 }
 
 /** What the gate reads from an extraction; `withBody` drops each body's temporary work after `use`. */
@@ -83,6 +97,85 @@ class FieldUnion {
   }
 }
 
+/** The spellings a view always gives clock fields where its recordings spell the stored instant otherwise. */
+class ClockSpellings {
+  /** Each category retains one spelling or a permanent mixed marker, never an expanding format history. */
+  readonly #fields = new Map<
+    string,
+    {
+      matched: ClockFormat | null | undefined;
+      other: ClockFormat | null | undefined;
+    }
+  >();
+
+  constructor(private readonly retain: StateGateContext["retain"]) {
+    retain(ENTRY_BYTES);
+  }
+
+  #note(
+    field: string,
+    category: "matched" | "other",
+    format: ClockFormat | null,
+  ): void {
+    let facts = this.#fields.get(field);
+    if (facts === undefined) {
+      this.retain(ENTRY_BYTES + textBytes(field.length));
+      facts = { matched: undefined, other: undefined };
+      this.#fields.set(field, facts);
+    }
+    const held = facts[category];
+    if (held === undefined) {
+      if (format !== null)
+        this.retain(
+          ENTRY_BYTES +
+            (format.kind === "iso" ? textBytes(format.zone.length) : 0),
+        );
+      facts[category] = format;
+    } else if (held !== null && !same(held, format)) facts[category] = null;
+  }
+
+  note(stored: JsonObject, shown: JsonObject): void {
+    for (const [field, value] of Object.entries(shown)) {
+      const now = readClock(value);
+      if (now === undefined) continue;
+      const was = Object.hasOwn(stored, field)
+        ? readClock(stored[field])
+        : undefined;
+      if (
+        was === undefined ||
+        was.ms !== now.ms ||
+        was.subMillisecond !== now.subMillisecond
+      ) {
+        this.#note(field, "other", now.format);
+        continue;
+      }
+      const spelled = same(stored[field], value) ? null : now.format;
+      this.#note(field, "matched", spelled);
+    }
+  }
+
+  /** The view member, when the view spells any field otherwise, and in that spelling only. */
+  get view(): { readonly clock_formats?: Record<string, ClockFormat> } {
+    const formats: [string, ClockFormat][] = [];
+    for (const [field, { matched, other }] of this.#fields) {
+      if (
+        matched === undefined ||
+        matched === null ||
+        other === null ||
+        (other !== undefined && !same(other, matched))
+      )
+        continue;
+      if (formats.length === 0) this.retain(ENTRY_BYTES * 2);
+      // Both the temporary entry and its returned object member remain covered.
+      this.retain(ENTRY_BYTES * 2 + textBytes(field.length));
+      formats.push([field, matched]);
+    }
+    return formats.length === 0
+      ? {}
+      : { clock_formats: Object.fromEntries(formats) };
+  }
+}
+
 const recorded = (plan: StatePlan, reason: RecordedViewReason): StateView => ({
   tool: plan.tool.name,
   shape: "recorded",
@@ -96,6 +189,7 @@ const itemMismatch = (
   check: {
     readonly view: { readonly tool: string; readonly fields: string[] };
     readonly envelope: { skeleton?: string };
+    readonly spellings: ClockSpellings;
   },
   record: StateRecordFacts,
 ): RecordedViewReason | undefined => {
@@ -118,6 +212,7 @@ const itemMismatch = (
       envelope.skeleton = skeleton;
     }
     if (skeleton !== envelope.skeleton) return "envelope-varies";
+    check.spellings.note(entity.fields, object);
     const shown = renderStateEntity(
       entity,
       view,
@@ -142,8 +237,14 @@ export const checkItemPlan = (
   context.retain(union.bytes);
   const view = { tool: plan.tool.name, fields: union.fields };
   const envelope: { skeleton?: string } = {};
+  const spellings = new ClockSpellings(context.retain);
   for (const record of plan.latest) {
-    const reason = itemMismatch(context, plan, { view, envelope }, record);
+    const reason = itemMismatch(
+      context,
+      plan,
+      { view, envelope, spellings },
+      record,
+    );
     if (reason !== undefined) return recorded(plan, reason);
   }
   return {
@@ -155,46 +256,54 @@ export const checkItemPlan = (
     required_fields: union.required,
     envelope_ordinal: plan.latest[0]!.ordinal,
     checked_record_ordinals: plan.latest.map((record) => record.ordinal),
+    ...(plan.projected === undefined || plan.projected.length === 0
+      ? {}
+      : { projected_record_ordinals: [...plan.projected] }),
+    ...spellings.view,
   };
 };
 
-/** Whether every latest recording lists its whole collection in state order, and which counters equal the item count. */
+/** The latest recordings that list their whole collection in state order, and the counters that equal the item count on each of them, or on every line when none does. */
 const listFacts = (
   context: StateGateContext,
   plan: StatePlan,
   union: FieldUnion,
-): { readonly all: boolean; readonly counters: string[] } => {
+): { readonly whole: ReadonlySet<number>; readonly counters: string[] } => {
   const field = context.idField(plan.type);
-  let all = true;
-  let counters: string[] | undefined;
+  const whole = new Set<number>();
+  const counting = new Map<number, string[]>();
   for (const record of plan.latest)
     context.withBody(record.ordinal, (body) => {
       const items =
         body === undefined ? undefined : listItems(body, plan.pointer);
       if (body === undefined || items === undefined) return;
       items.forEach((item) => union.add(item));
-      // Once a list cannot be the whole collection, its membership is not compared again.
-      if (all && record.query === undefined) {
-        const ids = items.map((item) => scalarText(item[field]) ?? "");
-        const expected = context
-          .inCollection(plan.type, collectionPathOf(record, false))
-          .map((entity) => entity.id);
-        if (!same(ids, expected)) all = false;
-      } else all = false;
       const parent = plan.pointer === "" || !isObject(body) ? {} : body;
       const counted = Object.keys(parent).filter(
         (name) => isItemTotal(name) && countOf(parent[name]) !== undefined,
       );
-      // A total that differs from the number listed, or a next page, shows the list is partial.
+      counting.set(
+        record.ordinal,
+        counted.filter((name) => parent[name] === items.length),
+      );
+      // Only a line that pages at most can hold its whole collection; a total that differs from
+      // the number listed, or a next page, shows it is partial.
       if (
+        !startsAtBeginning(record.query) ||
         counted.some((name) => countOf(parent[name]) !== items.length) ||
         Object.keys(parent).some((name) => continues(name, parent[name]))
       )
-        all = false;
-      const names = counted.filter((name) => parent[name] === items.length);
-      counters = (counters ?? names).filter((name) => names.includes(name));
+        return;
+      const ids = items.map((item) => scalarText(item[field]) ?? "");
+      const expected = context
+        .inCollection(plan.type, collectionPathOf(record, false))
+        .map((entity) => entity.id);
+      if (same(ids, expected)) whole.add(record.ordinal);
     });
-  return { all, counters: (counters ?? []).sort(compare) };
+  // Counter presence is per envelope. Keep every observed page counter;
+  // renderStateList updates only one the selected base actually counted.
+  const counters = [...new Set([...counting.values()].flat())].sort(compare);
+  return { whole, counters };
 };
 
 const nameTokens = (name: string): string[] =>
@@ -202,17 +311,21 @@ const nameTokens = (name: string): string[] =>
     .split(/[_\-\s]|(?<=[a-z0-9])(?=[A-Z])/u)
     .map((token) => token.toLowerCase());
 
-/** Item totals, including compact `totalcount`/`itemcount`; page counts and account IDs are excluded. */
+const LISTED_NOUNS = new Set(["elements", "entries", "items", "results"]);
+
+/** Item totals, including compact `totalcount`/`itemcount` and `numberOfElements`; page counts and account IDs are excluded. */
 const isItemTotal = (name: string): boolean => {
   const tokens = nameTokens(name);
   return (
-    tokens.some(
+    (tokens.some(
       (token) =>
         token === "total" ||
         token === "count" ||
         token === "totalcount" ||
         token === "itemcount",
-    ) &&
+    ) ||
+      (tokens.includes("number") &&
+        tokens.some((token) => LISTED_NOUNS.has(token)))) &&
     !tokens.some(
       (token) => token === "page" || token === "pages" || token === "per",
     )
@@ -244,20 +357,95 @@ const continues = (name: string, value: JsonValue | undefined): boolean =>
   value !== false &&
   value !== "";
 
-/** Whether one latest list recording renders from its own envelope and the listed entities' state. */
+/** The query that lines which are not whole follow, with the item totals that count its matches before paging. */
+const listQuery = (
+  context: StateGateContext,
+  plan: StatePlan,
+  whole: ReadonlySet<number>,
+): ListQuery | undefined => {
+  const field = context.idField(plan.type);
+  const lines: QueryLine[] = [];
+  const counts = new Map<number, [string, number][]>();
+  for (const record of plan.latest) {
+    const values = whole.has(record.ordinal)
+      ? undefined
+      : singleQueryValues(record.query);
+    if (values === undefined || values.size === 0) continue;
+    context.withBody(record.ordinal, (body) => {
+      const items =
+        body === undefined ? undefined : listItems(body, plan.pointer);
+      if (body === undefined || items === undefined) return;
+      const choices = lineChoices(values, items);
+      context.retain(ENTRY_BYTES * (items.length + choices.length * 4 + 2));
+      lines.push({
+        ordinal: record.ordinal,
+        values,
+        choices,
+        listed: items.map((item) => scalarText(item[field]) ?? ""),
+        entities: context.inCollection(
+          plan.type,
+          collectionPathOf(record, false),
+        ),
+      });
+      const parent = plan.pointer === "" || !isObject(body) ? {} : body;
+      counts.set(
+        record.ordinal,
+        Object.keys(parent).flatMap((name): [string, number][] => {
+          const count = isItemTotal(name)
+            ? queryTotalCount(parent[name])
+            : undefined;
+          return count === undefined ? [] : [[name, count]];
+        }),
+      );
+    });
+  }
+  const learned = learnQuery(lines);
+  if (learned === undefined) return undefined;
+  // Totals count every match on each line the query answers; a `number`-of-items member counts the page.
+  const totals = new Set<string>();
+  const contradicted = new Set<string>();
+  const answered = new Set(learned.record_ordinals);
+  for (const line of lines) {
+    if (!answered.has(line.ordinal)) continue;
+    const { total } = evaluateQuery(
+      learned.parameters,
+      line.values,
+      line.entities,
+    )!;
+    // Absence says nothing about another envelope's counter. Only a present
+    // count that disagrees invalidates the shared total interpretation.
+    for (const [name, count] of counts.get(line.ordinal) ?? []) {
+      if (nameTokens(name).includes("number")) continue;
+      if (count === total) totals.add(name);
+      else contradicted.add(name);
+    }
+  }
+  return {
+    ...learned,
+    totals: [...totals].filter((name) => !contradicted.has(name)).sort(compare),
+  };
+};
+
+/** Whether one latest list recording renders from its own envelope and the state: the whole collection, the query's matches, or the listed entities. */
 const listReproduces = (
   context: StateGateContext,
   plan: StatePlan,
-  view: {
-    readonly tool: string;
-    readonly fields: string[];
-    readonly pointer: string;
-    readonly counters: string[];
-    readonly all: boolean;
+  check: {
+    readonly view: {
+      readonly tool: string;
+      readonly fields: string[];
+      readonly pointer: string;
+      readonly counters: string[];
+      readonly whole: ReadonlySet<number>;
+      readonly query: ListQuery | undefined;
+    };
+    readonly spellings?: ClockSpellings;
   },
   record: StateRecordFacts,
 ): boolean => {
+  const { view, spellings } = check;
   const field = context.idField(plan.type);
+  const collection = collectionPathOf(record, false);
   return context.withBody(record.ordinal, (body) => {
     const items =
       body === undefined ? undefined : listItems(body, plan.pointer);
@@ -265,25 +453,45 @@ const listReproduces = (
     const observed = new Map(
       items.map((item) => [scalarText(item[field]) ?? "", item]),
     );
-    const members = view.all
-      ? context.inCollection(plan.type, collectionPathOf(record, false))
-      : items.flatMap((item) => {
+    const computed = view.query?.record_ordinals.includes(record.ordinal)
+      ? evaluateQuery(
+          view.query.parameters,
+          singleQueryValues(record.query) ?? new Map(),
+          context.inCollection(plan.type, collection),
+        )
+      : undefined;
+    const members = view.whole.has(record.ordinal)
+      ? context.inCollection(plan.type, collection)
+      : (computed?.page ??
+        items.flatMap((item) => {
           const entity = context.entity(
             plan.type,
-            collectionPathOf(record, false),
+            collection,
             scalarText(item[field]) ?? "",
           );
           return entity === undefined ? [] : [entity];
-        });
-    const rendered = members.map((entity) =>
-      renderStateEntity(
+        }));
+    const rendered = members.map((entity) => {
+      const item = observed.get(entity.id);
+      if (item !== undefined) spellings?.note(entity.fields, item);
+      return renderStateEntity(
         entity,
         view,
         context.volatileOf(plan.type),
-        observed.get(entity.id),
-      ),
-    );
-    return same(renderStateList(view, body, rendered), body);
+        item,
+      );
+    });
+    const answer =
+      view.query === undefined ||
+      (computed === undefined && !view.whole.has(record.ordinal))
+        ? renderStateList(view, body, rendered)
+        : renderQueryList(
+            { ...view, query: view.query },
+            body,
+            rendered,
+            computed?.total ?? rendered.length,
+          );
+    return same(answer, body);
   });
 };
 
@@ -293,17 +501,35 @@ export const checkListPlan = (
   plan: StatePlan,
 ): StateView => {
   const union = new FieldUnion();
-  const { all, counters } = listFacts(context, plan, union);
+  const { whole, counters } = listFacts(context, plan, union);
   context.retain(union.bytes);
-  const view = {
+  const base = {
     tool: plan.tool.name,
     fields: union.fields,
     pointer: plan.pointer,
     counters,
-    all,
+    whole,
   };
+  let query = listQuery(context, plan, whole);
+  // A line the query explains but whose envelope or fields the state does not reproduce keeps its recorded members.
+  if (query !== undefined) {
+    const failing = plan.latest.filter(
+      (record) =>
+        query!.record_ordinals.includes(record.ordinal) &&
+        !listReproduces(context, plan, { view: { ...base, query } }, record),
+    );
+    const kept = query.record_ordinals.filter(
+      (ordinal) => !failing.some((record) => record.ordinal === ordinal),
+    );
+    query = kept.length === 0 ? undefined : { ...query, record_ordinals: kept };
+  }
+  const view = { ...base, query };
+  const all = plan.latest.every((record) => whole.has(record.ordinal));
+  const spellings = new ClockSpellings(context.retain);
   if (
-    !plan.latest.every((record) => listReproduces(context, plan, view, record))
+    !plan.latest.every((record) =>
+      listReproduces(context, plan, { view, spellings }, record),
+    )
   )
     return recorded(plan, "list-differs");
   return {
@@ -314,7 +540,16 @@ export const checkListPlan = (
     fields: union.fields,
     required_fields: union.required,
     membership: all ? "all" : "recorded",
+    ...(all || whole.size === 0
+      ? {}
+      : {
+          all_record_ordinals: plan.latest
+            .map((record) => record.ordinal)
+            .filter((ordinal) => whole.has(ordinal)),
+        }),
     counters,
+    ...(query === undefined ? {} : { query }),
     checked_record_ordinals: plan.latest.map((record) => record.ordinal),
+    ...spellings.view,
   };
 };

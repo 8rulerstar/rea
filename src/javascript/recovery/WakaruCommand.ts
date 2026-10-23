@@ -9,6 +9,7 @@ import {
 } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
+import { prlimitArgumentVector } from "../../process/LinuxResourceLimits.js";
 import { cleanupOwnedProcessGroup } from "../../process/ProcessOwnership.js";
 import {
   ProviderProcessSupervisor,
@@ -27,6 +28,12 @@ import { RECOVERY_LIMITS, wakaruFixedLimitRecovery } from "./WakaruRelease.js";
 const OPERATION = "recover_javascript_sources";
 const WAKARU_REQUIREMENT =
   "Provide an absolute REA_WAKARU_COMMAND pointing to a Wakaru ^1.13.0 Linux x64 binary (verified with 1.14.0); no tool is installed by REA. See docs/javascript-recovery.md#install-wakaru.";
+
+/** Wakaru recovery runs only on Linux x64; discovery and execution share this check. */
+export const wakaruHostSupported = (
+  platform: NodeJS.Platform,
+  arch: string,
+): boolean => platform === "linux" && arch === "x64";
 
 /** Inject the owned process launcher while retaining production protocol parsing. */
 export type WakaruLauncher = (
@@ -64,8 +71,7 @@ export const resolveWakaruCommand = async (
 ) => {
   const configured = environment.REA_WAKARU_COMMAND;
   if (
-    process.platform !== "linux" ||
-    process.arch !== "x64" ||
+    !wakaruHostSupported(process.platform, process.arch) ||
     configured === undefined ||
     !isAbsolute(configured)
   )
@@ -118,12 +124,14 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
   const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
     command: context.limiter,
     arguments: [
-      `--as=${String(RECOVERY_LIMITS.addressSpaceBytes)}`,
-      `--fsize=${String(RECOVERY_LIMITS.outputBytes)}`,
-      "--core=0",
-      "--cpu=120",
-      "--",
-      context.command,
+      ...prlimitArgumentVector(
+        {
+          address_space_bytes: RECOVERY_LIMITS.addressSpaceBytes,
+          file_bytes: RECOVERY_LIMITS.outputBytes,
+          cpu_seconds: RECOVERY_LIMITS.cpuSeconds,
+        },
+        context.command,
+      ),
       ...context.arguments,
     ],
     expectedCommand: null,
