@@ -3,6 +3,7 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactFileCleanupFailure,
+  artifactFilePrimaryFailure,
   ArtifactFileCancelled,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
@@ -166,15 +167,11 @@ const failureFor = (
   path: string,
   outputBytes: number,
 ): AnalysisError => {
-  const primary =
-    cause instanceof ArtifactFileCleanupFailure &&
-    cause.fileCleanupFailure.outcome.kind === "failed"
-      ? failureForPrimary(
-          cause.fileCleanupFailure.outcome.cause,
-          path,
-          outputBytes,
-        )
-      : failureForPrimary(cause, path, outputBytes);
+  const primary = failureForPrimary(
+    artifactFilePrimaryFailure(cause),
+    path,
+    outputBytes,
+  );
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
