@@ -359,3 +359,37 @@ it("rejects a file changed after its ranges were decoded", async () => {
   );
   await expect(reading).rejects.toMatchObject({ reason: "integrity" });
 });
+
+it("keeps a completed range read when cancellation arrives during the final checks", async () => {
+  const root = await createTestTempDirectory("rea-stable-ranges-late-");
+  const path = join(root, "selected");
+  const bytes = Buffer.from("original evidence");
+  await writeFile(path, bytes);
+  const controller = new AbortController();
+  let inspected = 0;
+  const failure = await readStableArtifactRanges(
+    path,
+    (source) => source.read(0, 4),
+    controller.signal,
+    undefined,
+    {
+      async lstat(selected) {
+        // The second lstat is the post-read check, after every byte is hashed.
+        if (++inspected === 2) controller.abort(new Error("late"));
+        return lstat(selected, { bigint: true });
+      },
+      open,
+    },
+  ).catch((cause: unknown) => cause);
+  expect(failure).toBeInstanceOf(ArtifactFileCancelled);
+  expect(
+    (failure as ArtifactFileCancelled<{ sha256: string }>).fileCancellation
+      .outcome,
+  ).toMatchObject({
+    kind: "completed",
+    value: {
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      bytes: bytes.length,
+    },
+  });
+});

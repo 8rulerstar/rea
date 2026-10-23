@@ -268,7 +268,8 @@ export const readStableArtifactRanges = async <T>(
         hash.update(value);
       }
       await assertUnchangedAfterRead(path, file, fileSystem, initial, count);
-      assertArtifactReadActive(signal);
+      // A cancellation from here on is reported by the descriptor owner, which
+      // keeps this completed read so the caller can still name the source.
       return { result, sha256: hash.digest("hex"), bytes: size };
     },
   );
