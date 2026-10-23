@@ -302,12 +302,13 @@
     "verify:wasm:package": "npm run build:cached && node scripts/verify-packaged-wasm-artifact.mjs",
     "verify:wasm-interface-comparison": "npm run build:cached && node scripts/verify-wasm-interface-comparison.mjs",
     "verify:wasm:artifact": "npm run build:cached && node scripts/verify-wasm-artifact.mjs",
+    "verify:apk-signature": "npm run build:cached && node scripts/verify-apk-signature.mjs",
     "verify:evm:interface": "npm run build:cached && node scripts/verify-evm-interface.mjs",
     "verify:solidity:metadata": "npm run build:cached && node scripts/verify-solidity-metadata.mjs",
     "verify:recorded:crash": "npm run build:cached && node scripts/verify-recorded-crash.mjs",
     "mcp-catalog:check:built": "node scripts/generate-mcp-tool-catalog.mjs --check",
-    "compile": "node scripts/clean-build-output.mjs && node scripts/run-typescript.mjs -p tsconfig.build.json && node scripts/record-catalog-digests.mjs && node scripts/bundle-runtime.mjs",
-    "compile:termux": "node scripts/clean-build-output.mjs && node --max-old-space-size=3072 node_modules/typescript-termux/lib/tsc.js -p tsconfig.build.json && node scripts/record-catalog-digests.mjs && node scripts/bundle-runtime.mjs",
+    "compile": "node scripts/clean-build-output.mjs && node scripts/run-typescript.mjs -p tsconfig.build.json && node scripts/record-catalog-digests.mjs && node scripts/record-mcp-catalog.mjs && node scripts/bundle-runtime.mjs",
+    "compile:termux": "node scripts/clean-build-output.mjs && node --max-old-space-size=3072 node_modules/typescript-termux/lib/tsc.js -p tsconfig.build.json && node scripts/record-catalog-digests.mjs && node scripts/record-mcp-catalog.mjs && node scripts/bundle-runtime.mjs",
     "artifacts:mcp-catalog": "node scripts/generate-mcp-tool-catalog.mjs",
     "artifacts:skills": "node scripts/generate-skill-metadata.mjs",
     "artifacts:product-catalog": "node scripts/generate-product-catalog.mjs",
@@ -322,8 +323,8 @@
   },
   "lint-staged": {
     "*.{cjs,cts,js,jsx,mjs,mts,ts,tsx}": [
-      "oxfmt",
-      "oxlint --fix"
+      "oxlint --fix",
+      "oxfmt"
     ],
     "*.{json,md,yml,yaml}": "oxfmt --no-error-on-unmatched-pattern"
   },

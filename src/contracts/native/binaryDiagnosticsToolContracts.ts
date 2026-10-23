@@ -1,3 +1,6 @@
+import { inspectByteEntropyInputSchema } from "../../domain/native/byteEntropy.js";
+import { publicInputStrictObject } from "../../domain/publicInput.js";
+import { byteEntropyOutputSchema } from "../toolOutputSchemaGroups.js";
 import {
   inspectRecordedCrashInputSchema,
   recordedCrashSchema,
@@ -11,6 +14,10 @@ import {
   analysisDetailOutputSchemaOf,
   analysisDetailSchema,
 } from "../analysisDetail.js";
+import {
+  inspectNativeExportsInputSchema,
+  nativeExportsSchema,
+} from "../../domain/native/nativeExports.js";
 import type { ToolContract } from "../toolContractTypes.js";
 import { toolContractMetadata } from "../toolEffects.js";
 import { evidenceResultOf } from "../toolOutputSchemaPrimitives.js";
@@ -18,13 +25,84 @@ import {
   inspectPeResourcesInputSchema,
   peResourcesSchema,
 } from "../../domain/native/peResources.js";
+import {
+  inspectPeCertificatesInputSchema,
+  peCertificatesSchema,
+} from "../../domain/native/peCertificates.js";
+import {
+  inspectElfNotesInputSchema,
+  elfNotesSchema,
+} from "../../domain/native/elfNotes.js";
 
 /** Caller-selected delivery of completed binary layout Evidence. */
 export const inspectBinaryLayoutRequestSchema =
   inspectBinaryLayoutInputSchema.extend({ detail: analysisDetailSchema });
 
+/**
+ * Public `inspect_byte_entropy` input. The shared constructor runs before
+ * `detail` is added so the advertised input stays closed.
+ */
+export const inspectByteEntropyRequestSchema = publicInputStrictObject(
+  inspectByteEntropyInputSchema.shape,
+).extend({ detail: analysisDetailSchema });
+
 /** Offline binary diagnostics are independent of macOS process/UI providers. */
 export const BINARY_DIAGNOSTICS_TOOL_CONTRACTS = [
+  {
+    name: "inspect_elf_notes",
+    ...toolContractMetadata("inspect_elf_notes"),
+    kind: "native-provider",
+    description:
+      "Inspect one explicit local ELF32/ELF64 image's PT_NOTE program headers and SHT_NOTE sections without executing it or opening a disassembler. Returns note-table file ranges, owners, types, descriptor SHA-256 and hex previews, plus GNU build-id, ABI-tag and gold-version fields when those descriptors match. A missing table is observed absence of those declarations, not proof the image never carried notes in another container. Reads a stable regular file; malformed ELF headers, truncated notes and exhausted budgets return no partial success. Portable on supported Node hosts; no debug package or catalog is required.",
+    inputSchema: inspectElfNotesInputSchema,
+    outputSchema: evidenceResultOf(elfNotesSchema),
+    examples: [
+      {
+        title: "Inspect ELF GNU build-id and ABI-tag notes",
+        input: { path: "/artifacts/program" },
+      },
+    ],
+  },
+  {
+    name: "inspect_byte_entropy",
+    ...toolContractMetadata("inspect_byte_entropy"),
+    kind: "native-provider",
+    description:
+      "Inspect Shannon byte entropy for one explicit local file offline, without execution, extraction or external tools. Returns file-wide SHA-256 and entropy, fixed-block entropy for an optional offset/length window, and adjacent high (>=7.2) and low (<=1.0) runs with exact file offsets. Block size is a power of two from 256 to 65536 (default 4096). Complete output can become very large because it includes one row per selected block, and summary detail still retains that full list. Use a shorter length or a larger block_size; the selected window is limited to 32,768 output blocks. Entropy cannot distinguish compression from encryption. Summary detail returns file entropy plus the ten longest runs; retrieve parent Evidence for the full series. The entire file is read even for a window.",
+    inputSchema: inspectByteEntropyRequestSchema,
+    outputSchema: byteEntropyOutputSchema,
+    examples: [
+      {
+        title: "Profile firmware bytes before extraction",
+        input: { path: "/artifacts/firmware.bin" },
+      },
+      {
+        title: "Summarize a selected byte window",
+        input: {
+          path: "/artifacts/firmware.bin",
+          offset: 4096,
+          length: 65536,
+          block_size: 4096,
+          detail: "summary",
+        },
+      },
+    ],
+  },
+  {
+    name: "inspect_pe_certificates",
+    ...toolContractMetadata("inspect_pe_certificates"),
+    kind: "native-provider",
+    description:
+      "Inspect one explicit local PE32/PE32+ image's IMAGE_DIRECTORY_ENTRY_SECURITY table without executing it, verifying signatures or opening a disassembler. Returns WIN_CERTIFICATE file ranges, types and payload SHA-256, plus structurally decoded PKCS#7 signedData digest algorithms, embedded X.509 serial/issuer/subject/validity fields and signer identifiers, including a subject key identifier, when type 2 is present. A missing directory is observed absence of that table, not proof the image is unsigned in every catalog or overlay sense. Authenticode digest coverage, chain validity and timestamp trust remain unobserved. Reads a stable regular file; malformed PE headers, truncated WIN_CERTIFICATE entries, X.509 certificates missing subjectPublicKeyInfo or signatureValue, and non-signedData PKCS#7 return no partial success. Portable on supported Node hosts; no Windows SDK or engine installation required.",
+    inputSchema: inspectPeCertificatesInputSchema,
+    outputSchema: evidenceResultOf(peCertificatesSchema),
+    examples: [
+      {
+        title: "Inspect PE Authenticode certificate identities",
+        input: { path: "/artifacts/application.exe" },
+      },
+    ],
+  },
   {
     name: "inspect_pe_resources",
     ...toolContractMetadata("inspect_pe_resources"),
@@ -37,6 +115,21 @@ export const BINARY_DIAGNOSTICS_TOOL_CONTRACTS = [
       {
         title: "Inspect PE resource identities and icon relationships",
         input: { path: "/artifacts/application.exe" },
+      },
+    ],
+  },
+  {
+    name: "inspect_native_exports",
+    ...toolContractMetadata("inspect_native_exports"),
+    kind: "native-provider",
+    description:
+      "Inspect one explicit local PE or ELF image's export table without executing it or opening an engine: PE export-directory names, ordinals, addresses and forwarders, or ELF defined default/protected global, weak and unique .dynsym symbols with type, binding and symbol version. Ordinal-only, forwarded and hidden-version exports stay distinct. Portable on any supported host. Coverage is partial when table entries are unreadable and unsupported for an ELF without section headers; an empty complete inventory means the image declares no exports. Mach-O exports use inspect_macho.",
+    inputSchema: inspectNativeExportsInputSchema,
+    outputSchema: evidenceResultOf(nativeExportsSchema),
+    examples: [
+      {
+        title: "List a native library's exports",
+        input: { path: "/artifacts/native/libexample.so" },
       },
     ],
   },

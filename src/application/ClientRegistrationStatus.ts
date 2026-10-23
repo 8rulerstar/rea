@@ -1,3 +1,4 @@
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
 import { readClientPolicyBlock } from "./GeminiClientSettings.js";
 import { readEffectiveClientRegistrationConfiguration } from "./ClientConfigurationFiles.js";
 import {
@@ -13,7 +14,6 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { valid } from "semver";
 
-import { RegularFileCleanupFailure } from "./RegularFileRead.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
 import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
@@ -356,13 +356,21 @@ export const readClientRegistrationInspections = async (
   );
 };
 
+// Codex and Kimi Code load a server marked `disabled: true` and honor only
+// `enabled`; Devin loads one marked `enabled: false` and honors only `disabled`.
+const ignoresDisabledKey = new Set(["codex", "kimi"]);
+const ignoresEnabledKey = new Set(["devin"]);
+
 const registrationActivation = (
   registration: z.output<typeof registrationSchema>,
   client: SetupClient,
   parsed: ClientConfigurationDocument,
 ): "enabled" | "disabled" =>
-  (client.format !== "grok" && registration.disabled === true) ||
+  (client.format !== "grok" &&
+    !ignoresDisabledKey.has(client.name) &&
+    registration.disabled === true) ||
   (registration.enabled === false &&
+    !ignoresEnabledKey.has(client.name) &&
     !clientServerForcedEnabled(parsed, PRODUCT_IDENTITY.mcpServerKey)) ||
   ((parsed.dialect === "zcode" || parsed.dialect === "zcode_fallback") &&
     registration.enable === false) ||

@@ -1,3 +1,4 @@
+import { snapshotGdbCommandRecords } from "./GdbCommandRecords.js";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { isUtf8 } from "node:buffer";
@@ -958,16 +959,7 @@ export class GdbSessionManager {
             ? {
                 command: "GDB startup",
                 mi: "",
-                records: [...session.lines],
-                console: session.lines
-                  .filter((line) => line.startsWith("~"))
-                  .join("\n"),
-                target: session.lines
-                  .filter((line) => line.startsWith("@"))
-                  .join("\n"),
-                log: session.lines
-                  .filter((line) => line.startsWith("&"))
-                  .join("\n"),
+                ...snapshotGdbCommandRecords(session.lines),
                 process_exit_observed: true,
                 process_exit_code: session.exitCode,
                 process_exit_signal: session.exitSignal,
@@ -981,16 +973,7 @@ export class GdbSessionManager {
           ? {
               command: "GDB startup",
               mi: "",
-              records: [...session.lines],
-              console: session.lines
-                .filter((line) => line.startsWith("~"))
-                .join("\n"),
-              target: session.lines
-                .filter((line) => line.startsWith("@"))
-                .join("\n"),
-              log: session.lines
-                .filter((line) => line.startsWith("&"))
-                .join("\n"),
+              ...snapshotGdbCommandRecords(session.lines),
               output_truncated: session.recentRecordsTruncated,
               completion_status: "unknown" as const,
             }
@@ -1641,18 +1624,11 @@ export class GdbSessionManager {
           clearTimeout(pending.timer);
           session.pending.delete(token);
           pending.cleanup();
-          const records = [...pending.lines];
+
           pending.resolve({
             command: "",
             mi: pending.terminalRecord ?? "",
-            records,
-            console: records
-              .filter((record) => record.startsWith("~"))
-              .join("\n"),
-            target: records
-              .filter((record) => record.startsWith("@"))
-              .join("\n"),
-            log: records.filter((record) => record.startsWith("&")).join("\n"),
+            ...snapshotGdbCommandRecords(pending.lines),
             output_truncated: pending.outputTruncated,
             ...(pending.outputInvalidUtf8
               ? { output_invalid_utf8: true as const }
@@ -1677,14 +1653,11 @@ export class GdbSessionManager {
       clearTimeout(pending.timer);
       session.pending.delete(token);
       pending.cleanup();
-      const records = [...pending.lines];
+
       pending.resolve({
         command: "",
         mi: line,
-        records,
-        console: records.filter((record) => record.startsWith("~")).join("\n"),
-        target: records.filter((record) => record.startsWith("@")).join("\n"),
-        log: records.filter((record) => record.startsWith("&")).join("\n"),
+        ...snapshotGdbCommandRecords(pending.lines),
         output_truncated: pending.outputTruncated,
         ...(pending.outputInvalidUtf8
           ? { output_invalid_utf8: true as const }
@@ -1723,15 +1696,12 @@ export class GdbSessionManager {
     for (const pending of session.pending.values()) {
       clearTimeout(pending.timer);
       pending.cleanup();
-      const records = [...pending.lines];
+
       pending.reject(
         new GdbProtocolFailureError(message, {
           command: pending.command,
           mi: "",
-          records,
-          console: records.filter((line) => line.startsWith("~")).join("\n"),
-          target: records.filter((line) => line.startsWith("@")).join("\n"),
-          log: records.filter((line) => line.startsWith("&")).join("\n"),
+          ...snapshotGdbCommandRecords(pending.lines),
           output_truncated: pending.outputTruncated,
           ...(pending.outputInvalidUtf8
             ? { output_invalid_utf8: true as const }
@@ -1915,14 +1885,7 @@ export class GdbSessionManager {
         new GdbCommandProcessExitError({
           command: pending.command,
           mi: "",
-          records: [...pending.lines],
-          console: pending.lines
-            .filter((line) => line.startsWith("~"))
-            .join("\n"),
-          target: pending.lines
-            .filter((line) => line.startsWith("@"))
-            .join("\n"),
-          log: pending.lines.filter((line) => line.startsWith("&")).join("\n"),
+          ...snapshotGdbCommandRecords(pending.lines),
           process_exit_observed: true,
           process_exit_code: code,
           process_exit_signal: signalCode,
@@ -1991,14 +1954,7 @@ export class GdbSessionManager {
         const partial: GdbCommandResult = {
           command: pending.evidenceCommand,
           mi: "",
-          records: [...pending.lines],
-          console: pending.lines
-            .filter((line) => line.startsWith("~"))
-            .join("\n"),
-          target: pending.lines
-            .filter((line) => line.startsWith("@"))
-            .join("\n"),
-          log: pending.lines.filter((line) => line.startsWith("&")).join("\n"),
+          ...snapshotGdbCommandRecords(pending.lines),
           output_truncated: pending.outputTruncated,
           ...(pending.outputInvalidUtf8
             ? { output_invalid_utf8: true as const }
@@ -2122,14 +2078,7 @@ export class GdbSessionManager {
         const partial: GdbCommandResult = {
           command: pending.evidenceCommand,
           mi: "",
-          records: [...pending.lines],
-          console: pending.lines
-            .filter((line) => line.startsWith("~"))
-            .join("\n"),
-          target: pending.lines
-            .filter((line) => line.startsWith("@"))
-            .join("\n"),
-          log: pending.lines.filter((line) => line.startsWith("&")).join("\n"),
+          ...snapshotGdbCommandRecords(pending.lines),
           output_truncated: pending.outputTruncated,
           ...(pending.outputInvalidUtf8
             ? { output_invalid_utf8: true as const }
@@ -2311,12 +2260,30 @@ export const miStringField = (
     : undefined;
 };
 
+// GDB resolves its built-in aliases before abbreviations, so `p` is print, never
+// python. Of the prefixes of the commands classified below, only these four
+// name another command (checked against GDB 18.1).
+const GDB_BUILTIN_ALIASES: ReadonlyMap<string, string> = new Map([
+  ["d", "delete"],
+  ["p", "print"],
+  ["s", "step"],
+  ["t", "thread"],
+]);
+
+/** The first console word, lowercased, with GDB's built-in aliases resolved. */
+const gdbCommandWord = (command: string): string | undefined => {
+  const word = /^\s*([^\s;]+)/u.exec(command)?.[1]?.toLowerCase();
+  return word === undefined
+    ? undefined
+    : (GDB_BUILTIN_ALIASES.get(word) ?? word);
+};
+
 /** @internal Classify commands that can invalidate the configured output sink. */
 export const gdbOneShotCommandMayInvalidateDetachProof = (
   command: string,
 ): boolean => {
   if (commandMayChangeInferiorOutput(command)) return true;
-  const firstToken = /^\s*([^\s;]+)/u.exec(command)?.[1]?.toLowerCase();
+  const firstToken = gdbCommandWord(command);
   if (
     firstToken !== undefined &&
     (["source", "define", "alias"].some((name) =>
@@ -2336,7 +2303,7 @@ export const commandMayChangeInferiorOutput = (command: string): boolean => {
   const setting = /^\s*(?:set|with)\s+(\S+)/iu.exec(command)?.[1];
   const maySetInferiorTty =
     setting !== undefined && "inferior-tty".startsWith(setting.toLowerCase());
-  const firstToken = /^\s*([^\s;]+)/u.exec(command)?.[1]?.toLowerCase();
+  const firstToken = gdbCommandWord(command);
   const mayBeTtyCommand =
     firstToken !== undefined && "tty".startsWith(firstToken);
   const mayDefineAlias =

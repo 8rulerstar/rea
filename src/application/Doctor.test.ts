@@ -164,6 +164,14 @@ describe("doctor native analysis configuration", () => {
 
   it.each([
     ["REA_ANALYSIS_PROVIDER", "Hopper"],
+    ["REA_REGEX_MATCHING_DEADLINE_MS", "0"],
+    ["REA_BRIDGE_MAX_REQUEST_BYTES", "7463"],
+    ["REA_CAPTURE_DECODER_OLD_GENERATION_MIB", "7"],
+    ["REA_REGEX_WORKER_HEAP_REQUEST_MIB", "6"],
+    ["REA_MCP_INITIALIZE_BUDGET_MS", "0"],
+    ["REA_MCP_TOOLS_LIST_BUDGET_MS", "0"],
+    ["REA_MCP_FIRST_CATALOG_BUDGET_MS", "0"],
+    ["REA_MCP_DOCTOR_DEADLINE_MS", "0"],
     ["REA_GHIDRA_STARTUP_TIMEOUT_MS", "abc"],
     ["REA_SWIFTC_COMPILE_TIMEOUT_MS", "0"],
     ["REA_LOG_LEVEL", "verbose"],
@@ -438,7 +446,7 @@ describe("doctor", () => {
       ),
     ).toEqual({
       node: `Install ${SUPPORTED_NODE_VERSION_PROSE}.`,
-      host: "REA supports macOS 12+, Linux distributions with a recognized apt, dnf, or pacman package family, and the experimental Windows x64 Ghidra P0 boundary; automated Hopper setup additionally requires Ubuntu 24.04+, Fedora 41+, Nobara 44+, 64-bit Arch Linux, CachyOS, or Omarchy.",
+      host: "REA supports macOS 12+, Linux distributions with a recognized apt, dnf, or pacman package family, and the experimental Windows x64 Ghidra P0 boundary; automated Hopper setup on Linux additionally requires an x86_64 host running Ubuntu 24.04+, Fedora 41+, Nobara 44+, Arch Linux, CachyOS, or Omarchy.",
       hopper: "Run rea setup to install Hopper, or set HOPPER_LAUNCHER_PATH.",
       target: "Supply a readable local app or program path.",
     });

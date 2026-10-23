@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import type { ArtifactOccurrence } from "../artifactGraph.js";
 
-import { projectAppleApplication } from "./appleApplication.js";
+import { parseArtifactInventoryEvidence } from "../artifactInventoryEvidence.js";
+import { projectAppleInventory } from "./appleApplication.js";
+import { AnalysisInputError } from "../analysisErrorCore.js";
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
 import { digestCanonicalValue } from "../canonicalDigest.js";
 import { createEvidence, type Evidence } from "../evidence.js";
@@ -160,8 +162,13 @@ const inventoryEvidence = (
   );
 };
 
-const project = (evidence: Evidence) =>
-  projectAppleApplication({ inventory_evidence: [evidence] });
+const project = (evidence: Evidence) => {
+  const result = projectAppleInventory(
+    parseArtifactInventoryEvidence([evidence]),
+  );
+  if (!result.ok) throw result.error;
+  return result.value;
+};
 
 const macho = (path: string): FixtureEntry => ({ path, format: "mach-o" });
 
@@ -511,9 +518,28 @@ describe("Apple bundle layouts and containers", () => {
   });
 
   it("rejects inventories that cannot contain an Apple application", () => {
-    expect(() => project(inventoryEvidence("asar", "app.asar", []))).toThrow(
-      "Apple application projection requires IPA, directory, ZIP, or DMG inventory Evidence (got asar)",
-    );
+    try {
+      project(inventoryEvidence("asar", "app.asar", []));
+      throw new Error("Expected an unsupported inventory format to fail");
+    } catch (cause: unknown) {
+      expect(cause).toBeInstanceOf(AnalysisInputError);
+      expect(cause).toMatchObject({
+        operation: "project_apple_application_graph",
+        issues: [
+          expect.objectContaining({
+            path: [
+              "inventory_evidence",
+              0,
+              "normalized_result",
+              "manifest",
+              "root_format",
+            ],
+            message:
+              "Apple application projection requires IPA, directory, ZIP, or DMG inventory Evidence (got asar)",
+          }),
+        ],
+      });
+    }
   });
 });
 
@@ -837,19 +863,17 @@ describe("Apple path conventions", () => {
 it.each(["file", "slice"] as const)(
   "retains non-encrypted unavailable %s facts without classifying content",
   (kind) => {
-    const projection = projectAppleApplication({
-      inventory_evidence: [
-        inventoryEvidence("ipa", "Fixture.ipa", [
-          { path: "Payload/Fixture.app/Info.plist", format: "plist" },
-          {
-            path: "Payload/Fixture.app/libentry.dylib",
-            kind,
-            format: "file",
-            unavailable: true,
-          },
-        ]),
-      ],
-    });
+    const projection = project(
+      inventoryEvidence("ipa", "Fixture.ipa", [
+        { path: "Payload/Fixture.app/Info.plist", format: "plist" },
+        {
+          path: "Payload/Fixture.app/libentry.dylib",
+          kind,
+          format: "file",
+          unavailable: true,
+        },
+      ]),
+    );
     expect(projection.unavailable_components).toEqual([
       {
         path: "Payload/Fixture.app/libentry.dylib",

@@ -1,3 +1,4 @@
+import { WorkerFrameSignal } from "../process/WorkerFrameSignal.js";
 import { createHash, randomUUID } from "node:crypto";
 import { open, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,7 +20,6 @@ import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import type { StableArtifactSnapshot } from "../artifacts/readStableArtifact.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import {
-  AnalysisCapabilityUnavailableError,
   AnalysisCancelledError,
   AnalysisTimeoutError,
   AnalysisOutputError,
@@ -30,13 +30,16 @@ import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { jsonParts, bufferedJsonParts } from "../domain/jsonSerialization.js";
 import { javaScriptRuntime } from "../domain/runtimeVersion.js";
 import { err, ok, type Result } from "../domain/result.js";
-import type { IncludedScript } from "../domain/webBundleAnalyzerInspection.js";
+import type { IncludedScript } from "../domain/webBundleAnalyzerState.js";
 import {
   webBundleScriptAnalysisSchema,
   type WebBundleScriptAnalysis,
 } from "../domain/webBundleScriptAnalysis.js";
 import { OwnedWorkerRuntime } from "../process/OwnedWorkerRuntime.js";
-import { PrivateRuntimeRootUnavailableError } from "../process/PrivateRuntimeRootUnavailableError.js";
+import {
+  RuntimeControlUnavailableError,
+  runtimeControlCapabilityError,
+} from "../process/RuntimeControlUnavailableError.js";
 import { spawnOwnedProviderProcess } from "../process/ProviderProcess.js";
 import { ProviderStartupDeadline } from "../process/ProviderDeadline.js";
 import { prepareProcessOwnershipInspection } from "../process/ProcessOwnershipObservation.js";
@@ -139,7 +142,7 @@ export class WebBundleAnalysisWorker {
   #activeDeadline: ProviderStartupDeadline | undefined;
   #activeJob: WebBundleActiveJob | undefined;
   #activeTerminalResponseObserved = false;
-  readonly #frameWaiters = new Set<(outcome: "frame" | "failure") => void>();
+  readonly #frameSignal = new WorkerFrameSignal();
   #retainedResultBytes = 0;
   #ready = false;
   readonly #stdout = (chunk: Buffer | string): void => {
@@ -172,12 +175,12 @@ export class WebBundleAnalysisWorker {
         this.#observeFrame(this.#frames.at(-1)!);
         this.#pending = this.#pending.slice(end + 1);
       }
-      this.#wakeFrameWaiters("frame");
+      this.#frameSignal.wake("frame");
     } catch (cause) {
       this.#pending = "";
       this.#protocolFailure = cause;
       this.#latchFailure({ kind: "protocol", cause });
-      this.#wakeFrameWaiters("failure");
+      this.#frameSignal.wake("failure");
     }
   };
 
@@ -200,7 +203,7 @@ export class WebBundleAnalysisWorker {
       onInputFailure: (cause) => {
         if (this.#activeDeadline?.interruption !== undefined) return;
         this.#latchFailure({ kind: "input", cause });
-        this.#wakeFrameWaiters("failure");
+        this.#frameSignal.wake("failure");
       },
       supervisorOptions: {
         captureStdout: false,
@@ -232,7 +235,7 @@ export class WebBundleAnalysisWorker {
                 !this.#activeTerminalResponseObserved)
             )
               this.#latchFailure({ kind: "incomplete-output" });
-            this.#wakeFrameWaiters("failure");
+            this.#frameSignal.wake("failure");
           } else if (event.type === "output") {
             const failure = this.#observedFailure;
             if (failure?.kind !== "exit") return;
@@ -431,13 +434,8 @@ export class WebBundleAnalysisWorker {
           : interrupted !== undefined && observedFailure !== undefined
             ? observedFailure
             : (interrupted ??
-              (cause instanceof PrivateRuntimeRootUnavailableError
-                ? new AnalysisCapabilityUnavailableError(
-                    PROVIDER,
-                    OPERATION,
-                    cause.message,
-                    { cause, retryable: cause.retryable },
-                  )
+              (cause instanceof RuntimeControlUnavailableError
+                ? runtimeControlCapabilityError(PROVIDER, OPERATION, cause)
                 : cause instanceof AnalysisError
                   ? cause
                   : new AnalysisOutputError(
@@ -780,41 +778,12 @@ export class WebBundleAnalysisWorker {
     };
   }
 
-  #wakeFrameWaiters(outcome: "frame" | "failure"): void {
-    for (const wake of this.#frameWaiters) wake(outcome);
-    this.#frameWaiters.clear();
-  }
-
   async #waitForFrameOrOutputClose(
     supervisor: NonNullable<OwnedWorkerRuntime["supervisor"]>,
     deadline: ProviderStartupDeadline,
   ): Promise<"frame" | "failure" | "closed" | "interrupted"> {
     if (this.#frames.length > 0) return "frame";
-    let wakeFrame!: (outcome: "frame" | "failure") => void;
-    const frameAvailable = new Promise<"frame" | "failure">((resolve) => {
-      wakeFrame = resolve;
-      this.#frameWaiters.add(wakeFrame);
-    });
-    const outputCloseController = new AbortController();
-    const interruptOutputClose = () =>
-      outputCloseController.abort(deadline.signal.reason);
-    if (deadline.signal.aborted) interruptOutputClose();
-    else
-      deadline.signal.addEventListener("abort", interruptOutputClose, {
-        once: true,
-      });
-    try {
-      const outputClose = supervisor
-        .waitForOutputClose(undefined, outputCloseController.signal)
-        .then((closed): "closed" | "interrupted" =>
-          closed ? "closed" : "interrupted",
-        );
-      return await Promise.race([frameAvailable, outputClose]);
-    } finally {
-      outputCloseController.abort();
-      deadline.signal.removeEventListener("abort", interruptOutputClose);
-      this.#frameWaiters.delete(wakeFrame);
-    }
+    return this.#frameSignal.waitForOutputClose(supervisor, deadline.signal);
   }
 
   #completedSnapshot(cause: unknown): StableArtifactSnapshot | undefined {
@@ -875,7 +844,7 @@ export class WebBundleAnalysisWorker {
     this.#activeDeadline = undefined;
     this.#activeJob = undefined;
     this.#activeTerminalResponseObserved = false;
-    this.#wakeFrameWaiters("failure");
+    this.#frameSignal.wake("failure");
   }
 
   #cleanupFailure(cause: unknown, primary?: AnalysisError): AnalysisError {

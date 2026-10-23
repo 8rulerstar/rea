@@ -51,7 +51,25 @@ const statusSchema = z.object({
 type ToolAvailabilityReason = "available" | ToolUnavailabilityReason;
 
 type ProviderDescriptor = ProviderCapability;
+
+/** Optional integrations whose verified hosts exclude some platforms. */
+export const HOST_RESTRICTED_FEATURES = [
+  "packetCapture",
+  "signalRecording",
+  "evmInterface",
+  "binaryLayout",
+  "recordedCrash",
+  "firmwareInspection",
+  "firmwareExtraction",
+  "javascriptRecovery",
+] as const;
+export type HostRestrictedFeature = (typeof HOST_RESTRICTED_FEATURES)[number];
+
 export type AvailabilityPolicy = {
+  /** Integrations this host cannot run, whatever their configuration. */
+  readonly hostUnsupported?: Readonly<
+    Partial<Record<HostRestrictedFeature, boolean>>
+  >;
   readonly packetCaptureEnabled?: boolean;
   readonly signalRecordingEnabled?: boolean;
   readonly wasmArtifactEnabled?: boolean;
@@ -350,6 +368,7 @@ export const compactToolAvailability = (
 const availabilityFor = (context: AvailabilityContext): Availability => {
   // These built-in workflows accept a caller-selected endpoint; they do not load the optional passive provider.
   if (
+    context.name === "inspect_byte_entropy" ||
     context.name === "observe_web_execution" ||
     context.name === "inspect_web_event_listeners"
   )
@@ -417,6 +436,8 @@ const workflowAvailabilityFor = ({
     name === "inspect_model_artifact" ||
     name === "inspect_gpu_code_objects" ||
     name === "inspect_rust_binary" ||
+    name === "inspect_python_pyc" ||
+    name === "inspect_erlang_beam" ||
     name === "inspect_unreal_pak" ||
     name === "inspect_electron_fuses"
   )
@@ -459,37 +480,33 @@ const workflowAvailabilityFor = ({
       ],
     };
   if (name === "recover_javascript_sources")
-    return policy.javascriptRecoveryEnabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux x64, provide an absolute REA_WAKARU_COMMAND for Wakaru ^1.13.0 (verified with 1.14.0) and util-linux prlimit; see docs/javascript-recovery.md#install-wakaru. No binary target is required.",
-        };
+    return hostRestrictedAvailability(
+      policy,
+      "javascriptRecovery",
+      policy.javascriptRecoveryEnabled,
+      "On Linux x64, provide an absolute REA_WAKARU_COMMAND for Wakaru ^1.13.0 (verified with 1.14.0) and util-linux prlimit; see docs/javascript-recovery.md#install-wakaru. No binary target is required.",
+    );
   if (name === "inspect_binary_layout")
-    return policy.binaryLayoutEnabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
-        };
+    return hostRestrictedAvailability(
+      policy,
+      "binaryLayout",
+      policy.binaryLayoutEnabled,
+      "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
+    );
   if (name === "inspect_packet_capture" || name === "inspect_packet_fields")
-    return policy.packetCaptureEnabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux, supply TShark 4.x via absolute REA_TSHARK_COMMAND and util-linux prlimit (REA_TSHARK_PRLIMIT_COMMAND, default /usr/bin/prlimit). No active binary target or hardware is required; the tool is checked at execution.",
-        };
+    return hostRestrictedAvailability(
+      policy,
+      "packetCapture",
+      policy.packetCaptureEnabled,
+      "On Linux, supply TShark 4.x on PATH or through absolute REA_TSHARK_COMMAND, and util-linux prlimit (REA_TSHARK_PRLIMIT_COMMAND, default /usr/bin/prlimit). No active binary target or hardware is required; the tool is checked at execution.",
+    );
   if (name === "decode_signal_recording" || name === "inspect_signal_decoders")
-    return policy.signalRecordingEnabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux, supply sigrok-cli 0.7.2 via absolute REA_SIGROK_COMMAND and util-linux prlimit (REA_SIGROK_PRLIMIT_COMMAND, default /usr/bin/prlimit). No active binary target or hardware is required; the tool is checked at execution.",
-        };
+    return hostRestrictedAvailability(
+      policy,
+      "signalRecording",
+      policy.signalRecordingEnabled,
+      "On Linux, supply sigrok-cli 0.7.2 via absolute REA_SIGROK_COMMAND and util-linux prlimit (REA_SIGROK_PRLIMIT_COMMAND, default /usr/bin/prlimit). No active binary target or hardware is required; the tool is checked at execution.",
+    );
   if (name === "inspect_wasm_artifact")
     return policy.wasmArtifactEnabled === true
       ? { reason: "available", remediation: null }
@@ -498,40 +515,42 @@ const workflowAvailabilityFor = ({
           remediation:
             "Supply WABT 1.0.42 via absolute REA_WABT_BIN_DIRECTORY. No active binary target is required; tools are checked at execution.",
         };
-  if (name === "inspect_pe_resources")
+  if (name === "inspect_pe_resources" || name === "inspect_native_exports")
+    return { reason: "available", remediation: null };
+  if (name === "inspect_pe_certificates")
+    return { reason: "available", remediation: null };
+  if (name === "inspect_elf_notes")
     return { reason: "available", remediation: null };
   if (name === "inspect_evm_interface") {
-    if (policy.evmInterfaceEnabled !== true)
-      return {
-        reason: "provider_missing",
-        remediation:
-          "The bundled offline EVM interface profile is currently real-verified on Linux x64. No active binary target or chain endpoint is required.",
-      };
+    const profile = hostRestrictedAvailability(
+      policy,
+      "evmInterface",
+      policy.evmInterfaceEnabled,
+      "The bundled offline EVM interface profile is currently real-verified on Linux x64. No active binary target or chain endpoint is required.",
+    );
+    if (profile.reason !== "available") return profile;
     const limiter = policy.evmLimiterAvailability;
     if (limiter?.status === "unavailable")
       return { reason: "provider_missing", remediation: limiter.reason };
     return { reason: "available", remediation: null };
   }
   if (name === "inspect_recorded_crash")
-    return policy.recordedCrashEnabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
-        };
+    return hostRestrictedAvailability(
+      policy,
+      "recordedCrash",
+      policy.recordedCrashEnabled,
+      "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
+    );
   if (kind === "firmware-provider") {
-    const enabled =
-      name === "inspect_firmware_regions"
+    const inspection = name === "inspect_firmware_regions";
+    return hostRestrictedAvailability(
+      policy,
+      inspection ? "firmwareInspection" : "firmwareExtraction",
+      inspection
         ? policy.firmwareInspectionEnabled
-        : policy.firmwareExtractionEnabled;
-    return enabled === true
-      ? { reason: "available", remediation: null }
-      : {
-          reason: "provider_missing",
-          remediation:
-            "On Linux, provide an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
-        };
+        : policy.firmwareExtractionEnabled,
+      "On Linux, provide an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
+    );
   }
   if (kind === "android-provider")
     return policy.androidAnalysisAvailability?.status === "available"
@@ -596,6 +615,23 @@ const workflowAvailabilityFor = ({
         };
   if (kind === "session") return { reason: "available", remediation: null };
   return null;
+};
+
+/**
+ * An unsupported host takes precedence over configuration: no environment
+ * setting lets these integrations pass their execution host checks here.
+ */
+const hostRestrictedAvailability = (
+  policy: AvailabilityPolicy,
+  feature: HostRestrictedFeature,
+  enabled: boolean | undefined,
+  remediation: string,
+): Availability => {
+  if (policy.hostUnsupported?.[feature] === true)
+    return { reason: "unsupported_host", remediation };
+  return enabled === true
+    ? { reason: "available", remediation: null }
+    : { reason: "provider_missing", remediation };
 };
 
 const ownerProbeAvailability = (

@@ -11,6 +11,8 @@ import {
   prepareScenarioEvents,
   networkContentCoverageReason,
   screenshotProjection,
+  storageProjection,
+  storageFingerprintCoverageReason,
   type CaptureState,
 } from "./browserScenarioDiffEvidence.js";
 import {
@@ -75,6 +77,16 @@ export const compareBrowserScenarios = (
     input.after_scenario,
     normalization.rules,
   );
+  const familyIncomparableReason = eventFamilyCoverageReason(
+    input.before_scenario,
+    input.after_scenario,
+  );
+  const incomparableReason = eventCoverageReason(
+    familyIncomparableReason,
+    networkContentCoverageReason(input.before_scenario, input.after_scenario),
+    beforeEvents.coverageReason,
+    afterEvents.coverageReason,
+  );
   const alignment = alignScenarioSteps(
     input.before_scenario,
     input.after_scenario,
@@ -86,6 +98,8 @@ export const compareBrowserScenarios = (
     rules: normalization.rules,
     beforeEvents,
     afterEvents,
+    incomparableReason,
+    familyIncomparableReason,
   });
   const failures = [...alignment.failures, ...compared.failures];
   const alignmentStatus =
@@ -123,7 +137,7 @@ export const compareBrowserScenarios = (
     limitations: [
       "Steps align only by exact, unique step_id; missing, duplicate, or action-mismatched steps are reported and prevent an unchanged claim.",
       "Only declared literal normalization rules are applied, in canonical rule_id order, to already-redacted durable capture fields.",
-      "Elapsed time, event sequence/index values and capture-local transaction IDs are excluded as volatile; network transactions are compared as an unordered collection in the step that sent their request; screenshot bytes are compared by content digest.",
+      "Elapsed time, event sequence/index values and capture-local transaction IDs are excluded as volatile; network transactions are compared as an unordered collection in the step that sent their request; cookies, local storage and session storage entries are compared as unordered collections after literal normalization; screenshot bytes are compared by content digest.",
       "A changed status proves an observed normalized difference. Missing or truncated evidence, incompatible capture context, or alignment failure prevents an unchanged claim.",
     ],
   });
@@ -180,6 +194,8 @@ interface CompareAlignedStepsInput {
   readonly rules: readonly BrowserScenarioNormalizationRule[];
   readonly beforeEvents: ReturnType<typeof prepareScenarioEvents>;
   readonly afterEvents: ReturnType<typeof prepareScenarioEvents>;
+  readonly incomparableReason: string | undefined;
+  readonly familyIncomparableReason: string | undefined;
 }
 
 const compareAlignedSteps = (
@@ -206,6 +222,8 @@ const compareAlignedSteps = (
       rules: input.rules,
       beforeEvents: input.beforeEvents,
       afterEvents: input.afterEvents,
+      incomparableReason: input.incomparableReason,
+      familyIncomparableReason: input.familyIncomparableReason,
     });
     const reportable = artifacts.flatMap(({ diff }) =>
       diff === null ? [] : [diff],
@@ -290,6 +308,8 @@ interface CompareStepArtifactsInput {
   readonly rules: readonly BrowserScenarioNormalizationRule[];
   readonly beforeEvents: ReturnType<typeof prepareScenarioEvents>;
   readonly afterEvents: ReturnType<typeof prepareScenarioEvents>;
+  readonly incomparableReason: string | undefined;
+  readonly familyIncomparableReason: string | undefined;
 }
 
 const compareStepArtifacts = (
@@ -345,6 +365,11 @@ const compareStepArtifacts = (
       artifact: "storage",
       before: input.beforeStep.artifacts.storage,
       after: input.afterStep.artifacts.storage,
+      project: storageProjection,
+      incomparableReason: storageFingerprintCoverageReason(
+        input.beforeStep.artifacts.storage,
+        input.afterStep.artifacts.storage,
+      ),
     }),
     compareScenarioEvents({
       ...common,
@@ -353,16 +378,8 @@ const compareStepArtifacts = (
       after: captured(input.afterEvents.forStep(input.afterStep.step_index)),
       beforeState: eventEvidenceState(input.beforeCapture, input.beforeStep),
       afterState: eventEvidenceState(input.afterCapture, input.afterStep),
-      incomparableReason: eventCoverageReason(
-        input.beforeCapture,
-        input.afterCapture,
-        input.beforeEvents.coverageReason,
-        input.afterEvents.coverageReason,
-      ),
-      familyIncomparableReason: eventFamilyCoverageReason(
-        input.beforeCapture,
-        input.afterCapture,
-      ),
+      incomparableReason: input.incomparableReason,
+      familyIncomparableReason: input.familyIncomparableReason,
     }),
   ];
 };
@@ -486,14 +503,14 @@ const digestScenarioEvents = (
 };
 
 const eventCoverageReason = (
-  before: BrowserScenarioCapture,
-  after: BrowserScenarioCapture,
+  familyReason: string | undefined,
+  networkContentReason: string | undefined,
   beforeNetworkReason: string | undefined,
   afterNetworkReason: string | undefined,
 ): string | undefined => {
   const reasons = [
-    eventFamilyCoverageReason(before, after),
-    networkContentCoverageReason(before, after),
+    familyReason,
+    networkContentReason,
     beforeNetworkReason,
     afterNetworkReason,
   ].filter((reason) => reason !== undefined);

@@ -4,11 +4,9 @@ import { dirname, join, resolve } from "node:path";
 import { err, ok, type Result } from "../domain/result.js";
 import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
-import {
-  readRegularFile,
-  RegularFileCleanupFailure,
-  retryRegularFileCleanup,
-} from "./RegularFileRead.js";
+import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
+import { readRegularFile, retryRegularFileCleanup } from "./RegularFileRead.js";
+import { referenceSourceResourceFailure } from "../reference/ReferenceSourceReaderErrors.js";
 import type { ReferenceSourceReaderError } from "../reference/ReferenceSourceReaderTypes.js";
 
 export type ReferenceSourceVcsInfo =
@@ -59,13 +57,7 @@ export const readReferenceSourceVcs = async (
     });
   } catch (cause: unknown) {
     if (!(cause instanceof ArtifactReaderFailure)) throw cause;
-    return err({
-      tag: "reference-source-reader",
-      code: cause.reason === "cancelled" ? "cancelled" : "io",
-      message: cause.message,
-      ...(cause.cleanup === undefined ? {} : { cleanup: cause.cleanup }),
-      cause,
-    });
+    return err(referenceSourceResourceFailure(cause));
   }
 };
 

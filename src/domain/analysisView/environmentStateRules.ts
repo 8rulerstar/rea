@@ -1,5 +1,11 @@
+import type { ListQuery } from "./environmentStateListQuery.js";
 import { canonicalJson } from "../comparisonSemantics.js";
 import type { JsonValue } from "../jsonValue.js";
+import type { StateWritePlan } from "./environmentStateWriteRules.js";
+import {
+  respellClock,
+  type ClockFormat,
+} from "./environmentStateWriteValues.js";
 import { ENTRY_BYTES, textBytes } from "./webNetworkRouteTemplates.js";
 
 /** How records are ordered: by recorded start time, or by record order when any start time is missing. */
@@ -33,6 +39,10 @@ export type ParsedBody =
 /** Budgeted access the accumulator lends extraction; null and false mean the budget is exhausted. */
 export interface StateBudget {
   readonly body: (ordinal: number) => ParsedBody | null;
+  /** A record's request body, admitted as response bodies are. */
+  readonly requestBody: (ordinal: number) => ParsedBody | null;
+  /** Whether a record's response had no body. */
+  readonly emptyResponse: (ordinal: number) => boolean;
   readonly retain: (bytes: number) => boolean;
   /** Drop the temporary work of the body just read. */
   readonly release: () => void;
@@ -93,18 +103,53 @@ interface EntityViewPlan {
   readonly fields: string[];
   readonly required_fields: string[];
   readonly checked_record_ordinals: number[];
+  /** How the view spells the clock fields it always spells otherwise than the entities' stored values. */
+  readonly clock_formats?: Readonly<Record<string, ClockFormat>> | undefined;
 }
 
 export type StateItemView = EntityViewPlan & {
   readonly shape: "item";
   readonly envelope_ordinal: number;
+  /** Recorded reads that asked for some fields only and did not return the item, which replay answers. */
+  readonly projected_record_ordinals?: number[] | undefined;
 };
+
+/** A query parameter that asks for some fields only (`fields`, `fields[...]`, `select`, `$select`). */
+export const isProjectionParameter = (name: string): boolean => {
+  const lower = name.toLowerCase();
+  return (
+    lower === "fields" ||
+    lower.startsWith("fields[") ||
+    lower === "select" ||
+    lower === "$select"
+  );
+};
+
+/** Whether a recorded query string names a projection parameter. */
+export const projectsFields = (query: string | undefined): boolean =>
+  query !== undefined &&
+  [...new URLSearchParams(query).keys()].some(isProjectionParameter);
 
 export type StateListView = EntityViewPlan & {
   readonly shape: "list";
   readonly membership: "all" | "recorded";
+  /** With recorded membership, the checked lines that each list their whole collection. */
+  readonly all_record_ordinals?: number[] | undefined;
   readonly counters: string[];
+  /** The query the view's other lines follow, when one explains any of them. */
+  readonly query?: ListQuery | undefined;
 };
+
+/** Whether a list view answers on a checked line with every entity of the collection. */
+export const listsAll = (view: StateListView, ordinal: number): boolean =>
+  view.membership === "all" ||
+  (view.all_record_ordinals?.includes(ordinal) ?? false);
+
+/** The checked lines a list view answers with every entity of the collection. */
+export const allLines = (view: StateListView): readonly number[] =>
+  view.membership === "all"
+    ? view.checked_record_ordinals
+    : (view.all_record_ordinals ?? []);
 
 export type StateView =
   | StateItemView
@@ -125,6 +170,9 @@ export interface ExtractedState {
   readonly entities: StateEntity[];
   readonly documents: StateDocument[];
   readonly views: StateView[];
+  readonly writes: StateWritePlan[];
+  /** The instant a served clock starts from: the end of the capture's last timed record, or null without times. */
+  readonly write_clock: string | null;
 }
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -181,15 +229,72 @@ export const same = (
     : canonicalJson(left, "Environment state") ===
       canonicalJson(right, "Environment state");
 
-/** The decoded final path segment, which an item request names its entity by. */
-export const lastSegmentValue = (path: string): string => {
-  const segment = segmentsOf(path).at(-1) ?? "";
+/** A path segment percent-decoded, or as written when it does not decode. */
+export const decodedSegment = (segment: string): string => {
   try {
     return decodeURIComponent(segment);
   } catch {
     return segment;
   }
 };
+
+/**
+ * Whether two path spellings name one segment: they are equal, or either decodes once to the other.
+ * Decoding both would make `book%2531` match `book1`.
+ */
+export const pathSegmentMatches = (segment: string, value: string): boolean =>
+  segment === value ||
+  decodedSegment(segment) === value ||
+  decodedSegment(value) === segment;
+
+/** One segment of a call: a template literal, or a supplied path value. */
+export interface SuppliedSegment {
+  readonly text: string;
+  readonly supplied: boolean;
+}
+
+/** How many supplied segments a held collection matches verbatim, when it matches the call under the path rule. */
+export const collectionMatch = (
+  collection: string,
+  segments: readonly SuppliedSegment[],
+): number | undefined => {
+  const held = segmentsOf(collection);
+  if (held.length !== segments.length) return undefined;
+  let verbatim = 0;
+  for (const [index, { text, supplied }] of segments.entries()) {
+    const segment = held[index]!;
+    if (supplied ? !pathSegmentMatches(segment, text) : segment !== text)
+      return undefined;
+    if (supplied && segment === text) verbatim += 1;
+  }
+  return verbatim;
+};
+
+/** The collection a create writes: the candidate with the most verbatim supplied segments, the earliest on a tie, else the call with each supplied segment encoded. */
+export const selectedCollection = (
+  segments: readonly SuppliedSegment[],
+  candidates: readonly string[],
+): string => {
+  let chosen: string | undefined;
+  let verbatim = -1;
+  for (const collection of candidates) {
+    const matched = collectionMatch(collection, segments);
+    if (matched !== undefined && matched > verbatim) {
+      chosen = collection;
+      verbatim = matched;
+    }
+  }
+  return (
+    chosen ??
+    `/${segments
+      .map(({ text, supplied }) => (supplied ? encodeURIComponent(text) : text))
+      .join("/")}`
+  );
+};
+
+/** The decoded final path segment, which an item request names its entity by. */
+export const lastSegmentValue = (path: string): string =>
+  decodedSegment(segmentsOf(path).at(-1) ?? "");
 
 /** A path's non-empty segments, so a trailing slash names the same collection. */
 export const normalizedPath = (path: string): string =>
@@ -489,13 +594,14 @@ export const listItems = (
 /** One entity as a view shows it: the view's fields it has, view-specific values first; volatile fields take `observed` values when given. */
 export const renderStateEntity = (
   entity: StateEntity,
-  view: Pick<EntityViewPlan, "tool" | "fields">,
+  view: Pick<EntityViewPlan, "tool" | "fields" | "clock_formats">,
   volatileFields: ReadonlySet<string>,
   observed?: JsonObject,
 ): JsonObject => {
   const own =
     entity.view_fields.find((candidate) => candidate.tool === view.tool)
       ?.fields ?? {};
+  const formats = view.clock_formats ?? {};
   return Object.fromEntries(
     view.fields.flatMap((name): [string, JsonValue][] => {
       const source =
@@ -504,18 +610,45 @@ export const renderStateEntity = (
           : Object.hasOwn(own, name)
             ? own
             : entity.fields;
-      return Object.hasOwn(source, name) ? [[name, source[name]!]] : [];
+      if (!Object.hasOwn(source, name)) return [];
+      // A stored value the view never recorded, such as a written one, takes the view's spelling.
+      return [
+        [
+          name,
+          source === entity.fields && Object.hasOwn(formats, name)
+            ? respellClock(source[name]!, formats[name]!)
+            : source[name]!,
+        ],
+      ];
     }),
   );
 };
 
-/** A list response rendered from `base`: its array replaced by `items` and its counters set to their number. */
+/** The fields every recording of a view carried that the entity, as serving renders it, lacks; serving refuses to answer with such an entity. */
+export const missingRequiredFields = (
+  entity: StateEntity,
+  view: Pick<EntityViewPlan, "tool" | "fields" | "required_fields">,
+  volatileFields: ReadonlySet<string>,
+): string[] => {
+  const shown = renderStateEntity(entity, view, volatileFields);
+  return view.required_fields.filter((name) => !Object.hasOwn(shown, name));
+};
+
+/**
+ * A list response rendered from `base`: its array replaced by `items`, and set to their number each counter that
+ * counted the items `base` listed; one that did not, such as a partial page's total, keeps its recorded value.
+ */
 export const renderStateList = (
   view: Pick<StateListView, "pointer" | "counters">,
   base: JsonValue,
   items: readonly JsonObject[],
-): JsonValue =>
-  view.counters.reduce(
-    (body, name) => replaceAt(body, pointerTo(name), items.length),
+): JsonValue => {
+  const listed = listItems(base, view.pointer)?.length;
+  return view.counters.reduce(
+    (body, name) =>
+      at(base, pointerTo(name)) === listed
+        ? replaceAt(body, pointerTo(name), items.length)
+        : body,
     replaceAt(base, view.pointer, [...items]),
   );
+};

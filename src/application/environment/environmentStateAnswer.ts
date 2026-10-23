@@ -1,19 +1,32 @@
+import { environmentToolArguments } from "./environmentTools.js";
 import { stateBodyJson } from "../../domain/analysisView/EnvironmentStateAccumulator.js";
 import {
+  collectionMatch,
   collectionPathOf,
+  isProjectionParameter,
+  decodedSegment,
+  allLines,
   listItems,
+  listsAll,
+  missingRequiredFields,
   renderStateEntity,
   renderStateList,
   replaceAt,
   scalarText,
-  segmentsOf,
   type JsonObject,
   type RecordedViewReason,
   type StateEntity,
+  type SuppliedSegment,
   type StateItemView,
   type StateListView,
   type StateView,
 } from "../../domain/analysisView/environmentStateRules.js";
+import { pageBound } from "../../domain/analysisView/environmentStatePaging.js";
+import { isAbsence } from "../../domain/analysisView/environmentStateWriteChecks.js";
+import {
+  evaluateQuery,
+  renderQueryList,
+} from "../../domain/analysisView/environmentStateListQuery.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisInputError,
@@ -22,12 +35,9 @@ import {
 import type { JsonValue } from "../../domain/jsonValue.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import {
-  decodedPathSegment,
-  pathValueMatches,
   replayAnswer,
   replayEnvironmentTool,
   selectReplayExchange,
-  selectsRecordedLine,
   type ReplayArguments,
   type ReplayResult,
 } from "./environmentReplay.js";
@@ -38,14 +48,25 @@ import {
   type EnvironmentSource,
   type RecordedExchange,
 } from "./environmentSource.js";
+import {
+  callQuery,
+  callSegments,
+  checkedLine,
+  queryLine,
+  unfilteredLine,
+} from "./environmentStateCallLines.js";
 import type { EnvironmentStateStore } from "./environmentStateStore.js";
-import { environmentToolArguments } from "./environmentTools.js";
 
 /** Where a served answer came from: the live state, or a recording and why. */
 export type StateProvenance =
   | {
       readonly source: "recording";
-      readonly reason: RecordedViewReason | "no-view" | "unrecorded-request";
+      readonly reason:
+        | RecordedViewReason
+        | "no-view"
+        | "unrecorded-request"
+        | "page-exceeded"
+        | "projection";
     }
   | {
       readonly source: "state";
@@ -59,13 +80,21 @@ export type StateProvenance =
       readonly view: "list";
       readonly type: string;
       readonly collection: string;
-      readonly membership: "all" | "recorded";
+      readonly membership: "all" | "query" | "recorded";
       readonly listed: number;
     }
   | {
       readonly source: "state";
-      readonly view: "document";
+      readonly view: "document" | "document-write";
       readonly path: string;
+    }
+  | {
+      readonly source: "state";
+      /** A write applied to the state, or the recorded answer for an entity it does not hold. */
+      readonly view: "create" | "update" | "delete" | "missing";
+      readonly type: string;
+      readonly collection: string;
+      readonly id: string;
     };
 
 /** A replay answer that also says whether the state or a recording produced it. */
@@ -79,7 +108,7 @@ export interface StateServing {
   readonly store: EnvironmentStateStore;
 }
 
-const refused = (
+export const refused = (
   tool: EnvironmentManifestTool,
   userMessage: string,
 ): AnalysisError =>
@@ -94,12 +123,9 @@ const shownEntity = (
   entity: StateEntity,
   volatile: ReadonlySet<string>,
 ): Result<JsonObject, AnalysisError> => {
-  const shown = renderStateEntity(entity, view, volatile);
-  const missing = view.required_fields.filter(
-    (name) => !Object.hasOwn(shown, name),
-  );
+  const missing = missingRequiredFields(entity, view, volatile);
   return missing.length === 0
-    ? ok(shown)
+    ? ok(renderStateEntity(entity, view, volatile))
     : err(
         refused(
           tool,
@@ -121,12 +147,25 @@ const fromRecording = (
     : replayed;
 };
 
+/** Whether a call names a projection parameter of an item view with projected reads, which the state's whole entities cannot answer. */
+const asksProjection = (
+  view: StateItemView,
+  tool: EnvironmentManifestTool,
+  args: ReplayArguments,
+): boolean =>
+  view.projected_record_ordinals !== undefined &&
+  [...environmentToolArguments(tool).query].some(
+    ([name, argument]) =>
+      isProjectionParameter(name) && args[argument] !== undefined,
+  );
+
 /** A recorded body the state renders into, usable exactly when extraction could use it. */
-const recordedJson = (exchange: RecordedExchange): JsonValue | undefined =>
-  stateBodyJson(exchange.contentType, exchange);
+export const recordedJson = (
+  exchange: RecordedExchange,
+): JsonValue | undefined => stateBodyJson(exchange.contentType, exchange);
 
 /** The rendered body on the base record's status, content type and provenance; never cut. */
-const stateAnswer = (
+export const stateAnswer = (
   serving: StateServing,
   base: { readonly exchange: RecordedExchange; readonly exact: boolean },
   body: JsonValue,
@@ -156,67 +195,31 @@ const stateAnswer = (
   });
 };
 
-/** One collection segment an item call names: a template literal, or a supplied path value. */
-interface CallSegment {
-  readonly text: string;
-  readonly supplied: boolean;
-}
-
 /** An item call's collection segments and identity value, kept as supplied rather than joined and re-split. */
-interface ItemCall {
-  readonly segments: readonly CallSegment[];
+export interface ItemCall {
+  readonly segments: readonly SuppliedSegment[];
   readonly id: string;
 }
 
 /** What an item call names, or undefined when a path argument is missing. */
-const itemCall = (
+export const itemCall = (
   tool: EnvironmentManifestTool,
   args: ReplayArguments,
 ): ItemCall | undefined => {
-  const names = environmentToolArguments(tool).path;
-  const params = new Map(tool.params.map((param) => [param.index, param]));
-  const segments: CallSegment[] = [];
-  const template = tool.path_template
-    .slice(tool.path_template.indexOf("/") + 1)
-    .split("/");
-  for (const [index, text] of template.entries()) {
-    const param = params.get(index);
-    if (param === undefined) {
-      if (text !== "") segments.push({ text, supplied: false });
-      continue;
-    }
-    const value = args[names.get(param.name) ?? param.name];
-    if (typeof value !== "string") return undefined;
-    segments.push({ text: value, supplied: true });
-  }
-  const last = segments.pop();
-  return last?.supplied === true ? { segments, id: last.text } : undefined;
-};
-
-/** How many supplied segments a held collection matches verbatim, when it matches the call under replay's path rule. */
-const collectionMatch = (
-  collection: string,
-  segments: readonly CallSegment[],
-): number | undefined => {
-  const held = segmentsOf(collection);
-  if (held.length !== segments.length) return undefined;
-  let verbatim = 0;
-  for (const [index, { text, supplied }] of segments.entries()) {
-    const segment = held[index]!;
-    if (supplied ? !pathValueMatches(segment, text) : segment !== text)
-      return undefined;
-    if (supplied && segment === text) verbatim += 1;
-  }
-  return verbatim;
+  const segments = callSegments(tool, args);
+  const last = segments?.pop();
+  return segments !== undefined && last?.supplied === true
+    ? { segments, id: last.text }
+    : undefined;
 };
 
 /** The entity an item call names, preferring verbatim collection spellings as replay does; the id is tried percent-decoded, then as written. */
-const namedEntity = (
+export const namedEntity = (
   store: EnvironmentStateStore,
   type: string,
   call: ItemCall,
 ): StateEntity | undefined => {
-  const ids = [...new Set([decodedPathSegment(call.id), call.id])];
+  const ids = [...new Set([decodedSegment(call.id), call.id])];
   const candidates = store
     .collectionsOf(type)
     .flatMap((collection) => {
@@ -232,7 +235,60 @@ const namedEntity = (
   return undefined;
 };
 
-/** An item call renders the named entity into the recorded envelope; it never invents an entity. */
+/** The answer for an entity the state does not hold: the tool's latest recorded 400, 404 or 410, else a tool error. */
+export const missingAnswer = (
+  serving: StateServing,
+  tool: EnvironmentManifestTool,
+  missing: {
+    readonly type: string;
+    readonly collection: string;
+    readonly id: string;
+  },
+): Result<StateAnswer, AnalysisError> => {
+  // A read also answers with a 2xx JSON null, the absence the write gate accepts; a write never does, as a 2xx would
+  // report success for an entity that is not there.
+  const nullAbsence = tool.method === "GET";
+  const latestAbsence = (ordinals: readonly number[]) =>
+    ordinals
+      .map((ordinal) => serving.source.exchanges.get(ordinal))
+      .filter(
+        (exchange): exchange is RecordedExchange =>
+          exchange !== undefined &&
+          (isAbsence(exchange.status) ||
+            (nullAbsence &&
+              exchange.status !== null &&
+              exchange.status >= 200 &&
+              exchange.status < 300 &&
+              recordedJson(exchange) === null)),
+      )
+      .at(-1);
+  // The tool's own recorded absence first, else that of an item view of the type.
+  const itemTools = new Set(
+    [...serving.store.state.views.values()].flatMap((view) =>
+      view.shape === "item" && view.type === missing.type ? [view.tool] : [],
+    ),
+  );
+  const recorded =
+    latestAbsence(tool.record_ordinals) ??
+    latestAbsence(
+      serving.source.manifest.tools
+        .filter((candidate) => itemTools.has(candidate.name))
+        .flatMap((candidate) => candidate.record_ordinals),
+    );
+  if (recorded === undefined)
+    return err(
+      refused(
+        tool,
+        `The state holds no ${missing.type} entity ${missing.id} in ${missing.collection}.`,
+      ),
+    );
+  return ok({
+    ...replayAnswer(serving.source, recorded, false),
+    state: { source: "state", view: "missing", ...missing },
+  });
+};
+
+/** An item call renders the named entity into the recorded envelope; it never invents an entity; one the state does not hold answers the tool's recorded absence. */
 const answerItem = (
   serving: StateServing,
   tool: EnvironmentManifestTool,
@@ -245,12 +301,14 @@ const answerItem = (
     return err(refused(tool, `Tool ${tool.name} needs every path argument.`));
   const entity = namedEntity(store, view.type, call);
   if (entity === undefined)
-    return err(
-      refused(
-        tool,
-        `The state holds no ${view.type} entity ${call.id} in /${call.segments.map(({ text }) => text).join("/")}.`,
-      ),
-    );
+    return missingAnswer(serving, tool, {
+      type: view.type,
+      collection: `/${call.segments.map(({ text }) => text).join("/")}`,
+      id: call.id,
+    });
+  // A projection of an entity the state holds replays as the capture's projected reads did.
+  if (asksProjection(view, tool, args))
+    return fromRecording(source, tool, args, "projection");
   const shown = shownEntity(
     tool,
     view,
@@ -281,76 +339,118 @@ const answerItem = (
   );
 };
 
-/** The checked recorded line a list or document call names exactly, chosen among them as replay chooses; later or filtered recordings never qualify. */
-const checkedLine = (
-  source: EnvironmentSource,
-  tool: EnvironmentManifestTool,
-  checked: readonly number[],
-  args: ReplayArguments,
-): RecordedExchange | undefined => {
-  const lines = new Map<number, RecordedExchange>();
-  for (const ordinal of checked) {
-    const exchange = source.exchanges.get(ordinal);
-    if (exchange !== undefined && selectsRecordedLine(tool, exchange, args))
-      lines.set(ordinal, exchange);
-  }
-  return selectReplayExchange(tool, lines, args)?.exchange;
-};
-
 type StateDocumentView = Extract<StateView, { shape: "document" }>;
 
-/** One tool call: the tool and the arguments it was called with. */
+/** One tool call: the tool, the arguments it was called with, and whether they name the answering line exactly. */
 interface ToolCall {
   readonly tool: EnvironmentManifestTool;
   readonly args: ReplayArguments;
+  readonly exact: boolean;
 }
 
-/** A list call renders the members of the checked line it names from the state. */
+/**
+ * The entities a list call shows on its line: every entity of the collection on a whole line, the query's matches on
+ * a line the query answers or for a call it computes, else the line's recorded members still held; undefined when the
+ * query cannot apply the call's values.
+ */
+const listSelection = (
+  store: EnvironmentStateStore,
+  { tool, args, exact }: ToolCall,
+  view: StateListView,
+  line: {
+    readonly base: RecordedExchange;
+    readonly recorded: readonly JsonObject[];
+  },
+):
+  | {
+      readonly members: readonly StateEntity[];
+      readonly membership: "all" | "query" | "recorded";
+      readonly total: number;
+    }
+  | undefined => {
+  const collection = collectionPathOf(line.base, false);
+  const values = callQuery(tool, args);
+  // A named query line, or a call with query arguments answered on a line it did not name, evaluates the query.
+  const queried =
+    view.query !== undefined &&
+    (exact
+      ? view.query.record_ordinals.includes(line.base.ordinal)
+      : values.size > 0);
+  if (queried) {
+    const computed = evaluateQuery(
+      view.query!.parameters,
+      values,
+      store.inCollection(view.type, collection),
+    );
+    return computed === undefined
+      ? undefined
+      : { members: computed.page, membership: "query", total: computed.total };
+  }
+  if (listsAll(view, line.base.ordinal)) {
+    const members = store.inCollection(view.type, collection);
+    return { members, membership: "all", total: members.length };
+  }
+  const idField = store.type(view.type)?.id_field ?? "";
+  const members = line.recorded.flatMap((item) => {
+    const id = scalarText(item[idField]);
+    const entity =
+      id === undefined ? undefined : store.entity(view.type, collection, id);
+    return entity === undefined ? [] : [entity];
+  });
+  return { members, membership: "recorded", total: members.length };
+};
+
+/** A list call renders the entities its line selects from the state into that line's recorded envelope. */
 const answerList = (
   serving: StateServing,
-  { tool, args }: ToolCall,
+  call: ToolCall,
   view: StateListView,
   base: RecordedExchange,
 ): Result<StateAnswer, AnalysisError> => {
   const { source, store } = serving;
+  const { tool, args, exact } = call;
   const envelope = recordedJson(base);
   const recorded =
     envelope === undefined ? undefined : listItems(envelope, view.pointer);
   if (envelope === undefined || recorded === undefined)
     return fromRecording(source, tool, args, "body-unusable");
-  const collection = collectionPathOf(base, false);
-  const type = store.type(view.type);
-  const members: readonly StateEntity[] =
-    view.membership === "all"
-      ? store.inCollection(view.type, collection)
-      : recorded.flatMap((item) => {
-          const id = scalarText(item[type?.id_field ?? ""]);
-          const entity =
-            id === undefined
-              ? undefined
-              : store.entity(view.type, collection, id);
-          return entity === undefined ? [] : [entity];
-        });
-  const volatile = new Set(type?.volatile_fields);
+  // A requested page the collection has outgrown is answered as recorded, never with more items than it asked for.
+  const size = exact
+    ? pageBound(base.query ?? undefined, recorded.length)
+    : undefined;
+  if (
+    listsAll(view, base.ordinal) &&
+    size !== undefined &&
+    store.inCollection(view.type, collectionPathOf(base, false)).length > size
+  )
+    return fromRecording(source, tool, args, "page-exceeded");
+  const selection = listSelection(store, call, view, { base, recorded });
+  if (selection === undefined)
+    return fromRecording(source, tool, args, "unrecorded-request");
+  const volatile = new Set(store.type(view.type)?.volatile_fields);
   const items: JsonObject[] = [];
-  for (const entity of members) {
+  for (const entity of selection.members) {
     const shown = shownEntity(tool, view, entity, volatile);
     if (!shown.ok) return shown;
     items.push(shown.value);
   }
-  return stateAnswer(
-    serving,
-    { exchange: base, exact: true },
-    renderStateList(view, envelope, items),
-    {
-      source: "state",
-      view: "list",
-      type: view.type,
-      collection,
-      membership: view.membership,
-      listed: items.length,
-    },
-  );
+  const body =
+    view.query === undefined || selection.membership === "recorded"
+      ? renderStateList(view, envelope, items)
+      : renderQueryList(
+          { ...view, query: view.query },
+          envelope,
+          items,
+          selection.total,
+        );
+  return stateAnswer(serving, { exchange: base, exact }, body, {
+    source: "state",
+    view: "list",
+    type: view.type,
+    collection: collectionPathOf(base, false),
+    membership: selection.membership,
+    listed: items.length,
+  });
 };
 
 /** A document call answers the state's value for the document on its checked line's status and provenance. */
@@ -376,16 +476,28 @@ const answerCheckedLine = (
   view: StateListView | StateDocumentView,
   args: ReplayArguments,
 ): Result<StateAnswer, AnalysisError> => {
-  const base = checkedLine(
+  const named = checkedLine(
     serving.source,
     tool,
     view.checked_record_ordinals,
     args,
   );
+  const base =
+    named ??
+    (view.shape === "list"
+      ? (unfilteredLine(serving.source, tool, allLines(view), args) ??
+        queryLine(serving.source, tool, view, args))
+      : undefined);
   if (base === undefined)
     return fromRecording(serving.source, tool, args, "unrecorded-request");
+  // An unfiltered call answers on a line it did not name, so its replay match is not exact.
   return view.shape === "list"
-    ? answerList(serving, { tool, args }, view, base)
+    ? answerList(
+        serving,
+        { tool, args, exact: named !== undefined },
+        view,
+        base,
+      )
     : answerDocument(serving, tool, base);
 };
 
@@ -408,18 +520,3 @@ export const answerFromState = (
       return answerCheckedLine(serving, tool, view, args);
   }
 };
-
-/** How a served environment answers one tool call. */
-export type EnvironmentToolAnswer = (
-  tool: EnvironmentManifestTool,
-  args: ReplayArguments,
-) => Result<ReplayResult, AnalysisError>;
-
-/** The answer a served environment gives: replay without a state store, the live state with one. */
-export const environmentToolAnswer = (
-  source: EnvironmentSource,
-  store: EnvironmentStateStore | undefined,
-): EnvironmentToolAnswer =>
-  store === undefined
-    ? (tool, args) => replayEnvironmentTool(source, tool, args)
-    : (tool, args) => answerFromState({ source, store }, tool, args);

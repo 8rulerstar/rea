@@ -1,6 +1,6 @@
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import {
-  ArtifactFileCleanupFailure,
+  artifactFilePrimaryFailure,
   assertArtifactReadActive,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
@@ -30,7 +30,8 @@ import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { readGoBinaryImage } from "./GoBinaryImage.js";
+import { readGoBinaryImage, type GoBinaryImage } from "./GoBinaryImage.js";
+import { requireSelectedNativeImage } from "../native/metadata/MachoSliceSelection.js";
 import {
   BinaryFormatFailure,
   BinaryResourceFailure,
@@ -131,18 +132,8 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
   });
 };
 
-const failureFor = (
-  cause: unknown,
-  path: string,
-  signal?: AbortSignal,
-): AnalysisError => {
-  const primary =
-    cause instanceof ArtifactFileCleanupFailure &&
-    cause.fileCleanupFailure.outcome.kind === "failed"
-      ? failureForPrimary(cause.fileCleanupFailure.outcome.cause, path)
-      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
-        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
-        : failureForPrimary(cause, path);
+const failureFor = (cause: unknown, path: string): AnalysisError => {
+  const primary = failureForPrimary(artifactFilePrimaryFailure(cause), path);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -195,6 +186,26 @@ const limitationsFor = (
     : []),
 ];
 
+/** Locate image-relative build-info ranges in the selected file. */
+const inFile = (
+  info: GoBinaryImage["build_info"],
+  fileOffset: number,
+): GoBinaryImage["build_info"] =>
+  info === null || fileOffset === 0
+    ? info
+    : {
+        ...info,
+        header_offset: info.header_offset + fileOffset,
+        version_location: {
+          ...info.version_location,
+          offset: info.version_location.offset + fileOffset,
+        },
+        module_location: {
+          ...info.module_location,
+          offset: info.module_location.offset + fileOffset,
+        },
+      };
+
 /** Stable in-process metadata inspection without subprocesses, temporary files or Go installation. */
 export class GoBinaryProvider implements GoBinaryPort {
   readonly identity = GO_BINARY_PROVIDER_IDENTITY;
@@ -235,8 +246,14 @@ export class GoBinaryProvider implements GoBinaryPort {
           this.#resources,
         );
         assertArtifactReadActive(options?.signal);
-        const image = readGoBinaryImage(snapshot.bytes);
-        const info = image.build_info;
+        const selected = requireSelectedNativeImage(
+          OPERATION,
+          input.path,
+          snapshot.bytes,
+          input.architecture,
+        );
+        const image = readGoBinaryImage(selected.bytes);
+        const info = inFile(image.build_info, selected.fileOffset);
         if (
           info !== null &&
           ((info.module_text !== null &&
@@ -262,6 +279,9 @@ export class GoBinaryProvider implements GoBinaryPort {
             sha256: snapshot.sha256,
             bytes: snapshot.bytes.length,
           },
+          ...(selected.selection === null
+            ? {}
+            : { selected_slice: selected.selection }),
           build_info: info === null ? null : { ...info, module },
           limitations: limitationsFor(info, module),
         };
@@ -278,7 +298,7 @@ export class GoBinaryProvider implements GoBinaryPort {
         return ok(parsed.data);
       });
     } catch (cause: unknown) {
-      return err(failureFor(cause, input.path, options?.signal));
+      return err(failureFor(cause, input.path));
     }
   }
 }

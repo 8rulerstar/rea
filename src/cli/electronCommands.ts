@@ -1,3 +1,4 @@
+import { parseJavaScriptRouteDelivery } from "./javascriptRouteDelivery.js";
 import { isAbsolute, resolve, sep } from "node:path";
 
 import { Cli, z } from "incur";
@@ -38,10 +39,10 @@ export const registerElectronCommands = (
     ) => ElectronActiveObservationPort;
   } = {},
 ): void => {
-  registerElectronObservationCommands(cli, logger);
+  registerElectronObservationCommands(cli, logger, environment);
   registerElectronFuseCommand(cli, logger);
   registerElectronActiveCommand(cli, logger, environment, options);
-  registerJavaScriptApplicationCommand(cli, logger);
+  registerJavaScriptApplicationCommand(cli, logger, environment);
   registerJavaScriptRuntimeReconciliationCommand(cli, logger);
 };
 
@@ -199,14 +200,16 @@ const registerJavaScriptRuntimeReconciliationCommand = (
 const registerElectronObservationCommands = (
   cli: ReturnType<typeof Cli.create>,
   logger: Logger,
+  environment: Readonly<Record<string, string | undefined>>,
 ): void => {
-  registerElectronTargetList(cli, logger);
-  registerElectronPageInspection(cli, logger);
+  registerElectronTargetList(cli, logger, environment);
+  registerElectronPageInspection(cli, logger, environment);
 };
 
 const registerElectronTargetList = (
   cli: ReturnType<typeof Cli.create>,
   logger: Logger,
+  environment: Readonly<Record<string, string | undefined>>,
 ): void => {
   cli.command(CLI_COMMANDS.listElectronTargets, {
     description:
@@ -217,7 +220,7 @@ const registerElectronTargetList = (
     run: ({ args }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, "list-electron-targets", async () => {
-          const context = await electronObservationContext();
+          const context = await electronObservationContext(environment);
           const input = {
             cdp_endpoint: args.endpoint,
           };
@@ -250,6 +253,7 @@ const registerElectronTargetList = (
 const registerElectronPageInspection = (
   cli: ReturnType<typeof Cli.create>,
   logger: Logger,
+  environment: Readonly<Record<string, string | undefined>>,
 ): void => {
   cli.command(CLI_COMMANDS.inspectElectronPage, {
     description: "Passively inspect one Electron file page",
@@ -261,7 +265,7 @@ const registerElectronPageInspection = (
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, "inspect-electron-page", async () => {
-          const context = await electronObservationContext();
+          const context = await electronObservationContext(environment);
           const input = {
             cdp_endpoint: args.endpoint,
             target_id: args.targetId,
@@ -298,6 +302,7 @@ const registerElectronPageInspection = (
 const registerJavaScriptApplicationCommand = (
   cli: ReturnType<typeof Cli.create>,
   logger: Logger,
+  environment: Readonly<Record<string, string | undefined>>,
 ): void => {
   cli.command(CLI_COMMANDS.analyzeJavaScriptApplication, {
     description:
@@ -308,53 +313,66 @@ const registerJavaScriptApplicationCommand = (
     options: javascriptApplicationOptions,
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
-        logCliCommand(logger, CLI_COMMANDS.analyzeJavaScriptApplication, () =>
-          runCliJavaScriptApplicationAnalysis(
-            {
-              // An empty path names no file; leave it for input validation.
-              input_path:
-                args.path === "" ? args.path : absoluteCallerPath(args.path),
-              format: options.artifactFormat,
-              integrity_policy: options.integrityPolicy,
-              ...(options.maxSemanticNodes === undefined
-                ? {}
-                : { max_semantic_nodes: options.maxSemanticNodes }),
-              ...(options.maxSemanticNodesPerFile === undefined
-                ? {}
-                : {
-                    max_semantic_nodes_per_file:
-                      options.maxSemanticNodesPerFile,
-                  }),
-              ...(options.maxSemanticUnknowns === undefined
-                ? {}
-                : { max_semantic_unknowns: options.maxSemanticUnknowns }),
-              ...(options.maxSemanticUnknownsPerFile === undefined
-                ? {}
-                : {
-                    max_semantic_unknowns_per_file:
-                      options.maxSemanticUnknownsPerFile,
-                  }),
-              ...(options.sourcePath === undefined
-                ? {}
-                : { source_paths: options.sourcePath }),
-              ...(options.maxHeapMb === undefined
-                ? {}
-                : { max_heap_mb: options.maxHeapMb }),
-              ...(options.analysisTimeoutMs === undefined
-                ? {}
-                : { analysis_timeout_ms: options.analysisTimeoutMs }),
-            },
-            signal,
-          ),
+        logCliCommand(
+          logger,
+          CLI_COMMANDS.analyzeJavaScriptApplication,
+          async () => {
+            const delivery = parseJavaScriptRouteDelivery(
+              "analyze_javascript_application",
+              options,
+            );
+            if (!delivery.ok) return projectAnalysisError(delivery.error);
+            return runCliJavaScriptApplicationAnalysis(
+              {
+                // An empty path names no file; leave it for input validation.
+                input_path:
+                  args.path === "" ? args.path : absoluteCallerPath(args.path),
+                format: options.artifactFormat,
+                integrity_policy: options.integrityPolicy,
+                ...(options.maxSemanticNodes === undefined
+                  ? {}
+                  : { max_semantic_nodes: options.maxSemanticNodes }),
+                ...(options.maxSemanticNodesPerFile === undefined
+                  ? {}
+                  : {
+                      max_semantic_nodes_per_file:
+                        options.maxSemanticNodesPerFile,
+                    }),
+                ...(options.maxSemanticUnknowns === undefined
+                  ? {}
+                  : { max_semantic_unknowns: options.maxSemanticUnknowns }),
+                ...(options.maxSemanticUnknownsPerFile === undefined
+                  ? {}
+                  : {
+                      max_semantic_unknowns_per_file:
+                        options.maxSemanticUnknownsPerFile,
+                    }),
+                ...(options.sourcePath === undefined
+                  ? {}
+                  : { source_paths: options.sourcePath }),
+                ...(options.maxHeapMb === undefined
+                  ? {}
+                  : { max_heap_mb: options.maxHeapMb }),
+                ...(options.analysisTimeoutMs === undefined
+                  ? {}
+                  : { analysis_timeout_ms: options.analysisTimeoutMs }),
+              },
+              environment,
+              signal,
+              delivery.value,
+            );
+          },
         ),
       ),
   });
 };
 
-const electronObservationContext = async () => {
+const electronObservationContext = async (
+  environment: Readonly<Record<string, string | undefined>>,
+) => {
   const { createElectronObservationProvider } =
     await import("../composition/electronObservation.js");
-  return { provider: createElectronObservationProvider() };
+  return { provider: createElectronObservationProvider(environment) };
 };
 
 const inputError = (

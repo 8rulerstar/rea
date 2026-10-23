@@ -2,9 +2,16 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { expect, it } from "vitest";
 
+import {
+  DEFAULT_REGEX_MATCHING_DEADLINE_MS,
+  MAXIMUM_REGEX_MATCHING_DEADLINE_MS,
+  REGEX_MATCHING_DEADLINE_SETTING,
+} from "../../../src/config/regexMatchingDeadline.js";
+import { MINIMUM_REGEX_WORKER_HEAP_REQUEST_MIB } from "../../../src/config/regexWorkerHeapRequest.js";
 import { ok } from "../../../src/domain/result.js";
 import { HopperRegexSearch } from "../../../src/hopper/HopperRegexSearch.js";
 import { OFFICIAL_TOOL_CONTRACTS } from "../../../src/contracts/officialToolContracts.js";
@@ -63,18 +70,20 @@ const probeWorkerHeap = (
   };
 };
 
-it("names the fixed regex deadline and the effective worker heap", () => {
+it("names the configurable regex deadline and the effective worker heap", () => {
   const heap = resolveLaunchRegexWorkerHeap(
     readLaunchExecArgv(),
     readLaunchNodeOptions(),
   );
   expect(REGEX_MATCHING_LIMITATION).toBe(regexMatchingLimitation(heap));
-  expect(REGEX_MATCHING_LIMITATION).toContain("5-second matching deadline");
+  expect(REGEX_MATCHING_LIMITATION).toContain(REGEX_MATCHING_DEADLINE_SETTING);
   expect(REGEX_MATCHING_LIMITATION).toContain(
-    "This release has no runtime override for the deadline.",
+    `${String(DEFAULT_REGEX_MATCHING_DEADLINE_MS)} ms (source default`,
   );
-  expect(REGEX_MATCHING_LIMITATION).not.toContain("either cap");
-  expect(REGEX_MATCHING_LIMITATION).not.toContain("or heap");
+  expect(REGEX_MATCHING_LIMITATION).toContain(
+    "REA_REGEX_WORKER_HEAP_REQUEST_MIB",
+  );
+  expect(REGEX_MATCHING_LIMITATION).not.toContain("no runtime override");
   if (heap.kind === "unknown") {
     expect(REGEX_MATCHING_LIMITATION).toContain("was not established");
   } else {
@@ -85,35 +94,63 @@ it("names the fixed regex deadline and the effective worker heap", () => {
   const deadline = projectAnalysisError(
     regexMatchingDeadlineError("search_procedures"),
   );
-  expect(deadline.message).toContain("5000 ms");
+  expect(deadline).toMatchObject({
+    code: "resource_constraint",
+    details: {
+      resource: "cpu",
+      reported_limits: {
+        matching_deadline_ms: DEFAULT_REGEX_MATCHING_DEADLINE_MS,
+        matching_deadline_source: "default",
+      },
+    },
+  });
+  expect(deadline.message).toContain(REGEX_MATCHING_DEADLINE_SETTING);
   expect(deadline.remediation.action).toContain(
-    "this release has no runtime override",
+    REGEX_MATCHING_DEADLINE_SETTING,
   );
+  expect(deadline.remediation.action).not.toContain("no runtime override");
   const failure = projectAnalysisError(
     regexWorkerHeapError("search_procedures", new Error("heap")),
   );
   expect(failure.remediation.action).not.toContain("no runtime override");
   expect(failure.remediation.action).toContain("--max-old-space-size");
+  expect(failure.remediation.action).toContain(
+    "REA_REGEX_WORKER_HEAP_REQUEST_MIB",
+  );
   if (heap.kind === "effective") {
     expect(failure.message).toContain(`${String(heap.mib)} MiB`);
     expect(failure.details).toMatchObject({
       reported_limits: {
         worker_heap_mib: heap.mib,
         requested_worker_heap_mib: 128,
+        requested_worker_heap_source: "default",
       },
     });
   } else {
     expect(failure.message).toContain("was not established");
     expect(failure.details).toMatchObject({
-      reported_limits: { requested_worker_heap_mib: 128 },
+      reported_limits: {
+        requested_worker_heap_mib: 128,
+        requested_worker_heap_source: "default",
+      },
     });
   }
   for (const name of ["search_procedures", "search_strings"] as const) {
     const description = OFFICIAL_TOOL_CONTRACTS.find(
       (tool) => tool.name === name,
     )?.description;
-    expect(description).toContain("5000 ms");
-    expect(description).toContain("no runtime override");
+    expect(description).toContain(REGEX_MATCHING_DEADLINE_SETTING);
+    expect(description).toContain(
+      `default ${String(DEFAULT_REGEX_MATCHING_DEADLINE_MS)}`,
+    );
+    expect(description).toContain(String(MAXIMUM_REGEX_MATCHING_DEADLINE_MS));
+    expect(description).toContain("source (default or setting)");
+    expect(description).toContain("REA_REGEX_WORKER_HEAP_REQUEST_MIB");
+    expect(description).toContain("default 128");
+    expect(description).toContain("from 7 to 16384");
+    expect(description).toContain("floor");
+    expect(description).toContain("maximum");
+    expect(description).not.toContain("no runtime override");
   }
 });
 
@@ -411,6 +448,115 @@ it("leaves the heap unknown when --title overwrites the command line", () => {
   }
 });
 
+it("arms the worker timer with an overridden matching deadline", async () => {
+  const delays: number[] = [];
+  const original = global.setTimeout;
+  global.setTimeout = ((handler, timeout, ...args) => {
+    if (typeof timeout === "number") delays.push(timeout);
+    return original(handler, timeout, ...args);
+  }) as typeof setTimeout;
+  try {
+    expect(
+      await matchRegexValues({
+        operation: "search_procedures",
+        pattern: "^a",
+        caseSensitive: true,
+        values: ["a"],
+        deadline: { deadlineMs: 10_000, source: "setting" },
+      }),
+    ).toEqual(ok([0]));
+    expect(delays).toContain(10_000);
+    expect(delays).not.toContain(5_000);
+  } finally {
+    global.setTimeout = original;
+  }
+});
+
+it("stops a slow match at the configured deadline and names the setting", async () => {
+  const started = performance.now();
+  const matched = await matchRegexValues({
+    operation: "search_procedures",
+    pattern: "^(a+)+$",
+    caseSensitive: true,
+    values: [`${"a".repeat(30)}!`],
+    deadline: { deadlineMs: 100, source: "setting" },
+  });
+  expect(performance.now() - started).toBeLessThan(4_000);
+  expect(matched.ok).toBe(false);
+  if (matched.ok) return;
+  const projected = projectAnalysisError(matched.error);
+  expect(projected).toMatchObject({
+    code: "resource_constraint",
+    details: {
+      resource: "cpu",
+      reported_limits: {
+        matching_deadline_ms: 100,
+        matching_deadline_source: "setting",
+      },
+    },
+  });
+  expect(projected.message).toContain(REGEX_MATCHING_DEADLINE_SETTING);
+  expect(projected.remediation.action).toContain(
+    REGEX_MATCHING_DEADLINE_SETTING,
+  );
+  expect(projected.remediation.action).not.toContain("no runtime override");
+  expect(matched.error).toMatchObject({
+    _tag: "AnalysisResourceConstraintError",
+    resource: "cpu",
+    reportedLimits: {
+      matching_deadline_ms: 100,
+      matching_deadline_source: "setting",
+    },
+  });
+});
+
+it("matches a trivial pattern in a real worker at the heap floor", () => {
+  const directory = mkdtempSync(join(tmpdir(), "rea-regex-heap-floor-"));
+  const probe = join(directory, "probe.mjs");
+  const repository = fileURLToPath(new URL("../../../", import.meta.url));
+  const tsxApi = pathToFileURL(
+    join(repository, "node_modules/tsx/dist/esm/api/index.mjs"),
+  ).href;
+  const matcher = pathToFileURL(
+    join(repository, "src/process/RegexMatcher.ts"),
+  ).href;
+  // Plain Node, with NODE_OPTIONS removed. Do not put `--import tsx` on this
+  // process: workers inherit execArgv, and that flag exhausts a floor-sized heap.
+  writeFileSync(
+    probe,
+    `import { tsImport } from ${JSON.stringify(tsxApi)};
+const { matchRegexValues } = await tsImport(${JSON.stringify(matcher)}, import.meta.url);
+const result = await matchRegexValues({
+  operation: "search_procedures",
+  pattern: "^a",
+  caseSensitive: true,
+  values: ["a"],
+  heapRequest: {
+    heapMiB: ${String(MINIMUM_REGEX_WORKER_HEAP_REQUEST_MIB)},
+    source: "setting",
+  },
+});
+process.stdout.write(JSON.stringify(result.ok
+  ? { ok: true, indices: result.value }
+  : { ok: false, message: String(result.error?.message ?? "") }));
+if (!result.ok) process.exitCode = 1;
+`,
+  );
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  try {
+    const result = spawnSync(process.execPath, [probe], {
+      env,
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ ok: true, indices: [0] });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 it("preserves Unicode matching order and refuses a pre-cancelled match", async () => {
   expect(
     await matchRegexValues({
@@ -429,6 +575,35 @@ it("preserves Unicode matching order and refuses a pre-cancelled match", async (
       signal: AbortSignal.abort(),
     }),
   ).toMatchObject({ ok: false, error: { _tag: "AnalysisCancelledError" } });
+});
+
+it("names the rejected pattern field for a default invalid-pattern refusal", async () => {
+  const matched = await matchRegexValues({
+    operation: "search_procedures",
+    pattern: "[",
+    caseSensitive: false,
+    values: ["value"],
+  });
+  expect(matched.ok).toBe(false);
+  if (matched.ok) return;
+  expect(projectAnalysisError(matched.error)).toMatchObject({
+    code: "invalid_request",
+    category: "invalid_input",
+    recovery: {
+      kind: "inspect_input_contract",
+      operation: "search_procedures",
+    },
+    details: {
+      operation: "search_procedures",
+      issues: [
+        {
+          path: ["pattern"],
+          reason: "invalid_format",
+          message: "Supply a valid regular expression.",
+        },
+      ],
+    },
+  });
 });
 
 it("keeps Hopper's result projection and invalid-pattern contract with the shared worker", async () => {

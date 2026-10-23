@@ -36,7 +36,7 @@ export const objcPropertyAttributeSchema = z.strictObject({
 export const objcMethodSchema = z.strictObject({
   selector: z.string().min(1),
   method_type: objcMethodTypeSchema,
-  address: z.number().int().nullable(),
+  address: z.int().nullable(),
   is_required: z.boolean().nullable(),
   is_optional: z.boolean().nullable(),
 });
@@ -70,12 +70,12 @@ export const objcClassSchema = z.strictObject({
   methods: z.array(objcMethodSchema).default([]),
   properties: z.array(objcPropertySchema).default([]),
   protocols: z.array(z.string()).default([]),
-  ivar_count: z.number().int().nonnegative().nullable(),
-  instance_size: z.number().int().nonnegative().nullable(),
+  ivar_count: z.int().nonnegative().nullable(),
+  instance_size: z.int().nonnegative().nullable(),
   location: z
     .object({
       address: z.string().nullable(),
-      file_offset: z.number().int().nonnegative().nullable(),
+      file_offset: z.int().nonnegative().nullable(),
     })
     .optional(),
   superclass_address: z.string().nullable().optional(),
@@ -93,7 +93,7 @@ export const objcClassSchema = z.strictObject({
         description: z.string(),
         location: z.object({
           address: z.string().nullable(),
-          file_offset: z.number().int().nonnegative().nullable(),
+          file_offset: z.int().nonnegative().nullable(),
         }),
         artifact_path: z.string(),
         artifact_sha256: z.string(),
@@ -106,7 +106,7 @@ type ObjcClass = z.infer<typeof objcClassSchema>;
 /** Exact location of a decoded native metadata value when the provider knows it. */
 export const nativeMetadataLocationSchema = z.strictObject({
   address: z.string().nullable(),
-  file_offset: z.number().int().nonnegative().nullable(),
+  file_offset: z.int().nonnegative().nullable(),
 });
 export type NativeMetadataLocation = z.infer<
   typeof nativeMetadataLocationSchema
@@ -149,9 +149,9 @@ export const objcIvarSchema = z.strictObject({
   class_name: z.string().min(1),
   name: z.string().min(1),
   type_encoding: z.string().nullable(),
-  offset: z.number().int().nonnegative().nullable(),
-  size: z.number().int().nonnegative().nullable().default(null),
-  alignment: z.number().int().positive().nullable().default(null),
+  offset: z.int().nonnegative().nullable(),
+  size: z.int().nonnegative().nullable().default(null),
+  alignment: z.int().positive().nullable().default(null),
   location: nativeMetadataLocationSchema,
   decode: nativeMetadataDecodeSchema,
   evidence: z.array(nativeMetadataEvidenceSchema).min(1),
@@ -234,7 +234,7 @@ export const swiftConformanceSchema = z.strictObject({
 export const swiftDispatchSlotSchema = z.strictObject({
   owner: z.string().min(1),
   table_kind: z.enum(["witness_table", "class_vtable"]),
-  slot_index: z.number().int().nonnegative(),
+  slot_index: z.int().nonnegative(),
   requirement: z.string().nullable(),
   implementation: z.string().nullable(),
   implementation_address: z.string().nullable(),
@@ -249,7 +249,7 @@ export const swiftDispatchSlotSchema = z.strictObject({
 export const relativePointerSchema = z.strictObject({
   field: nativeMetadataLocationSchema,
   target: nativeMetadataLocationSchema,
-  displacement: z.number().int(),
+  displacement: z.int(),
   indirectable: z.boolean(),
   indirect: z.boolean().nullable(),
   encoding_tag: z.number().int().nonnegative().optional(),
@@ -272,8 +272,8 @@ export const nativeMetadataCoverageSchema = z.strictObject({
   facet: z.string().min(1),
   status: z.enum(["complete", "partial", "unsupported", "not_requested"]),
   reason: z.string().nullable(),
-  examined: z.number().int().nonnegative(),
-  decoded: z.number().int().nonnegative(),
+  examined: z.int().nonnegative(),
+  decoded: z.int().nonnegative(),
 });
 
 export const objcClassImportIdentitySchema = machoImportBindingSchema.omit({
@@ -290,38 +290,26 @@ export type ObjcClassImportBindingCoverage = z.infer<
   typeof objcClassImportBindingCoverageSchema
 >;
 
-/** Swift declaration kind. */
-export const swiftDeclKindSchema = z.enum([
-  "class",
-  "struct",
-  "enum",
-  "protocol",
-  "extension",
-  "actor",
-  "global_var",
-  "global_func",
-]);
+/** Nominal Swift type kinds recorded by `__swift5_types` descriptors. */
+export const swiftDeclKindSchema = z.enum(["class", "struct", "enum", "actor"]);
 
-/** Swift access level. */
-export const swiftAccessLevelSchema = z.enum([
-  "private",
-  "fileprivate",
-  "internal",
-  "public",
-  "open",
-]);
-/** Swift declaration metadata. */
+/**
+ * One nominal type context descriptor. `location` is the descriptor itself;
+ * evidence cites its `__swift5_types` record. `qualified_name` is null when a
+ * parent context is unresolved, rather than a shortened guess.
+ */
 export const swiftDeclSchema = z.strictObject({
   kind: swiftDeclKindSchema,
   name: z.string().min(1),
-  module: z.string().nullable(),
-  access_level: swiftAccessLevelSchema.default("internal"),
-  super_class: z.string().nullable(),
-  protocols: z.array(z.string()).default([]),
-  is_final: z.boolean().default(false),
-  is_required: z.boolean().default(false),
-  is_convenience_init: z.boolean().default(false),
-  is_override: z.boolean().default(false),
+  qualified_name: z.string().min(1).nullable(),
+  module: z.string().min(1).nullable(),
+  generic: z.boolean(),
+  /** A private or local declaration context was omitted from `qualified_name`. */
+  anonymous_context: z.boolean(),
+  accessor_address: z.string().min(1).nullable(),
+  location: nativeMetadataLocationSchema,
+  decode: nativeMetadataDecodeSchema,
+  evidence: z.array(nativeMetadataEvidenceSchema).min(1),
 });
 
 /** Database save/read operation type. */
@@ -337,9 +325,9 @@ export const dbOperationSchema = z.enum([
 export const dbSaveResultSchema = z.strictObject({
   operation: dbOperationSchema,
   succeeded: z.boolean(),
-  preserved_names: z.number().int().nonnegative().default(0),
-  preserved_comments: z.number().int().nonnegative().default(0),
-  preserved_bookmarks: z.number().int().nonnegative().default(0),
+  preserved_names: z.int().nonnegative().default(0),
+  preserved_comments: z.int().nonnegative().default(0),
+  preserved_bookmarks: z.int().nonnegative().default(0),
   database_path: z.string().nullable(),
   error: z.string().nullable(),
 });
@@ -368,6 +356,66 @@ export const objcSwiftMetadataSchema = z.strictObject({
 });
 export type ObjcSwiftMetadata = z.infer<typeof objcSwiftMetadataSchema>;
 
+/** Retained-image budget when the caller selects none. */
+export const DEFAULT_DISPATCH_METADATA_INPUT_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Largest caller-selected budget. The reader holds the whole selected file in
+ * REA's own heap; larger images belong to a deep provider that loads them in
+ * its own process.
+ */
+export const MAXIMUM_DISPATCH_METADATA_INPUT_BYTES = 1024 * 1024 * 1024;
+
+/** Shared metadata row allowance for provider reads and class-import discovery. */
+export const MAX_DISPATCH_METADATA_RECORDS = 20_000;
+export const DEFAULT_DISPATCH_METADATA_RECORDS = 5_000;
+
+/** Selected dispatch facts and retained-image budget, shared by providers and adapters. */
+export const nativeDispatchMetadataInputSchema = z.strictObject({
+  max_records: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_DISPATCH_METADATA_RECORDS)
+    .default(DEFAULT_DISPATCH_METADATA_RECORDS),
+  objc_class_import_addresses: z
+    .array(z.string())
+    .max(MAX_DISPATCH_METADATA_RECORDS)
+    .describe(
+      "Optional exact pointer-slot addresses from the selected name inventory; used to report decoded Objective-C class import bindings.",
+    )
+    .optional(),
+  objc_class_import_addresses_complete: z
+    .boolean()
+    .describe(
+      "Whether the candidate addresses include every selected class-label row; false keeps binding coverage partial when the existing record budget truncates the scan.",
+    )
+    .optional(),
+  max_input_bytes: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAXIMUM_DISPATCH_METADATA_INPUT_BYTES)
+    .optional()
+    .describe(
+      "Largest target file REA reads into memory for binary metadata, in bytes. Omitted: 67108864 (64 MiB). The whole file counts, including every slice of a universal Mach-O. At most 1073741824 (1 GiB).",
+    ),
+});
+
+/** Effective input budget of one binary metadata read and the bytes it retained. */
+export const dispatchMetadataInputAdmissionSchema = z.strictObject({
+  maximum_bytes: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAXIMUM_DISPATCH_METADATA_INPUT_BYTES),
+  source: z.enum(["default", "caller"]),
+  retained_bytes: z.number().int().nonnegative(),
+});
+export type DispatchMetadataInputAdmission = z.infer<
+  typeof dispatchMetadataInputAdmissionSchema
+>;
+
 /** Provider and target identity for one normalized dispatch-metadata result. */
 export const nativeDispatchMetadataResultSchema = z.strictObject({
   target_sha256: z
@@ -381,13 +429,15 @@ export const nativeDispatchMetadataResultSchema = z.strictObject({
     version: z.string().nullable(),
   }),
   analysis_profile_digest: z.string().min(1).nullable(),
+  /** Present when REA read the target bytes itself; symbol-only inventories have none. */
+  input_admission: dispatchMetadataInputAdmissionSchema.exactOptional(),
   result: objcSwiftMetadataSchema,
 });
 
 /** Decode only facts visible in a provider's existing name inventory. */
 export const inspectNativeDispatchMetadata = (
   names: readonly { readonly address: string; readonly name: string }[],
-  maxRecords = 5_000,
+  maxRecords = DEFAULT_DISPATCH_METADATA_RECORDS,
 ): ObjcSwiftMetadata => {
   const symbolEvidence = (
     entry: (typeof names)[number],

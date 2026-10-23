@@ -21,11 +21,84 @@ export const environmentStateViewRequestSchema = z.strictObject({
 });
 
 const jsonObjectFieldsSchema = z.record(z.string(), jsonValueSchema);
+const queryParameterSchema = z.discriminatedUnion("role", [
+  z.strictObject({
+    role: z.literal("filter"),
+    field: z
+      .string()
+      .describe(
+        "Entities whose field equals the value as text, or whose array field holds it directly or as an object's id, slug or name.",
+      ),
+  }),
+  z.strictObject({
+    role: z.literal("search"),
+    fields: z
+      .array(z.string())
+      .describe(
+        "Entities with a string field containing a plain substring value, ignoring case; an empty value matches every entity. Syntax-like operators replay instead.",
+      ),
+  }),
+  z
+    .strictObject({ role: z.literal("sort") })
+    .describe(
+      "Orders by the field the value names (`name`, `-name`, `name:desc`, `name-ASC`): numbers by value, text ignoring case, null last ascending.",
+    ),
+  z
+    .strictObject({ role: z.literal("direction") })
+    .describe("asc or desc for the sort parameter."),
+  z
+    .strictObject({ role: z.literal("limit") })
+    .describe("Page size; zero or a negative value lists every match."),
+  z
+    .strictObject({ role: z.literal("offset") })
+    .describe("Matches skipped before the page."),
+  z.strictObject({
+    role: z.literal("page"),
+    first: z
+      .number()
+      .int()
+      .describe(
+        "The first page, 0 or 1, when recordings distinguish the convention.",
+      ),
+  }),
+  z.strictObject({
+    role: z.literal("inert"),
+    values: z
+      .array(z.string())
+      .describe(
+        "Recorded values that change nothing the view lists; other values are not computed.",
+      ),
+  }),
+]);
+const listQuerySchema = z.strictObject({
+  parameters: z
+    .record(z.string(), queryParameterSchema)
+    .describe(
+      "What each query parameter does. A call whose every parameter has a role is answered by evaluating them over the state.",
+    ),
+  record_ordinals: z
+    .array(z.number().int().nonnegative())
+    .describe("Checked lines the query reproduces, answered by evaluating it."),
+  totals: z
+    .array(z.string())
+    .describe(
+      "Observed envelope members with reproducible counts of every match before paging; absent or unknown representations stay recorded.",
+    ),
+});
 const checkedSchema = z
   .array(z.number().int().nonnegative())
   .describe(
     "Latest init record per request line that the view reproduced from the state.",
   );
+const clockFormatSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("iso"),
+    separator: z.enum(["T", " "]),
+    fraction: z.number().int().nonnegative().max(9),
+    zone: z.string(),
+  }),
+  z.strictObject({ kind: z.literal("epoch"), unit: z.enum(["s", "ms"]) }),
+]);
 const entityViewFields = {
   tool: z.string(),
   type: z.string(),
@@ -39,6 +112,12 @@ const entityViewFields = {
     .describe("Ordered fields the view shows of each entity."),
   required_fields: z.array(z.string()),
   checked_record_ordinals: checkedSchema,
+  clock_formats: z
+    .record(z.string(), clockFormatSchema)
+    .optional()
+    .describe(
+      "How the view spells clock fields it always spells otherwise than the entities' stored values; a stored value the view never recorded is spelled this way.",
+    ),
 };
 const viewSchema = z.discriminatedUnion("shape", [
   z.strictObject({
@@ -51,6 +130,12 @@ const viewSchema = z.discriminatedUnion("shape", [
       .describe(
         "Record whose response, with the entity object replaced, every item response shares.",
       ),
+    projected_record_ordinals: z
+      .array(z.number().int().nonnegative())
+      .optional()
+      .describe(
+        "Recorded reads that asked for some fields only (`fields`, `select`) and did not return the item; calls naming a projection replay.",
+      ),
   }),
   z.strictObject({
     ...entityViewFields,
@@ -58,11 +143,22 @@ const viewSchema = z.discriminatedUnion("shape", [
     membership: z
       .enum(["all", "recorded"])
       .describe(
-        "all: every entity of the collection in state order; recorded: the entities each recorded response listed.",
+        "all: every entity of the collection in state order; recorded: the entities each recorded response listed, except on the lines all_record_ordinals names.",
+      ),
+    all_record_ordinals: z
+      .array(z.number().int().nonnegative())
+      .optional()
+      .describe(
+        "With recorded membership, the checked lines that each listed every entity of their collection in state order, with only paging parameters starting at zero; a call answered on one lists the whole collection. Absent when none does.",
       ),
     counters: z
       .array(z.string())
       .describe("Envelope members that count the listed entities."),
+    query: listQuerySchema
+      .optional()
+      .describe(
+        "How the view's other checked lines select and order entities, when filters, a search, a sort or paging explain them; absent when none does.",
+      ),
   }),
   z.strictObject({
     tool: z.string(),
@@ -86,6 +182,127 @@ const viewSchema = z.discriminatedUnion("shape", [
     ]),
   }),
 ]);
+
+const ordinalSchema = z.number().int().nonnegative();
+const ruled = { field: z.string() };
+const fieldRuleSchema = z.discriminatedUnion("rule", [
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("identity"),
+    generator: z.enum(["sequence", "uuid", "token"]),
+  }),
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("sequence"),
+    scope: z.enum(["collection", "type"]),
+  }),
+  z.strictObject({ ...ruled, rule: z.literal("unique") }),
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("renewed"),
+    pointers: z.array(z.string()).min(1),
+  }),
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("clock"),
+    format: clockFormatSchema,
+  }),
+  z.strictObject({ ...ruled, rule: z.literal("echo") }),
+  z.strictObject({ ...ruled, rule: z.literal("copy"), from: z.string() }),
+  z.strictObject({ ...ruled, rule: z.literal("path"), from: z.string() }),
+  z.strictObject({ ...ruled, rule: z.literal("slug"), from: z.string() }),
+  z.strictObject({ ...ruled, rule: z.literal("template"), from: z.string() }),
+  z.strictObject({ ...ruled, rule: z.literal("increment") }),
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("constant"),
+    value: jsonValueSchema,
+  }),
+]);
+const insertRuleSchema = z.union([
+  z.strictObject({ rule: z.enum(["first", "last"]) }),
+  z.strictObject({
+    rule: z.literal("sorted"),
+    field: z.string(),
+    direction: z.enum(["ascending", "descending"]),
+  }),
+]);
+const writePlanSchema = z.strictObject({
+  tool: z.string(),
+  effect: z.enum(["create", "update", "delete", "document", "none"]),
+  target: z
+    .string()
+    .nullable()
+    .describe(
+      "The entity type an entity effect writes, or the document view a document write changes.",
+    ),
+  served: z.boolean(),
+  reason: z
+    .enum([
+      "no-state-target",
+      "no-call",
+      "body-unusable",
+      "no-observation",
+      "unexplained-change",
+      "contradicted",
+      "side-effect",
+      "unconfirmed",
+      "incomplete-entities",
+    ])
+    .nullable(),
+  exemplar_ordinal: ordinalSchema
+    .nullable()
+    .describe("The first successful recorded call the plan was built from."),
+  observation: z
+    .strictObject({ ordinal: ordinalSchema, pointer: z.string() })
+    .nullable()
+    .describe(
+      "The record whose response showed the written entity or document, and a JSON pointer to it.",
+    ),
+  response: z
+    .strictObject({
+      ordinal: ordinalSchema,
+      shape: z.enum(["entity", "identity", "empty", "recorded"]),
+      pointer: z.string().nullable(),
+    })
+    .nullable(),
+  body: z
+    .strictObject({
+      accepted: z.array(z.string()),
+      fixed: z.array(
+        z.strictObject({ member: z.string(), sent: jsonValueSchema }),
+      ),
+      required: z.array(z.string()),
+      identity: z.string().nullable(),
+      kinds: z.array(
+        z.strictObject({
+          member: z.string(),
+          kind: z.enum(["array", "boolean", "number", "object", "string"]),
+        }),
+      ),
+    })
+    .nullable()
+    .describe(
+      "Body members the application stored as sent (accepted), members accepted only with their recorded value (fixed), members every call sends (required), and the JSON type a later call stored an accepted member as when the observation does not show it (kinds).",
+    ),
+  rules: z
+    .array(fieldRuleSchema)
+    .describe(
+      "How written fields get their values; unlisted fields of a created entity keep the observed value.",
+    ),
+  collection: z
+    .string()
+    .nullable()
+    .describe(
+      "For a create whose recorded values are tied to its collection, the only collection it writes to.",
+    ),
+  insert: insertRuleSchema.nullable(),
+  merge: z.enum(["merge", "replace"]).nullable(),
+  checked_record_ordinals: z
+    .array(ordinalSchema)
+    .describe("Later reads that reproduced from the state after this write."),
+  contradicted_by: ordinalSchema.nullable(),
+});
 
 export const environmentStateFields = {
   origin: z
@@ -146,6 +363,17 @@ export const environmentStateFields = {
     }),
   ),
   views: z.array(viewSchema),
+  writes: z
+    .array(writePlanSchema)
+    .describe(
+      "One plan per tool whose method may change state: its modelled effect, and whether the capture's later reads confirmed it (served).",
+    ),
+  write_clock: z
+    .string()
+    .nullable()
+    .describe(
+      "The instant a served clock starts from: the end of the capture's last timed record.",
+    ),
   unknowns: z.array(
     z.strictObject({
       kind: z.enum([

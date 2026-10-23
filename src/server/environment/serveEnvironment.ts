@@ -1,3 +1,4 @@
+import { STATE_INTAKE_LIMIT_BYTES } from "../../application/environment/environmentStateDocument.js";
 import {
   DEFAULT_MAX_REQUEST_BODY_SIZE,
   fromJsonSchema,
@@ -16,7 +17,7 @@ import {
 import {
   environmentToolAnswer,
   type EnvironmentToolAnswer,
-} from "../../application/environment/environmentStateAnswer.js";
+} from "../../application/environment/environmentToolAnswer.js";
 import { EnvironmentStateStore } from "../../application/environment/environmentStateStore.js";
 import { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import {
@@ -47,7 +48,6 @@ import {
   DEFAULT_STATE_INTAKE,
   exactJsonReviver,
   SERVER_ERROR,
-  STATE_INTAKE_LIMIT_BYTES,
   type RpcError,
   type StateFetcher,
 } from "./stateIntake.js";
@@ -450,7 +450,7 @@ export const serveEnvironment = async (
     options.state === undefined
       ? undefined
       : new EnvironmentStateStore(options.state);
-  const catalog = servedCatalog(source, store !== undefined, name);
+  const catalog = servedCatalog(source, options.state, name);
   if (!catalog.ok) return catalog;
   const { tools, dataPlane } = catalog.value;
   const card = environmentCard(name, tools, dataPlane);

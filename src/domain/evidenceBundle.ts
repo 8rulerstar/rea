@@ -1,3 +1,7 @@
+import { EvidenceIntegrityError } from "./evidenceErrors.js";
+import { err, ok, type Result } from "./result.js";
+import { describeValidationFailure } from "./validationFailure.js";
+import { equalJsonText } from "./jsonSerialization.js";
 import { z } from "zod";
 import canonicalize from "canonicalize";
 
@@ -65,6 +69,14 @@ export class DuplicateEvidenceRecordError extends TypeError {
   constructor() {
     super("Evidence bundle contains duplicate record IDs");
     this.name = "DuplicateEvidenceRecordError";
+  }
+}
+
+/** Caller input violates a residual-unknown reference or history constraint. */
+export class InvalidResidualUnknownGraphError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidResidualUnknownGraphError";
   }
 }
 
@@ -255,18 +267,6 @@ export const describeEvidenceBundleFailure = (
   }
 };
 
-/** Locate the first schema issue, or keep a thrown constraint message. */
-export const describeValidationFailure = (cause: unknown): string => {
-  if (!(cause instanceof z.ZodError))
-    return cause instanceof Error ? cause.message : String(cause);
-  const [first, ...rest] = cause.issues;
-  const location =
-    first === undefined || first.path.length === 0
-      ? "the document root"
-      : first.path.map(String).join(".");
-  return `at ${location}: ${first?.message ?? "invalid value"}${rest.length === 0 ? "" : ` (${String(rest.length)} more issues)`}`;
-};
-
 /** Parse records, verify semantic IDs, and reject inconsistent manifests. */
 export const parseEvidenceBundle = (input: unknown): EvidenceBundle => {
   return parseBundle(input, false);
@@ -285,6 +285,29 @@ const parseBundle = (input: unknown, seal: boolean): EvidenceBundle => {
     if (owned !== undefined) return owned;
   }
   return authenticateBundle(evidenceBundleSchema.parse(input), seal);
+};
+
+/** Read a source bundle while preserving unexpected implementation failures. */
+export const readEvidenceBundle = (
+  input: unknown,
+): Result<EvidenceBundle, EvidenceIntegrityError> => {
+  try {
+    return ok(parseEvidenceBundle(input));
+  } catch (cause: unknown) {
+    if (
+      !(cause instanceof z.ZodError) &&
+      !(cause instanceof DuplicateEvidenceRecordError) &&
+      !(cause instanceof InvalidResidualUnknownGraphError) &&
+      !(cause instanceof NonCanonicalEvidenceBundleError)
+    )
+      throw cause;
+    return err(
+      new EvidenceIntegrityError(cause.message, {
+        cause,
+        userMessage: cause.message,
+      }),
+    );
+  }
 };
 
 /** Authenticate evidence and bundle invariants after the bundle shape is parsed. */
@@ -322,7 +345,7 @@ const authenticateBundle = (
     }),
     parsed.unknowns,
   );
-  if (JSON.stringify(parsed) !== JSON.stringify(canonical))
+  if (!equalJsonText(parsed, canonical))
     throw new NonCanonicalEvidenceBundleError();
   if (seal) {
     freezeJsonSnapshot(canonical);
@@ -351,7 +374,7 @@ const validateUnknownGraph = (
     );
     for (const [index, revision] of history.entries()) {
       if (revision.revision !== index + 1)
-        throw new TypeError(
+        throw new InvalidResidualUnknownGraphError(
           `Residual unknown ${id} revision history has a gap`,
         );
       if (
@@ -359,7 +382,9 @@ const validateUnknownGraph = (
         revision.previous_revision_digest !==
           history[index - 1]?.revision_digest
       )
-        throw new TypeError(`Residual unknown ${id} revision chain is broken`);
+        throw new InvalidResidualUnknownGraphError(
+          `Residual unknown ${id} revision chain is broken`,
+        );
     }
     const head = history.at(-1);
     if (head === undefined)
@@ -375,12 +400,12 @@ const validateUnknownGraph = (
     ];
     for (const evidenceId of referencedEvidence)
       if (!evidenceById.has(evidenceId))
-        throw new TypeError(
+        throw new InvalidResidualUnknownGraphError(
           `Residual unknown references missing evidence ${evidenceId}`,
         );
     for (const relationship of unknown.relationships)
       if (!unknownById.has(relationship.unknown_id))
-        throw new TypeError(
+        throw new InvalidResidualUnknownGraphError(
           `Residual unknown references missing unknown ${relationship.unknown_id}`,
         );
     if (unknown.resolution?.disposition === "verified")
@@ -394,7 +419,7 @@ const validateVerifiedResolution = (
   evidenceById: Pick<ReadonlyMap<string, Evidence>, "get">,
 ): void => {
   if (unknown.contradicting_evidence_ids.length > 0)
-    throw new TypeError(
+    throw new InvalidResidualUnknownGraphError(
       `Residual unknown ${unknown.unknown_id} retains contradicting evidence`,
     );
   const qualifies = unknown.resolution?.evidence_ids.some((evidenceId) => {
@@ -407,7 +432,7 @@ const validateVerifiedResolution = (
     );
   });
   if (qualifies !== true)
-    throw new TypeError(
+    throw new InvalidResidualUnknownGraphError(
       `Residual unknown ${unknown.unknown_id} has no qualifying resolution evidence`,
     );
 };
@@ -429,12 +454,12 @@ export const validateResidualUnknownAddition = (
       : unknown.revision !== current.revision + 1 ||
         unknown.previous_revision_digest !== current.revision_digest
   )
-    throw new TypeError(
+    throw new InvalidResidualUnknownGraphError(
       `Residual unknown ${unknown.unknown_id} revision chain is broken`,
     );
   for (const evidenceId of referencedEvidenceIds(unknown))
     if (!evidenceById.has(evidenceId))
-      throw new TypeError(
+      throw new InvalidResidualUnknownGraphError(
         `Residual unknown references missing evidence ${evidenceId}`,
       );
   for (const relationship of unknown.relationships)
@@ -442,7 +467,7 @@ export const validateResidualUnknownAddition = (
       relationship.unknown_id !== unknown.unknown_id &&
       !currentHeads.has(relationship.unknown_id)
     )
-      throw new TypeError(
+      throw new InvalidResidualUnknownGraphError(
         `Residual unknown references missing unknown ${relationship.unknown_id}`,
       );
   if (unknown.resolution?.disposition === "verified")
@@ -458,7 +483,9 @@ export const validateResidualUnknownAddition = (
       dependencies.length > 0 &&
       reachesUnknown(dependencies, unknown.unknown_id, currentHeads, unknown)
     )
-      throw new TypeError("Residual unknown dependency graph contains a cycle");
+      throw new InvalidResidualUnknownGraphError(
+        "Residual unknown dependency graph contains a cycle",
+      );
   }
 };
 
@@ -546,7 +573,7 @@ const rejectDependencyCycles = (
         if (relationship?.type !== "depends-on") continue;
         const dependency = relationship.unknown_id;
         if (active.has(dependency))
-          throw new TypeError(
+          throw new InvalidResidualUnknownGraphError(
             "Residual unknown dependency graph contains a cycle",
           );
         if (visited.has(dependency)) continue;

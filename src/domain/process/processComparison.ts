@@ -49,6 +49,7 @@ export const deriveProcessComparisonStatus = (
   dimensions: readonly ComparisonStatus[],
 ): ComparisonStatus => {
   if (dimensions.includes("truncated")) return "truncated";
+  if (dimensions.includes("contradiction")) return "contradiction";
   if (
     dimensions.some((status) =>
       ["changed", "added", "removed"].includes(status),
@@ -79,9 +80,9 @@ export const processCaptureComparisonSchema = z
           "filesystem",
           "process",
         ]),
-        index: z.number().int().nonnegative(),
-        left_at_ms: z.number().int().nonnegative().nullable(),
-        right_at_ms: z.number().int().nonnegative().nullable(),
+        index: z.int().nonnegative(),
+        left_at_ms: z.int().nonnegative().nullable(),
+        right_at_ms: z.int().nonnegative().nullable(),
         left: jsonValueSchema.nullable(),
         right: jsonValueSchema.nullable(),
       }),
