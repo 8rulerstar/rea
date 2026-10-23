@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import {
   UNREAL_PAK_FOOTER_LAYOUTS,
   type UnrealPak,
@@ -144,7 +145,8 @@ class IssueSink implements IssueReporter {
     const issue = { kind, offset, message };
     // Issues are report rows too: charge each one before its message and
     // deduplication key are kept, so a hostile index cannot grow them unbounded.
-    this.#bytes += Buffer.byteLength(JSON.stringify(issue)) + 1;
+    // Measured without building the escaped serialization.
+    this.#bytes += jsonValueByteLength(issue) + 1;
     this.limits.beforeIssues?.(this.#bytes);
     this.#seen.add(key);
     this.issues.push(issue);
@@ -557,6 +559,13 @@ const finished = (cursor: Cursor) => {
     );
 };
 
+/** Names reach messages without the path budget; quote a bounded prefix. */
+const QUOTED_NAME = 256;
+const quoted = (name: string) =>
+  name.length > QUOTED_NAME
+    ? `${name.slice(0, QUOTED_NAME)}... (${name.length} UTF-16 units)`
+    : name;
+
 /**
  * One directory listing (the full directory index, or the pruned one inside
  * the path hash index): directories, each with file names and entry references.
@@ -583,7 +592,7 @@ const readDirectoryListing = async (
       cursor.sink.report(
         "malformed-directory-name",
         directoryAt,
-        `${cursor.label} directory name "${directory}" does not end with "/"`,
+        `${cursor.label} directory name "${quoted(directory)}" does not end with "/"`,
       );
     const fileCount = cursor.u32();
     checkEntryCount(listed.length + fileCount, limits, cursor.label);

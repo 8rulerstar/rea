@@ -699,4 +699,22 @@ describe("Unreal pak issue budget", () => {
       true,
     );
   });
+  it("quotes a bounded prefix of a long malformed directory name", async () => {
+    const name = `/${"\u0001".repeat(100_000)}`;
+    const pak = await read(
+      createPakFixture({
+        layout: "v11",
+        emptyDirectories: 1,
+        emptyDirectoryName: name,
+        unslashedDirectories: true,
+      }).bytes,
+      { ...LIMITS, regionBytes: 64 << 20 },
+    );
+    const issue = pak.issues.find(
+      (entry) =>
+        entry.kind === "malformed-directory-name" &&
+        entry.message.includes("100002 UTF-16 units"),
+    );
+    expect(issue?.message.length).toBeLessThan(400);
+  });
 });
