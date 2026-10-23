@@ -60,6 +60,10 @@ export interface GenericMethodFixtureOptions {
   readonly emptyTable?: boolean;
   /** Place genericMethodPointers at the last 16 bytes, leaving slot 2 unmapped. */
   readonly unmappedLastSlot?: boolean;
+  /** Raw methodSpecs pointer written instead of the spec table address. */
+  readonly methodSpecs?: bigint;
+  /** Raw genericMethodPointers pointer written instead of the slot array. */
+  readonly genericMethodPointers?: bigint;
 }
 
 /**
@@ -306,7 +310,7 @@ const writeGenericMethods = (
   metadataWord(4, options.emptyTable === true ? 0n : BigInt(rows.length));
   metadataWord(5, address(GENERIC_METHOD_TABLE));
   metadataWord(8, BigInt(specs.length));
-  metadataWord(9, address(METHOD_SPECS));
+  metadataWord(9, options.methodSpecs ?? address(METHOD_SPECS));
   if (options.codeRegistration === false) return;
   // CodeRegistration ends at codeGenModulesCount (REGISTRATION): 104 bytes
   // before it in the 27.1+ layout, 96 in the 27.0 layout.
@@ -317,7 +321,10 @@ const writeGenericMethods = (
   // which leaves every candidate layout readable.
   const empty = options.emptyTable === true;
   codeWord(16, empty ? 0n : BigInt(slots.length));
-  codeWord(24, empty ? 0n : address(pointers));
+  codeWord(
+    24,
+    empty ? 0n : (options.genericMethodPointers ?? address(pointers)),
+  );
   // invokerPointersCount follows genericAdjustorThunks when rows carry one.
   codeWord(stride === 16 ? 40 : 32, 4n);
 };

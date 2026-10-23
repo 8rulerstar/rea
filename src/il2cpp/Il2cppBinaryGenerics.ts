@@ -89,6 +89,7 @@ export const genericMethodLayouts = (version: number) => {
 /** Bounds a count read from the image before the budget is checked for it. */
 export const GENERIC_TABLE_LIMIT = 0x1000000;
 const BATCH = 256;
+const MAX_ADDRESS = 0xffffffffffffffffn;
 
 /**
  * Resolve every genericMethodTable row the way Il2CppDumper does:
@@ -275,15 +276,22 @@ export function* linkGenericMethodsSteps(
       : `gives ${kind} ${owner} ${given} generic arguments, but it declares ${declared}`;
   };
   const unknown = { state: "unknown", address: null, rva: null } as const;
+  // Index arithmetic on a damaged table pointer can leave the 64-bit address
+  // space; such an entry is reported at its genericMethodTable row instead.
+  const entryAt = (base: bigint, index: number, size: number) => {
+    if (index < 0) return null;
+    const address = base + BigInt(index * size);
+    return address + BigInt(size) - 1n > MAX_ADDRESS ? null : address;
+  };
   function* resolve(row: number): Generator<void, Il2cppGenericMethodInstance> {
     const at = rowAt(row);
     const spec = i32(at)!;
     const slot = i32(at + 4n)!;
     const shared = specRows.get(spec)!;
-    const specAt = specTable + BigInt(spec * 12);
-    const method = i32(specAt);
-    const classIndex = i32(specAt + 4n);
-    const methodIndex = i32(specAt + 8n);
+    const specAt = entryAt(specTable, spec, 12);
+    const method = specAt === null ? null : i32(specAt);
+    const classIndex = specAt === null ? null : i32(specAt + 4n);
+    const methodIndex = specAt === null ? null : i32(specAt + 8n);
     if (shared.length > 1) {
       // Name one other row, not all of them, so k sharing rows cost O(k).
       issue(
@@ -302,7 +310,13 @@ export function* linkGenericMethodsSteps(
     // slot address would be reported under a definition nothing confirms.
     const base = { method_spec: spec, method: method ?? -1 };
     let name: string | null = null;
-    if (method === null || classIndex === null || methodIndex === null)
+    if (specAt === null)
+      issue(
+        row,
+        at,
+        `method spec ${spec} lies outside the 64-bit address space from methodSpecs at 0x${specTable.toString(16)}`,
+      );
+    else if (method === null || classIndex === null || methodIndex === null)
       issue(row, specAt, `method spec ${spec} is not file backed`);
     else if (method < 0 || method >= metadata.methods.length)
       issue(
@@ -352,7 +366,15 @@ export function* linkGenericMethodsSteps(
     }
     if (name === null) return { ...base, name, ...unknown };
     const named = { ...base, name };
-    const slotAt = chosen.pointers + BigInt(slot * 8);
+    const slotAt = entryAt(chosen.pointers, slot, 8);
+    if (slotAt === null) {
+      issue(
+        row,
+        at + 4n,
+        `genericMethodPointers slot ${slot} lies outside the 64-bit address space from genericMethodPointers at 0x${chosen.pointers.toString(16)}`,
+      );
+      return { ...named, ...unknown };
+    }
     const pointer = readSlot(image, slotAt);
     if (pointer === null) {
       issue(

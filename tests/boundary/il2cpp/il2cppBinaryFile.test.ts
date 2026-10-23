@@ -634,6 +634,38 @@ it("admits every generic row and issue before retention", () => {
   ).toBe(false);
 });
 
+it("reports entries past the 64-bit address space at their table row", () => {
+  const top = 0xffffffffffffffffn;
+  // Spec 1 from the last address is 0x1000000000000000b; every row stays
+  // unknown and each issue keeps an address inside the binary.
+  const specs = linkGeneric({ methodSpecs: top }).generic_methods!;
+  expect(specs.instances.map((row) => row.state)).toEqual([
+    "unknown",
+    "unknown",
+    "unknown",
+  ]);
+  expect(specs.issues.map((entry) => entry.address)).toEqual([
+    at(0xbc0n),
+    at(0xbd0n),
+    at(0xbe0n),
+  ]);
+  expect(specs.issues[1]!.message).toBe(
+    "method spec 1 lies outside the 64-bit address space from methodSpecs at 0xffffffffffffffff",
+  );
+  const slots = linkGeneric({ genericMethodPointers: top }).generic_methods!;
+  expect(slots.instances.map((row) => row.state)).toEqual([
+    "unknown",
+    "unknown",
+    "unknown",
+  ]);
+  expect(slots.issues).toContainEqual({
+    row: 1,
+    address: at(0xbd4n),
+    message:
+      "genericMethodPointers slot 1 lies outside the 64-bit address space from genericMethodPointers at 0xffffffffffffffff",
+  });
+});
+
 it("selects the 27.0 layout by its 12-byte rows and agreeing counts", () => {
   const linked = linkGeneric({ stride: 12 }, 27);
   expect(linked.generic_methods).toMatchObject({
