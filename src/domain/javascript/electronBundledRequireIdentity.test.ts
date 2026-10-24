@@ -31,6 +31,21 @@ const expectUnresolved = (source: string) => {
 };
 
 describe("Electron identity through Webpack externals", () => {
+  it.each([
+    ["const key=45840;n.m[key]=local;", 0],
+    ["const key='45840';delete n.m[key];", 0],
+    ["n.m[runtimeKey]=local;", 0],
+    ["const key=45841;n.m[key]=local;", 1],
+  ] as const)(
+    "preserves only unmodified external slots after %s",
+    (write, expected) => {
+      expect(
+        electronOf(bootstrap(EXTERNAL, CONSUMER, `n.m=m;${write}n(100);`))
+          .browser_windows,
+      ).toHaveLength(expected);
+    },
+  );
+
   it("follows the default-export getter produced by webpack n.n", () => {
     const source = bootstrap(
       EXTERNAL,
@@ -70,6 +85,14 @@ describe("Electron identity through Webpack externals", () => {
     ["delete", "delete n.n;"],
     ["a destructuring write", "({g:n.n}={g:e=>()=>0});"],
     ["an unknown key", "n[key]=e=>()=>0;"],
+    [
+      "a stable loader alias",
+      "const copy=n;copy.n=e=>()=>({BrowserWindow:class{}});",
+    ],
+    [
+      "a reflective write through a loader alias",
+      "const copy=n;Reflect.set(copy,'n',e=>()=>({BrowserWindow:class{}}));",
+    ],
   ])(
     "does not infer Electron after a getter write through %s",
     (_name, write) => {
@@ -223,6 +246,38 @@ describe("Webpack externals with a tampered runtime", () => {
 });
 
 describe("Webpack externals with a tampered loader or module object", () => {
+  it.each([
+    ["invoked", "n.i(runtimeChunks);"],
+    ["read through an alias", "const install=n.i;install(runtimeChunks);"],
+    ["read through a dynamic key", "n[runtimeMember](runtimeChunks);"],
+    ["exposed with its namespace", "publish(n);"],
+    [
+      "reachable through a helper receiver",
+      "n.run=function(){this.i(runtimeChunks)};n.run();",
+    ],
+  ])(
+    "keeps an unknown chunk installation unresolved when %s",
+    (_name, invoke) => {
+      expectUnresolved(
+        bootstrap(
+          EXTERNAL,
+          CONSUMER,
+          `n.m=m;n.i=e=>{for(var k in e)n.m[k]=e[k]};${invoke}n(100);`,
+        ),
+      );
+    },
+  );
+
+  it("does not treat a called assignment value as an unused installer", () => {
+    expectUnresolved(
+      bootstrap(
+        EXTERNAL,
+        CONSUMER,
+        "n.m=m;(n.i=e=>{for(var k in e)n.m[k]=e[k]})(runtimeChunks);n(100);",
+      ),
+    );
+  });
+
   it.each([
     [
       "cached exports rewritten through the runtime exposure",

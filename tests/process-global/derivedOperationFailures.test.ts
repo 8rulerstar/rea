@@ -26,9 +26,11 @@ import { managedMemberComparisonResultSchema } from "../../src/domain/managed/ma
 import { managedNativeVerificationResultSchema } from "../../src/domain/managed/managedNativeVerificationSchemas.js";
 import { managedReconstructionImportResultSchema } from "../../src/domain/managed/managedReconstruction.js";
 
+import { captureProcessScenarioFile } from "../../src/application/process/ProcessCli.js";
 import { compareManagedMemberPaths } from "../../src/application/managed/ManagedMemberComparisonService.js";
 import { buildManagedPeFixture } from "../../src/dotnet/ManagedPe.fixture.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
+import { ProcessCaptureError } from "../../src/process/capture/ProcessCaptureError.js";
 
 import { reconstructionObligationLedgerSchema } from "../../src/domain/reconstructionObligationLedgerSchemas.js";
 import {
@@ -39,6 +41,22 @@ import { processCaptureSchema } from "../../src/domain/process/processCapture.js
 import { JAVASCRIPT_APPLICATION_EVIDENCE_EXAMPLE } from "../../src/contracts/javascript/javascriptRuntimeReconciliationExample.js";
 import { javascriptApplicationAnalysisResultSchema } from "../../src/domain/javascript/javascriptApplicationAnalysis.js";
 import { javaScriptSemanticQueryResultSchema } from "../../src/domain/javascript/javascriptSemanticQuerySchemas.js";
+import {
+  JAVASCRIPT_FEATURE_TRACE_EXAMPLE,
+  JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE,
+  SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE,
+} from "../../src/contracts/javascript/javascriptApplicationWorkflowExamples.js";
+import { JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE } from "../../src/contracts/javascript/javascriptExportShapeComparisonExample.js";
+import { applicationFeatureTraceResultSchema } from "../../src/domain/javascript/javascriptFeatureTraceSchemas.js";
+import { ownedApplicationVersionComparisonResultSchema } from "../../src/domain/javascript/javascriptApplicationVersionComparisonSchemas.js";
+import { javaScriptExportShapeComparisonResultSchema } from "../../src/domain/javascript/javascriptExportShapeComparisonSchemas.js";
+import { sourceToBundleComparisonResultSchema } from "../../src/domain/javascript/sourceToBundleComparisonSchemas.js";
+import { JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE } from "../../src/contracts/javascript/javascriptRuntimeReconciliationExample.js";
+import { javascriptRuntimeReconciliationResultSchema } from "../../src/domain/javascript/javascriptRuntimeReconciliationSchemas.js";
+import { browserCompletenessSchema } from "../../src/domain/browserCompleteness.js";
+import { createElectronActiveEvidence } from "../../src/application/javascript/ElectronActiveEvidence.js";
+import { electronActiveObservationInputSchema } from "../../src/domain/javascript/electronActiveObservation.js";
+import { createElectronActiveObservationFixtureResult } from "../../src/domain/javascript/electronActiveObservation.fixture.js";
 
 import { nativeFunctionMatchingSchema } from "../../src/domain/native/functionMatching.js";
 import { FunctionByteCoverage } from "../../src/domain/native/functionByteCoverage.js";
@@ -71,6 +89,50 @@ const unexpectedResultFailures = [
     },
   ],
 ] as const;
+
+describe.each([
+  {
+    name: "trace_application_feature",
+    input: JAVASCRIPT_FEATURE_TRACE_EXAMPLE,
+    result: applicationFeatureTraceResultSchema,
+  },
+  {
+    name: "compare_application_versions",
+    input: JAVASCRIPT_APPLICATION_VERSION_COMPARISON_EXAMPLE,
+    result: ownedApplicationVersionComparisonResultSchema,
+  },
+  {
+    name: "compare_javascript_export_shapes",
+    input: JAVASCRIPT_EXPORT_SHAPE_COMPARISON_EXAMPLE,
+    result: javaScriptExportShapeComparisonResultSchema,
+  },
+  {
+    name: "compare_source_to_bundle",
+    input: SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE,
+    result: sourceToBundleComparisonResultSchema,
+  },
+])("$name output failures through the public SDK", (workflow) => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(unexpectedResultFailures)(
+    "preserves an unexpected %s without recording sources or derived Evidence",
+    async (_kind, createFailure) => {
+      await withSdk(async ({ client, session }) => {
+        const failure = createFailure();
+        vi.spyOn(workflow.result, "parse").mockImplementation(() => {
+          throw failure;
+        });
+        const response = await client.callTool({
+          name: workflow.name,
+          arguments: workflow.input,
+        });
+        expectUnexpectedToolFailure(response, failure);
+        expect(session.exportEvidenceBundle().records).toEqual([]);
+        expect(session.exportEvidenceBundle().unknowns).toEqual([]);
+      });
+    },
+  );
+});
 
 const invalidFunctionOperationEvidence = () => {
   const left = FUNCTION_COMPARISON_EXAMPLE.left;
@@ -152,6 +214,151 @@ const withSdk = async <Value>(
     await Promise.allSettled([client.close(), server.close(), session.close()]);
   }
 };
+
+const activeRuntimeFixture = () => {
+  const root = join(process.cwd(), "active-runtime-fixture");
+  const applicationPath = join(root, "main.js");
+  const result = createElectronActiveObservationFixtureResult(applicationPath);
+  const evidence = createElectronActiveEvidence(
+    {
+      ...electronActiveObservationInputSchema.parse({
+        executable_path: process.execPath,
+        application_path: applicationPath,
+        application_root: root,
+      }),
+      application_root: root,
+    },
+    result,
+    {
+      id: "rea-playwright-electron-active",
+      name: "REA Playwright active Electron observation provider",
+      version: "1",
+    },
+  );
+  return { evidence, result };
+};
+
+describe("runtime reconciliation failure ownership through the public SDK", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(unexpectedResultFailures)(
+    "preserves an unexpected %s from generated reconciliation output",
+    async (_label, createFailure) => {
+      await withSdk(async ({ client, session }) => {
+        const failure = createFailure();
+        vi.spyOn(
+          javascriptRuntimeReconciliationResultSchema,
+          "parse",
+        ).mockImplementation(() => {
+          throw failure;
+        });
+        const response = await client.callTool({
+          name: "reconcile_javascript_runtime",
+          arguments: JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE,
+        });
+        expectUnexpectedToolFailure(response, failure);
+        expect(session.exportEvidenceBundle()).toMatchObject({
+          records: [],
+          unknowns: [],
+        });
+      });
+    },
+  );
+
+  it.each(unexpectedResultFailures)(
+    "preserves an unexpected %s while interpreting an authenticated active capture",
+    async (_label, createFailure) => {
+      await withSdk(async ({ client, session }) => {
+        const { evidence: runtime } = activeRuntimeFixture();
+        const failure = createFailure();
+        vi.spyOn(browserCompletenessSchema, "parse").mockImplementation(() => {
+          throw failure;
+        });
+        const response = await client.callTool({
+          name: "reconcile_javascript_runtime",
+          arguments: {
+            static_layers:
+              JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE.static_layers,
+            runtime_observations: [runtime],
+          },
+        });
+        expectUnexpectedToolFailure(response, failure);
+        expect(session.exportEvidenceBundle()).toMatchObject({
+          records: [],
+          unknowns: [],
+        });
+      });
+    },
+  );
+
+  it.each([
+    {
+      field: "payload",
+      path: ["normalized_result", "application", "application_path"],
+      reason: "invalid_type",
+    },
+    {
+      field: "parameters",
+      path: ["parameters", "application_root"],
+      reason: "invalid_type",
+    },
+    {
+      field: "scope",
+      path: ["normalized_result", "application", "application_path"],
+      reason: "invalid_value",
+    },
+  ])(
+    "keeps an invalid active $field at its caller path",
+    async ({ field, path, reason }) => {
+      await withSdk(async ({ client, session }) => {
+        const { evidence, result } = activeRuntimeFixture();
+        const runtime = createEvidence(undefined, evidence.provider, {
+          operation: evidence.operation,
+          predicateType: evidence.predicate_type,
+          authority: evidence.authority,
+          confidence: evidence.confidence,
+          parameters:
+            field === "parameters"
+              ? { ...evidence.parameters, application_root: 3 }
+              : evidence.parameters,
+          result:
+            field === "parameters"
+              ? result
+              : {
+                  ...result,
+                  application: {
+                    ...result.application,
+                    application_path:
+                      field === "payload"
+                        ? 3
+                        : join(process.cwd(), "another-application", "main.js"),
+                  },
+                },
+        });
+        const response = await client.callTool({
+          name: "reconcile_javascript_runtime",
+          arguments: {
+            static_layers:
+              JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE.static_layers,
+            runtime_observations: [runtime],
+          },
+        });
+        expect(response.isError).toBe(true);
+        expect(parseMcpToolError(response).error).toMatchObject({
+          code: "invalid_request",
+          details: {
+            operation: "reconcile_javascript_runtime",
+            issues: [{ path: ["runtime_observations", 0, ...path], reason }],
+          },
+        });
+        expect(session.exportEvidenceBundle()).toMatchObject({
+          records: [],
+          unknowns: [],
+        });
+      });
+    },
+  );
+});
 
 describe("derived operation failures through the public SDK", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -459,13 +666,13 @@ describe("ledger generation failure ownership through the public SDK", () => {
     },
   );
 
-  it.each(unexpectedResultFailures.filter(([kind]) => kind !== "ZodError"))(
+  it.each(unexpectedResultFailures)(
     "preserves an unexpected %s while deriving process candidates",
     async (_label, createFailure) => {
       await withSdk(async ({ client, session }) => {
         const input = ledgerRequest([processEvidence()]);
         const failure = createFailure();
-        vi.spyOn(processCaptureSchema, "parse").mockImplementation(() => {
+        vi.spyOn(processCaptureSchema, "safeParse").mockImplementation(() => {
           throw failure;
         });
         const response = await client.callTool({
@@ -474,6 +681,87 @@ describe("ledger generation failure ownership through the public SDK", () => {
         });
         expectUnexpectedToolFailure(response, failure);
         expect(session.exportEvidenceBundle().records).toEqual([]);
+      });
+    },
+  );
+});
+
+describe("process capture CLI cleanup failure projection", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("preserves sanitized unknown-process IDs and reasons through the capture CLI boundary", async () => {
+    const root = await createTestTempDirectory("rea-process-cli-cleanup-");
+    const scenario = join(root, "scenario.json");
+    await writeFile(
+      scenario,
+      JSON.stringify({ executable: process.execPath, arguments: [] }),
+    );
+    const reason =
+      "process ownership token could not be read for 1 live process(es): environment_unavailable=1; live candidates 900=environment_unavailable";
+    const failure = new ProcessCaptureError("cleanup incomplete", {
+      reason: "cleanup_incomplete",
+      cleanup: { reason, resources: ["owned_process_group"] },
+      cleanupReport: {
+        owned_process_group: {
+          state: "unverified",
+          reason,
+          unverified_processes: [
+            { pid: 900, reason: "environment_unavailable" },
+          ],
+        },
+        terminal_renderer: { state: "cleaned", reason: null },
+        temporary_root: { state: "cleaned", reason: null },
+      },
+    });
+    const processHarness =
+      await import("../../src/process/capture/ProcessHarness.js");
+    vi.spyOn(processHarness, "captureProcessScenario").mockResolvedValue({
+      ok: false,
+      error: failure,
+    });
+
+    const projected = await captureProcessScenarioFile(scenario);
+
+    expect(projected).toMatchObject({
+      error: "Process command failed",
+      code: "cleanup_incomplete",
+      details: {
+        cleanup_report: {
+          owned_process_group: {
+            reason,
+            unverified_processes: [
+              { pid: 900, reason: "environment_unavailable" },
+            ],
+          },
+        },
+      },
+    });
+  });
+});
+
+describe("process comparison Evidence authentication failures through the public SDK", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(unexpectedResultFailures.filter(([kind]) => kind !== "ZodError"))(
+    "preserves an unexpected %s without retaining Evidence",
+    async (_label, createFailure) => {
+      await withSdk(async ({ client, session }) => {
+        const input = {
+          left: processEvidence(),
+          right: processEvidence(),
+        };
+        const failure = createFailure();
+        const evidenceModule = await import("../../src/domain/evidence.js");
+        vi.spyOn(evidenceModule, "parseEvidence").mockImplementation(() => {
+          throw failure;
+        });
+        const response = await client.callTool({
+          name: "compare_process_captures",
+          arguments: input,
+        });
+        expectUnexpectedToolFailure(response, failure);
+        expect(session.exportEvidenceBundle().records).toEqual([]);
+        expect(session.exportEvidenceBundle().unknowns).toEqual([]);
       });
     },
   );

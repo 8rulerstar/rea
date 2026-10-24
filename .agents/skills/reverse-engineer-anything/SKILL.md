@@ -2,13 +2,13 @@
 name: reverse-engineer-anything
 description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
 metadata:
-  version: "45"
+  version: "46"
 ---
 
 # REA
 
 Use REA when a claim depends on a shipped binary or package, decompilation,
-passive application runtime evidence, or comparison with
+requested runtime evidence, or comparison with
 behavior not established by available source. For ordinary analysis of a
 complete source repository, use normal repository tools and do not run REA
 readiness or provider commands.
@@ -71,9 +71,8 @@ before asking for a restart. Read that guide before a second repair attempt.
 
 REA setup never installs or upgrades Node.js, npm, Homebrew, Java, Ghidra, IDA,
 JADX, Kuna, Binwalk, or Unblob. Use existing prerequisites; do not install unrelated
-software to repair
-MCP registration. For an unsupported client, use manual stdio registration
-with a version-pinned `rea-agents` package or continue through the CLI.
+software to repair MCP registration. For an unsupported client, use manual stdio
+registration with a version-pinned `rea-agents` package or continue through the CLI.
 
 A concrete CLI fallback for an operator-supplied JavaScript tree or ASAR is:
 
@@ -89,8 +88,7 @@ Prefer an existing `rea` CLI. When none is installed and REA package acquisition
 is within the authorized scope, use `npx -y rea-agents@latest` in its place.
 Configuration repair starts with a read-only setup plan; show paths, backups and
 skill replacement before applying authorized changes. Preserve existing approval
-and target-execution boundaries. REA setup never installs or upgrades unrelated
-software, including Node.js, npm, Homebrew, Java, Ghidra, IDA, JADX, Kuna, Binwalk or Unblob.
+and target-execution boundaries.
 
 ## Route the target first
 
@@ -124,6 +122,12 @@ explicit path or endpoint and do not need it.
 - .NET NativeAOT PE/ELF: native Ghidra analysis. Native code can yield pseudocode;
   consult the NativeAOT workflow in `references/native-and-artifacts.md` for
   optional metadata recovery and its supported host/layout boundary.
+- Native program behavior, live calls, instrumentation, or command-run effects:
+  choose the matching [native runtime workflow](references/runtime-observation.md#native-runtime-questions).
+  `open_binary` and `trace_native_values` establish static facts; they do not
+  observe execution. Runtime tools have distinct launch, attach, mutation and
+  cleanup effects, and do not require a preliminary static session unless their
+  own contract says so.
 - User-owned browser page already open: `list_browser_targets`.
 - Browser action the agent must perform (click, type, navigate):
   `capture_browser_scenario` with declared actions. See
@@ -247,6 +251,14 @@ explicit path or endpoint and do not need it.
   absence of that table, not proof the image is unsigned in every catalog sense.
   Signatures are not verified. See the
   [PE certificate guide](https://github.com/morluto/rea/blob/main/docs/pe-certificates.md).
+- PE import and delay-load tables: `inspect_pe_imports` with the explicit
+  local PE32/PE32+ file. This built-in target-free inspection requires no
+  Windows SDK. Preserve DLL names, named and ordinal functions, ILT/IAT RVAs,
+  delay-load descriptors, and the pefile import hash of the standard import
+  table. A missing import directory is observed absence of that table, not
+  proof the image never imported APIs through another table. Bound snapshots
+  and loaded IAT contents remain unobserved. See the
+  [PE import guide](https://github.com/morluto/rea/blob/main/docs/pe-imports.md).
 - ELF note tables: `inspect_elf_notes` with the explicit local ELF32/ELF64
   file. This built-in target-free inspection requires no disassembler. Preserve
   PT_NOTE and SHT_NOTE ranges, owners, types, descriptor SHA-256, and GNU
@@ -263,8 +275,10 @@ explicit path or endpoint and do not need it.
 - Erlang BEAM IFF container: `inspect_erlang_beam` with the explicit local
   `.beam` file. This built-in target-free inspection requires no Erlang
   installation. Preserve chunk names, atom order, export/import/lambda tables,
-  and the Code header. Missing optional tables stay null. Bytecode is not
-  executed. See the
+  and the Code header. For selected facts, prefer `detail: "summary"` plus a
+  `beam` view (collection, names/indices, fields and paging), retaining the full
+  Evidence. CLI summary requires `--evidence_output`. Missing table counts stay
+  null; decoded empty tables count zero. Bytecode is not executed. See the
   [Erlang BEAM guide](https://github.com/morluto/rea/blob/main/docs/erlang-beam.md).
 
 - Explicit local SQLite database snapshot: `inspect_sqlite_database`. Inspect
@@ -350,7 +364,13 @@ Start with the default result and use its inline Evidence and graph context.
 For a JavaScript application or ELF layout whose size is unknown or large,
 call `analyze_javascript_application` or `inspect_binary_layout` with
 `"detail": "summary"`, then inspect the retained `parent_evidence_id` with
-`inspect_analysis_view`.
+`inspect_analysis_view`. Over MCP, `analyze_function` is summary-first without
+a flag: its default reply is the summary, and the complete dossier stays
+retained under `parent_evidence_id` for facet paging. Pass that ID as a
+`retained-evidence` reference to `compare_functions`, or inside
+`match_native_functions` `left_observations`/`right_observations`; request
+`"detail": "complete"` only when the dossier must travel inline, as
+`build_call_path` requires.
 Page module identities and select the returned `node_id` before requesting an
 item; a single file path can represent several graph roles. Do not repeat an
 identical analysis or rejected call without a changed input or resolved blocker.
@@ -438,8 +458,8 @@ as complete while required questions remain open.
   [references/javascript-applications.md](references/javascript-applications.md)
 - Android APK declarations, classes, methods, and static references:
   [references/android-applications.md](references/android-applications.md)
-- Browser/Electron observation (passive and scenario) and static/runtime
-  reconciliation:
+- Native instrumentation, debugger and process capture; browser/Electron
+  observation; static/runtime comparison:
   [references/runtime-observation.md](references/runtime-observation.md)
 - Evidence paging, comparisons, residual unknowns, and verification:
   [references/evidence-workflows.md](references/evidence-workflows.md)

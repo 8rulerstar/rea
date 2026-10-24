@@ -37,6 +37,7 @@ import {
 import { inspectNativeDispatch } from "./native/NativeDispatchMetadataInspection.js";
 import { traceNativeValues } from "./native/NativeValueTrace.js";
 import { traceNativeUiAction } from "./native/NativeUiActionTrace.js";
+import { decompileAll } from "./decompileDirectory/decompileAll.js";
 import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import { addressedValueSchema } from "../domain/native/nativeInventory.js";
 import {
@@ -59,6 +60,7 @@ import {
 } from "./EnhancedToolTypes.js";
 import { resolveAnalysisDocument } from "./AnalysisDocument.js";
 import { traceCallPath } from "./CallPathTracing.js";
+import { resolveXrefsName } from "./XrefsAddressResolution.js";
 import { resolveProcedureAddress } from "./ProcedureAddressResolution.js";
 import { traceLiteralFeature } from "./EnhancedLiteralTracing.js";
 import { projectNativeApiInspection } from "./native/NativeApiInspection.js";
@@ -98,16 +100,14 @@ const isAnalysisCancellation = (
   error: AnalysisError,
 ): error is AnalysisCancelledError => error._tag === "AnalysisCancelledError";
 
-const firstAnalysisCancellation = <Value>(
-  results: readonly Result<Value, AnalysisError>[],
-): AnalysisCancelledError | undefined => {
-  for (const result of results)
-    if (!result.ok && isAnalysisCancellation(result.error)) return result.error;
-  return undefined;
-};
+const permitsCapabilityFallback = (
+  error: AnalysisError,
+): error is AnalysisCapabilityUnavailableError =>
+  error instanceof AnalysisCapabilityUnavailableError &&
+  !error.cleanupIncomplete;
 
 /**
- * Composes direct provider operations into bounded reverse-engineering tools.
+ * Composes direct provider operations into reverse-engineering tools.
  * Direct callers use `execute`; adapters that own validation use
  * `executeValidated` so an MCP input is parsed exactly once.
  */
@@ -165,6 +165,12 @@ export class EnhancedTools {
           ? this.executeValidated({ name, input: parsed.data }, signal)
           : invalidEnhancedInput(name, parsed.error);
       }
+      case "decompile_all": {
+        const parsed = enhancedInputSchemas.decompile_all.safeParse(input);
+        return parsed.success
+          ? this.executeValidated({ name, input: parsed.data }, signal)
+          : invalidEnhancedInput(name, parsed.error);
+      }
       case "get_call_graph": {
         const parsed = enhancedInputSchemas.get_call_graph.safeParse(input);
         return parsed.success
@@ -213,6 +219,8 @@ export class EnhancedTools {
         return this.#objcProtocols(signal);
       case "batch_decompile":
         return this.#batchDecompile(call.input.addresses, signal);
+      case "decompile_all":
+        return decompileAll(this.analysis, call.input, signal);
       case "get_call_graph":
         return this.#callGraph(call.input, signal);
       case "analyze_swift_types":
@@ -325,16 +333,14 @@ export class EnhancedTools {
       signal,
     );
     if (!bindingsExecution.ok) {
-      if (bindingsExecution.error._tag === "AnalysisCancelledError")
-        return bindingsExecution;
-      if (bindingsExecution.error._tag !== "AnalysisCapabilityUnavailableError")
+      if (!permitsCapabilityFallback(bindingsExecution.error))
         return bindingsExecution;
       return ok(
         projectObjcClassCandidates(candidates, {
           bindings: [],
           coverage: {
             status: "unknown",
-            reason: `Native class-import binding evidence is unavailable (${bindingsExecution.error._tag}).`,
+            reason: bindingsExecution.error.reason,
           },
         }),
       );
@@ -423,34 +429,24 @@ export class EnhancedTools {
     addresses: readonly string[],
     signal?: AbortSignal,
   ): EnhancedResult {
-    const resolutions = await Promise.all(
-      addresses.map(async (address) => {
-        const result = await resolveProcedureAddress(
-          this.#call.bind(this),
-          address,
-          signal,
-        );
-        return { address, result };
-      }),
-    );
-    const resolutionCancellation = firstAnalysisCancellation(
-      resolutions.map(({ result }) => result),
-    );
-    if (resolutionCancellation !== undefined)
-      return err(resolutionCancellation);
-
+    const resolutions: BatchResolution[] = [];
+    for (const address of addresses) {
+      const result = await resolveProcedureAddress(
+        this.#call.bind(this),
+        address,
+        signal,
+      );
+      if (!result.ok && isAnalysisCancellation(result.error)) return result;
+      resolutions.push({ address, result });
+    }
     const identities = await this.#batchIdentities(resolutions, signal);
-    const ready: BatchReadyItem[] = [];
-    for (const identity of identities) {
-      if (!identity.ok) return err(identity.error);
-      ready.push(identity.value);
-    }
-    const decompilations = await this.#batchPseudocode(ready, signal);
-    const items: BatchDecompileItem[] = [];
-    for (const decompilation of decompilations) {
-      if (!decompilation.ok) return err(decompilation.error);
-      items.push(decompilation.value);
-    }
+    if (!identities.ok) return identities;
+    const decompilations = await this.#batchPseudocode(
+      identities.value,
+      signal,
+    );
+    if (!decompilations.ok) return decompilations;
+    const items = decompilations.value;
     const succeeded = items.filter(({ status }) => status === "ok").length;
     return ok({
       items,
@@ -463,75 +459,73 @@ export class EnhancedTools {
   async #batchIdentities(
     resolutions: readonly BatchResolution[],
     signal?: AbortSignal,
-  ): Promise<Result<BatchReadyItem, AnalysisCancelledError>[]> {
-    return Promise.all(
-      resolutions.map(async ({ address, result }) => {
-        if (!result.ok)
-          return ok({
-            address,
-            providerProcedure: address,
-            procedure: {
-              status: "unknown" as const,
-              error: projectAnalysisError(result.error),
-            },
-          });
-        const identity = await this.#batchProcedureIdentity(
-          result.value,
-          signal,
-        );
-        return identity.ok
-          ? ok({
-              address,
-              providerProcedure: result.value,
-              procedure: identity.value,
-            })
-          : err(identity.error);
-      }),
-    );
+  ): Promise<Result<BatchReadyItem[], AnalysisCancelledError>> {
+    const ready: BatchReadyItem[] = [];
+    for (const { address, result } of resolutions) {
+      if (!result.ok) {
+        ready.push({
+          address,
+          providerProcedure: address,
+          procedure: {
+            status: "unknown",
+            error: projectAnalysisError(result.error),
+          },
+        });
+        continue;
+      }
+      const identity = await this.#batchProcedureIdentity(result.value, signal);
+      if (!identity.ok) return identity;
+      ready.push({
+        address,
+        providerProcedure: result.value,
+        procedure: identity.value,
+      });
+    }
+    return ok(ready);
   }
 
   async #batchPseudocode(
     ready: readonly BatchReadyItem[],
     signal?: AbortSignal,
-  ): Promise<Result<BatchDecompileItem, AnalysisCancelledError>[]> {
-    return Promise.all(
-      ready.map(async ({ address, procedure, providerProcedure }) => {
-        const result = await this.#call(
-          "procedure_pseudo_code",
-          { procedure: providerProcedure },
-          signal,
-          procedure.status === "resolved" ? "provider" : undefined,
-        );
-        if (!result.ok && isAnalysisCancellation(result.error))
-          return err(result.error);
-        const item: BatchDecompileItem = !result.ok
+  ): Promise<Result<BatchDecompileItem[], AnalysisCancelledError>> {
+    const items: BatchDecompileItem[] = [];
+    for (const { address, procedure, providerProcedure } of ready) {
+      const result = await this.#call(
+        "procedure_pseudo_code",
+        { procedure: providerProcedure },
+        signal,
+        procedure.status === "resolved" ? "provider" : undefined,
+      );
+      if (!result.ok && isAnalysisCancellation(result.error))
+        return err(result.error);
+      const item: BatchDecompileItem = !result.ok
+        ? {
+            address,
+            procedure,
+            status: "error",
+            error: projectAnalysisError(result.error),
+          }
+        : typeof result.value !== "string" || result.value.length === 0
           ? {
               address,
               procedure,
               status: "error",
-              error: projectAnalysisError(result.error),
-            }
-          : typeof result.value !== "string" || result.value.length === 0
-            ? {
-                address,
-                procedure,
-                status: "error",
-                error: projectAnalysisError(
-                  new AnalysisOutputError(
-                    "procedure_pseudo_code",
-                    "provider returned empty pseudocode",
-                  ),
+              error: projectAnalysisError(
+                new AnalysisOutputError(
+                  "procedure_pseudo_code",
+                  "provider returned empty pseudocode",
                 ),
-              }
-            : {
-                address,
-                procedure,
-                status: "ok",
-                pseudocode: result.value,
-              };
-        return ok(item);
-      }),
-    );
+              ),
+            }
+          : {
+              address,
+              procedure,
+              status: "ok",
+              pseudocode: result.value,
+            };
+      items.push(item);
+    }
+    return ok(items);
   }
 
   async #batchProcedureIdentity(
@@ -681,10 +675,7 @@ export class EnhancedTools {
     const procedures = await this.#allAddressed("list_procedures", signal);
     if (!procedures.ok) return procedures;
     const symbols = await this.#allAddressed("list_names", signal);
-    if (
-      !symbols.ok &&
-      !(symbols.error instanceof AnalysisCapabilityUnavailableError)
-    )
+    if (!symbols.ok && !permitsCapabilityFallback(symbols.error))
       return symbols;
     const result = categorizeSwiftTypes(
       procedures.value,
@@ -706,15 +697,19 @@ export class EnhancedTools {
   }
 
   async #findXrefs(name: string, signal?: AbortSignal): EnhancedResult {
-    const names = await this.#allAddressed("list_names", signal);
-    if (!names.ok) return names;
-    const resolved = names.value.find((entry) => entry.name === name);
-    if (resolved === undefined)
+    const resolved = await resolveXrefsName(
+      this.analysis,
+      name,
+      signal,
+      "find_xrefs_to_name",
+    );
+    if (!resolved.ok) return resolved;
+    if (resolved.value === null)
       return ok({ status: "unresolved", name, reason: "name_not_found" });
 
     const xrefs = await this.#call(
       "xrefs",
-      { address: resolved.address },
+      { address: resolved.value },
       signal,
     );
     if (!xrefs.ok) return xrefs;
@@ -731,7 +726,7 @@ export class EnhancedTools {
     return ok({
       status: "resolved",
       name,
-      address: resolved.address,
+      address: resolved.value,
       xrefs: xrefs.value,
     });
   }
@@ -742,12 +737,7 @@ export class EnhancedTools {
       {},
       signal,
     );
-    if (
-      direct.ok ||
-      !(direct.error instanceof AnalysisCapabilityUnavailableError) ||
-      direct.error.cleanupIncomplete
-    )
-      return direct;
+    if (direct.ok || !permitsCapabilityFallback(direct.error)) return direct;
     const document = await resolveAnalysisDocument(
       this.analysis,
       undefined,
@@ -761,10 +751,7 @@ export class EnhancedTools {
         this.#call("list_strings", {}, signal),
       ],
     );
-    if (
-      !segmentsResult.ok &&
-      !(segmentsResult.error instanceof AnalysisCapabilityUnavailableError)
-    )
+    if (!segmentsResult.ok && !permitsCapabilityFallback(segmentsResult.error))
       return segmentsResult;
     if (!proceduresResult.ok) return proceduresResult;
     if (!stringsResult.ok) return stringsResult;

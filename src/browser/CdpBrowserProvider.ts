@@ -13,6 +13,7 @@ import {
   type WebPageInspection,
 } from "../domain/browserObservationSchemas.js";
 import { IsolatedWebBundleAnalyzer } from "./IsolatedWebBundleAnalyzer.js";
+import { sourceMapsWithCaptureExclusions } from "../domain/webSourceMapCoverage.js";
 import type {
   AnalyzeWebBundleInput,
   WebBundleAnalysis,
@@ -151,6 +152,7 @@ export class CdpBrowserProvider implements BrowserObservationPort {
           targets: selected.allowed,
           excluded: selected.excluded,
           limitations: [
+            ...(discovery.limitations ?? []),
             input.allowed_origins.length === 0
               ? "All page targets with supported HTTP(S) URLs are listed."
               : "Only page targets whose current URL matches an explicitly requested exact origin are listed.",
@@ -194,16 +196,19 @@ export class CdpBrowserProvider implements BrowserObservationPort {
     try {
       captured = await this.#capture(input, options, "analyze_web_bundle");
       const sourceMaps = input.fetch_source_maps
-        ? await fetchWebSourceMaps(
-            captured.sourceMapRequests,
-            {
-              ...input,
-              allowed_origins:
-                input.allowed_origins.length > 0
-                  ? input.allowed_origins
-                  : [captured.inspection.target.origin],
-            },
-            options.signal,
+        ? sourceMapsWithCaptureExclusions(
+            await fetchWebSourceMaps(
+              captured.sourceMapRequests,
+              {
+                ...input,
+                allowed_origins:
+                  input.allowed_origins.length > 0
+                    ? input.allowed_origins
+                    : [captured.inspection.target.origin],
+              },
+              options.signal,
+            ),
+            captured.inspection.completeness.excluded,
           )
         : undefined;
       return await this.#bundleAnalyzer.analyze(

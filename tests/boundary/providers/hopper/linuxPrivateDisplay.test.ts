@@ -82,7 +82,7 @@ const processResult = (
   exitCode: value.status === "ready" ? 0 : failureExit(value.failure_code),
   stderr: `${LINUX_PRIVATE_DISPLAY_DIAGNOSTIC_PREFIX}${JSON.stringify(value)}\n`,
   stderrBytes: 0,
-  cleanupIncomplete: false,
+  cleanup: { status: "released" },
   ...overrides,
 });
 
@@ -335,8 +335,25 @@ describe("private display probe output settlement", () => {
         exitCode: 0,
         stderr: "firstlast",
         stderrBytes: Buffer.byteLength("firstlast"),
-        cleanupIncomplete: false,
+        cleanup: { status: "released" },
       });
     },
   );
+});
+
+it("passes the private X authority cookie through xauth stdin", () => {
+  const fixture = fileURLToPath(
+    new URL("../../../fixtures/hopperXauthority.py", import.meta.url),
+  );
+  const process = spawnSync("python3", ["-I", "-S", fixture, helperPath], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  expect(process.status, process.stderr).toBe(0);
+  expect(JSON.parse(process.stdout)).toMatchObject({
+    arguments: ["fixture-xauth", "-q", "-f", expect.any(String), "source", "-"],
+    stdin: `add :123 . ${"0123456789abcdef".repeat(2)}\n`,
+    cookie_in_argv: false,
+    mode: 0o600,
+  });
 });

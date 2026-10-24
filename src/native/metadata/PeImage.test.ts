@@ -1,10 +1,37 @@
 import { expect, it } from "vitest";
 import { readGoBinaryImage } from "../../go/GoBinaryImage.js";
 import { readPeImage } from "./PeImage.js";
+import { pe } from "../../domain/binaryTarget.fixture.js";
+import { BinaryFormatFailure } from "./BinaryContainer.js";
 import {
   createGoBinaryFixture,
   setGoPeVirtualSize,
 } from "../../../tests/fixtures/go/image.js";
+
+it("classifies a confirmed overlapping PE as an unsupported layout", () => {
+  try {
+    readPeImage(pe(0x014c, 4));
+    throw new Error("Expected an unsupported PE layout");
+  } catch (cause) {
+    expect(cause).toBeInstanceOf(BinaryFormatFailure);
+    expect(cause).toMatchObject({ kind: "unsupported" });
+    expect((cause as Error).message).toContain("overlapping PE header");
+  }
+});
+
+it("keeps a DOS-valid but unsigned Windows-header candidate unresolved", () => {
+  const bytes = Buffer.alloc(128);
+  bytes.write("MZ", 0, "ascii");
+  bytes.writeUInt16LE(128, 2);
+  bytes.writeUInt16LE(1, 4);
+  bytes.writeUInt16LE(2, 6);
+  bytes.writeUInt16LE(4, 8);
+  bytes.writeUInt16LE(28, 24);
+  bytes.write("ABCD", 60, "ascii");
+  expect(() => readPeImage(bytes)).toThrow(
+    "MZ Windows new-header candidate is unresolved",
+  );
+});
 
 it.each([32, 64] as const)(
   "uses raw-size fallback for PE%d Go build-info and keeps RVA mappings intact",

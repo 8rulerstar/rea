@@ -77,11 +77,13 @@ export interface JavaScriptAnalysisAccumulator {
   readonly senderValidations: LocatedJavaScriptFinding<ElectronSenderValidationFinding>[];
   readonly utilityProcesses: LocatedJavaScriptFinding<ElectronUtilityProcessFinding>[];
   readonly nativeAddonBindings: LocatedJavaScriptFinding<ElectronNativeAddonBindingFinding>[];
+  readonly pendingNativeAddonBindings: (
+    | t.VariableDeclarator
+    | t.AssignmentExpression
+  )[];
   readonly moduleRangeIndex: JavaScriptModuleRangeIndex;
   /** Binding identities proven as third-parameter loaders of recovered factories. */
   readonly factoryRequireBindingIds: Set<string>;
-  /** `preload` attributes of audio and video elements, which are not scripts. */
-  readonly mediaElementPreloads: WeakSet<t.Node>;
   readonly seen: Set<string>;
   visitedNodes: number;
   unknownFindings: number;
@@ -89,8 +91,10 @@ export interface JavaScriptAnalysisAccumulator {
 
 /** Shared source and accumulator for helper inspections. */
 export interface JavaScriptFindingContext {
-  /** Node path.resolve identity established by shared callee and mutation owners. */
-  readonly nodePathResolve?: JavaScriptStaticPathIntrinsicQuery;
+  /** Native path/URL identities established by shared lexical and mutation owners. */
+  readonly pathIntrinsics?: JavaScriptStaticPathIntrinsicQuery;
+  readonly electronExportIntact?: (path: readonly string[]) => boolean;
+  readonly rendererLoad?: (callee: t.Node, site: t.Node) => boolean;
   readonly rpcScan: JavaScriptRpcScan;
   /** Shared bounded argv/nullish argument shapes for optional-slot signatures. */
   readonly expressionShapes: JavaScriptExpressionShapeResolver;
@@ -110,9 +114,11 @@ export interface JavaScriptFindingContext {
 
 /** Candidate import, require, worker, or service-worker reference. */
 export interface JavaScriptReferenceInput {
+  readonly operation?: JavaScriptStaticReference["operation"];
   readonly node: t.Node;
   readonly kind: JavaScriptStaticReference["kind"];
   readonly specifier: string | undefined;
+  readonly resolutionBasePath?: string;
 }
 
 /** Candidate route or network endpoint literal. */
@@ -156,9 +162,9 @@ export const createJavaScriptAnalysisAccumulator = (
   senderValidations: [],
   utilityProcesses: [],
   nativeAddonBindings: [],
+  pendingNativeAddonBindings: [],
   moduleRangeIndex: new JavaScriptModuleRangeIndex(sourceLength),
   factoryRequireBindingIds: new Set(),
-  mediaElementPreloads: new WeakSet(),
   seen: new Set(),
   visitedNodes: 0,
   unknownFindings: 0,

@@ -333,27 +333,9 @@ describe("managed member comparison of nested types", () => {
     // from TypeDef 4 on the left into TypeDef 5 on the right.
     expect(pairs(compare(original, swapped))).toEqual({
       methods: [
-        [
-          "0x06000001",
-          "0x06000002",
-          "unchanged",
-          "exact-il-signature",
-          "exact",
-        ],
-        [
-          "0x06000002",
-          "0x06000001",
-          "unchanged",
-          "exact-il-signature",
-          "exact",
-        ],
-        [
-          "0x06000003",
-          "0x06000003",
-          "unchanged",
-          "exact-il-signature",
-          "exact",
-        ],
+        ["0x06000001", "0x06000002", "changed", "exact-il-signature", "exact"],
+        ["0x06000002", "0x06000001", "changed", "exact-il-signature", "exact"],
+        ["0x06000003", "0x06000003", "changed", "exact-il-signature", "exact"],
       ],
       fields: [
         ["0x04000001", "0x04000002", "unchanged", "field-signature", "exact"],
@@ -382,8 +364,11 @@ describe("managed member comparison of nested types", () => {
     ]);
     expect(
       comparison.methods.slice(0, 2).map(({ dimensions }) => dimensions),
-    ).toEqual([["cil"], ["cil"]]);
-    expect(comparison.summary).toMatchObject({ changed: 2 });
+    ).toEqual([
+      ["field-target", "cil", "availability"],
+      ["field-target", "cil", "availability"],
+    ]);
+    expect(comparison.summary).toMatchObject({ changed: 3 });
   });
 
   it("retains explicitly limited bare names for historical observations", () => {
@@ -437,9 +422,9 @@ describe("managed nested type names", () => {
 
     // Joined names would make both sides' Fixture.A+Inner one ambiguous group.
     expect(pairs(spelled).methods).toEqual([
-      ["0x06000001", "0x06000001", "unchanged", "exact-il-signature", "exact"],
-      ["0x06000003", "0x06000003", "unchanged", "exact-il-signature", "exact"],
-      ["0x06000002", "0x06000002", "unchanged", "exact-il-signature", "exact"],
+      ["0x06000001", "0x06000001", "unknown", "exact-il-signature", "exact"],
+      ["0x06000003", "0x06000003", "unknown", "exact-il-signature", "exact"],
+      ["0x06000002", "0x06000002", "unknown", "exact-il-signature", "exact"],
     ]);
   });
 
@@ -548,6 +533,92 @@ describe("managed member comparison subject identity", () => {
     expect(parsedWithoutSubject.value.result.artifact.sha256).toBe(
       target.sha256,
     );
+  });
+});
+
+describe("managed call-target comparison", () => {
+  it("keeps changed call targets visible when another target fact is unavailable", () => {
+    const il = Buffer.from([0x28, 1, 0, 0, 0x0a, 0x28, 1, 0, 0, 0x0a, 0x2a]);
+    const observe = (
+      name: string,
+      path: string,
+      alterEdges?: (
+        edges: Inspection["call_edges"],
+      ) => Inspection["call_edges"],
+    ) => {
+      const bytes = buildManagedPeFixture({
+        targetFramework: null,
+        memberRefName: name,
+        ilBody: Buffer.concat([Buffer.from([(il.length << 2) | 2]), il]),
+      });
+      const target = managedPeFixtureTarget(bytes, path);
+      const inspection = inspectManagedMembersBytes(bytes, target);
+      return createEvidence(
+        target,
+        {
+          id: "call-target-fixture",
+          name: "Call target fixture",
+          version: "1",
+        },
+        {
+          operation: "inspect_managed_members",
+          parameters: {},
+          result: jsonValueSchema.parse({
+            ...inspection,
+            call_edges:
+              alterEdges?.(inspection.call_edges) ?? inspection.call_edges,
+          }),
+          confidence: "observed",
+          authority: "shipped-artifact",
+        },
+      );
+    };
+    const left = observe("Clear", "/fixture/left.dll");
+    const rightWithOneUnknownTarget = observe(
+      "WriteLine",
+      "/fixture/right.dll",
+      (edges) =>
+        edges.map((edge, index) =>
+          index === 1
+            ? {
+                ...edge,
+                target_name: null,
+                target_declaring_type: null,
+                target_identity_sha256: null,
+              }
+            : edge,
+        ),
+    );
+    const result = executeManagedMemberComparison(
+      compareManagedMembersInputSchema.parse({
+        left,
+        right: rightWithOneUnknownTarget,
+      }),
+    );
+    if (!result.ok) throw result.error;
+    const report = managedMemberComparisonResultSchema.parse(
+      result.value.evidence.normalized_result,
+    );
+    expect(report.methods[0]).toMatchObject({
+      status: "changed",
+      dimensions: expect.arrayContaining(["call-target", "availability"]),
+      limitations: [expect.stringContaining("call targets are unavailable")],
+    });
+
+    const unavailableEdges = observe(
+      "Clear",
+      "/fixture/no-edges.dll",
+      () => [],
+    );
+    const unknown = executeManagedMemberComparison(
+      compareManagedMembersInputSchema.parse({ left, right: unavailableEdges }),
+    );
+    if (!unknown.ok) throw unknown.error;
+    expect(
+      managedMemberComparisonResultSchema.parse(
+        unknown.value.evidence.normalized_result,
+      ).methods[0],
+    ).toMatchObject({ status: "unknown", dimensions: ["availability"] });
   });
 });
 
@@ -704,6 +775,25 @@ describe("managed comparison post-admission read failures", () => {
 });
 
 describe("managed comparison snapshot admission and cleanup", () => {
+  const snapshotReaderWithClose =
+    (
+      closeHandle: (owner: OwnedFileHandle) => Promise<void>,
+    ): typeof readManagedSnapshot =>
+    async (path, operation, options) => {
+      // Target resolution owns separate handles. Inject only while the real
+      // snapshot reader owns the descriptor whose retry this test observes.
+      const close = vi
+        .spyOn(OwnedFileHandle.prototype, "close")
+        .mockImplementation(function (this: OwnedFileHandle) {
+          return closeHandle(this);
+        });
+      try {
+        return await readManagedSnapshot(path, operation, options);
+      } finally {
+        close.mockRestore();
+      }
+    };
+
   it("rejects a sparse oversized snapshot through the default reader before reading it", async () => {
     const directory = await createTestTempDirectory(
       "rea-managed-oversized-snapshot-",
@@ -754,26 +844,28 @@ describe("managed comparison snapshot admission and cleanup", () => {
     const originalClose = OwnedFileHandle.prototype.close;
     const owners: OwnedFileHandle[] = [];
     let attempts = 0;
-    const close = vi
-      .spyOn(OwnedFileHandle.prototype, "close")
-      .mockImplementation(async function (this: OwnedFileHandle) {
-        owners.push(this);
-        attempts += 1;
-        if (attempts === 1) throw new Error("injected transient close failure");
-        await originalClose.call(this);
-      });
     try {
       const result = await compareManagedMemberPaths(
         { leftPath, rightPath },
-        {},
+        {
+          readSnapshot: snapshotReaderWithClose(async (owner) => {
+            owners.push(owner);
+            attempts += 1;
+            if (attempts === 1)
+              throw new Error("injected transient close failure");
+            await originalClose.call(owner);
+          }),
+        },
         resources,
       );
 
       expect(result.ok).toBe(true);
       expect(owners[0]).toBe(owners[1]);
       expect(attempts).toBe(3);
+      expect(owners[2]).not.toBe(owners[0]);
+      expect(owners.map((owner) => owner.handle.fd)).toEqual([-1, -1, -1]);
+      expect(resources.hasPending).toBe(false);
     } finally {
-      close.mockRestore();
       await resources.close();
     }
   });
@@ -789,17 +881,16 @@ describe("managed comparison snapshot admission and cleanup", () => {
     const resources = new ArtifactResourceScope();
     const cleanupCause = new Error("injected persistent close failure");
     const owners: OwnedFileHandle[] = [];
-    const close = vi
-      .spyOn(OwnedFileHandle.prototype, "close")
-      .mockImplementation(async function (this: OwnedFileHandle) {
-        owners.push(this);
-        throw cleanupCause;
-      });
     let result: Awaited<ReturnType<typeof compareManagedMemberPaths>>;
     try {
       result = await compareManagedMemberPaths(
         { leftPath, rightPath },
-        {},
+        {
+          readSnapshot: snapshotReaderWithClose(async (owner) => {
+            owners.push(owner);
+            throw cleanupCause;
+          }),
+        },
         resources,
       );
       expect(result.ok).toBe(false);
@@ -808,12 +899,16 @@ describe("managed comparison snapshot admission and cleanup", () => {
         code: "cleanup_incomplete",
         details: { cleanup: "incomplete", resources: [leftPath] },
       });
+      expect(owners).toHaveLength(2);
       expect(owners[0]).toBe(owners[1]);
       expect(owners[0]?.handle.fd).toBeGreaterThanOrEqual(0);
+      expect(resources.hasPending).toBe(true);
+      expect(resources.cleanupResources).toEqual([leftPath]);
     } finally {
-      close.mockRestore();
       await resources.close();
     }
+    expect(owners[0]?.handle.fd).toBe(-1);
+    expect(resources.hasPending).toBe(false);
   });
 });
 
@@ -844,7 +939,7 @@ describe("managed comparison target identity", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error._tag).toBe("EvidenceIntegrityError");
+    expect(result.error._tag).toBe("AnalysisArtifactChangedError");
     expect(result.error.message).toContain(leftPath);
   });
 });

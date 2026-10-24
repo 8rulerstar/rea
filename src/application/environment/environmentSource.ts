@@ -13,14 +13,16 @@ import { isJsonLike } from "../../domain/analysisView/EnvironmentManifestAccumul
 import {
   mediaTypeEssence,
   readRecordedRequestLine,
+  type RecordedRequestLine,
 } from "../../domain/analysisView/webNetworkRouteTemplates.js";
-import { browserScenarioCaptureSchema } from "../../domain/browserScenarioCapture.js";
+import { retainedBrowserScenarioCaptureSchema } from "../../domain/browserScenarioCapture.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisInputError,
   type AnalysisInputIssue,
 } from "../../domain/analysisErrorCore.js";
-import { immutableEvidence, type Evidence } from "../../domain/evidence.js";
+import type { Evidence } from "../../domain/evidence.js";
+import { safeParseImmutableEvidence } from "../../domain/evidenceValidation.js";
 import { parseExactJson } from "../../domain/exactJsonNumber.js";
 import { projectInputIssues } from "../../domain/inputIssueProjection.js";
 import { immutableJsonSnapshotMember } from "../../domain/immutableJson.js";
@@ -136,20 +138,18 @@ export const parseEvidenceFile = (
   role: "manifest" | "evidence" | "state",
   value: unknown,
 ): Result<Evidence, AnalysisError> => {
-  try {
-    for (const key of ["parameters", "raw_result", "normalized_result"])
-      immutableJsonSnapshotMember(value, key);
-    return ok(immutableEvidence(value));
-  } catch (cause: unknown) {
-    if (!(cause instanceof z.ZodError)) throw cause;
-    return err(
-      schemaInputError(
-        operation,
-        { prefix: [role], cause, value },
-        `The ${role} file is not authenticated REA Evidence JSON.`,
-      ),
-    );
-  }
+  for (const key of ["parameters", "raw_result", "normalized_result"])
+    immutableJsonSnapshotMember(value, key);
+  const parsed = safeParseImmutableEvidence(value);
+  return parsed.ok
+    ? parsed
+    : err(
+        schemaInputError(
+          operation,
+          { prefix: [role], cause: parsed.error, value },
+          `The ${role} file is not authenticated REA Evidence JSON.`,
+        ),
+      );
 };
 
 /** A schema refusal of `value`, found at `prefix`; issue paths extend the prefix and the schema failure is retained. */
@@ -171,21 +171,18 @@ const schemaInputError = (
     })),
   );
 
-/** One capture record reduced to its request line and retained response body, or undefined without a request line. */
+/** Combine an already parsed request line with its record's retained response body. */
 export const recordedExchange = (
   record: WebNetworkCaptureRecord,
-): RecordedExchange | undefined => {
-  const line = readRecordedRequestLine(record.reported, true, () => true);
-  if (line === null || line.kind !== "line") return undefined;
-  return {
-    ordinal: record.ordinal,
-    path: line.path,
-    query: line.query === undefined || line.query === "" ? null : line.query,
-    status: line.status,
-    contentType: line.rawMime === "" ? null : line.rawMime,
-    ...readRecordedResponseBody(record, REPLAY_BODY_LIMIT_BYTES),
-  };
-};
+  line: Extract<RecordedRequestLine, { readonly kind: "line" }>,
+): RecordedExchange => ({
+  ordinal: record.ordinal,
+  path: line.path,
+  query: line.query === undefined || line.query === "" ? null : line.query,
+  status: line.status,
+  contentType: line.rawMime === "" ? null : line.rawMime,
+  ...readRecordedResponseBody(record, REPLAY_BODY_LIMIT_BYTES),
+});
 
 /** Authenticate a view Evidence file and require one view kind; a refusal names the file role. */
 export const parseViewEvidence = <Kind extends AnalysisViewResult["kind"]>(
@@ -278,7 +275,7 @@ const parseScenarioCapture = (
   parameters: unknown,
   purpose: "manifest" | "replay",
 ): Result<CaptureFacts, AnalysisError> => {
-  const scenario = browserScenarioCaptureSchema.safeParse(normalized);
+  const scenario = retainedBrowserScenarioCaptureSchema.safeParse(normalized);
   if (!scenario.success)
     return err(
       schemaInputError(
@@ -417,9 +414,10 @@ const indexExchanges = (
     for (const ordinal of tool.record_ordinals) {
       if (exchanges.has(ordinal)) continue;
       const record = byOrdinal.get(ordinal);
-      const exchange =
-        record === undefined ? undefined : recordedExchange(record);
-      if (exchange !== undefined) exchanges.set(ordinal, exchange);
+      if (record === undefined) continue;
+      const line = readRecordedRequestLine(record.reported, true, () => true);
+      if (line?.kind === "line")
+        exchanges.set(ordinal, recordedExchange(record, line));
     }
   return exchanges;
 };

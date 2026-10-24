@@ -19,7 +19,7 @@ import { PROCESS_PROVIDER } from "../domain/process/processEvidenceProvider.js";
 import { parseProcessCapture } from "../domain/process/processCaptureParsing.js";
 import {
   digestProcessCommitment,
-  parseProcessScenario,
+  processScenarioSchema,
   processComparisonContract,
   processScenarioCommitment,
 } from "../domain/process/processScenario.js";
@@ -34,7 +34,7 @@ import {
   createJavaScriptApplicationNode,
 } from "../domain/javascript/javascriptApplicationGraph.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
-import { MANAGED_WORKFLOW_PROVIDER } from "./InvestigationProviders.js";
+import { MANAGED_WORKFLOW_PROVIDER } from "../domain/investigationProviders.js";
 import { createProcessCaptureEvidence } from "./process/ProcessEvidence.js";
 
 const applicationWithUnknowns = (
@@ -169,7 +169,7 @@ describe("reconstruction obligation candidates", () => {
   });
 
   it("does not bind an unknown process image to a packaged artifact obligation", () => {
-    const scenario = parseProcessScenario({
+    const scenario = processScenarioSchema.parse({
       executable: "/path/whose-launch-identity-is-unknown",
     });
     const base = emptyUnverifiedProcessCapture();

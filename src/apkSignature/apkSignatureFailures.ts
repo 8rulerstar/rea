@@ -1,6 +1,8 @@
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
-  ArtifactFileCleanupFailure,
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
+  artifactFileCancellationCause,
   bindArtifactFileCleanup,
 } from "../artifacts/ArtifactFileOperation.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
@@ -124,15 +126,8 @@ export const apkOutputBudgetError = (projectedBytes: number): AnalysisError =>
 export const apkSignatureFailure = (
   cause: unknown,
   path: string,
-  signal?: AbortSignal,
 ): AnalysisError => {
-  const primary =
-    cause instanceof ArtifactFileCleanupFailure &&
-    cause.fileCleanupFailure.outcome.kind === "failed"
-      ? primaryFailure(cause.fileCleanupFailure.outcome.cause, path)
-      : cause instanceof ArtifactFileCleanupFailure && signal?.aborted
-        ? new AnalysisCancelledError(OPERATION, { cause: signal.reason })
-        : primaryFailure(cause, path);
+  const primary = primaryFailure(artifactFilePrimaryFacts(cause), path);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -147,9 +142,17 @@ export const apkSignatureFailure = (
 };
 
 /** Distinguish cancellation, access, integrity and limits for the primary failure. */
-const primaryFailure = (cause: unknown, path: string): AnalysisError => {
-  if (cause instanceof AnalysisError) return cause;
-  if (cause instanceof ArtifactReaderFailure)
+const primaryFailure = (
+  facts: ArtifactFilePrimaryFacts,
+  path: string,
+): AnalysisError => {
+  const { cause, origin } = facts;
+  if (origin === "owned-or-classified" && cause instanceof AnalysisError)
+    return cause;
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure
+  )
     return artifactReaderFailure(cause, path);
   if (cause instanceof Error && "code" in cause) {
     if (cause.code === "EACCES" || cause.code === "EPERM")
@@ -187,7 +190,9 @@ const artifactReaderFailure = (
         cause,
       });
     case "cancelled":
-      return new AnalysisCancelledError(OPERATION, { cause: cause.cause });
+      return new AnalysisCancelledError(OPERATION, {
+        cause: artifactFileCancellationCause(cause),
+      });
     case "limit":
       return new AnalysisResourceConstraintError(
         OPERATION,

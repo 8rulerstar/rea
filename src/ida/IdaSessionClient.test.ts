@@ -6,6 +6,7 @@ import {
   createIdaTarget,
   RecordingIdaMcp,
 } from "../../tests/fixtures/idaMcp.js";
+import { nativeTools } from "./IdaNativeProtocol.js";
 import { IdaSessionClient } from "./IdaSessionClient.js";
 import {
   DEFAULT_REGEX_MATCHING_DEADLINE,
@@ -16,6 +17,8 @@ import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import {
   AnalysisProtocolError,
   AnalysisResourceConstraintError,
+  AnalysisCancelledError,
+  AnalysisTimeoutError,
 } from "../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
@@ -617,7 +620,22 @@ describe("attached IDA function failure handling", () => {
     producer.inputSha256 = "a".repeat(64);
     const mismatch = await client.execute("health", {});
     expect(mismatch.ok).toBe(false);
-    if (!mismatch.ok) expect(mismatch.error.message).toContain("SHA-256");
+    if (!mismatch.ok) {
+      expect(projectAnalysisError(mismatch.error)).toMatchObject({
+        code: "unreadable_output",
+        retryable: false,
+        message: expect.stringContaining("SHA-256"),
+        remediation: { action: expect.stringContaining("headless mode") },
+        details: {
+          operation: "health",
+          diagnostics: {
+            identity_check: "attached_sha256",
+            reason: expect.stringContaining(target.path),
+          },
+        },
+      });
+    }
+    expect(producer.calls.map(({ name }) => name)).toEqual(["get_metadata"]);
     producer.inputSha256 = target.sha256;
     producer.beforeCall = async (name) => {
       if (name === "decompile_function") producer.imageBase = "0x2000";
@@ -753,22 +771,28 @@ describe("headless IDA transient busy health", () => {
     expect(projected.retryable, "the caller may retry").toBe(true);
     expect(
       projected.details,
-      "the observed busy tool is named exactly in the operation",
+      "the timeout is attributed to the requested operation",
     ).toMatchObject({
-      operation: "server_health: headless worker still busy in config_json_get",
+      operation: "health",
       timeout_ms: 300,
     });
     expect(
-      result.error.message,
-      "the error message names the busy tool",
+      projected.message,
+      "the public error message names the busy tool",
     ).toContain("config_json_get");
     expect(
       `${result.error.message} ${projected.message}`,
       "no Hopper wording leaks in",
     ).not.toContain("Hopper");
-    expect(result.error.cause, "the raw busy payload is the cause").toEqual(
-      busy,
-    );
+    expect(
+      result.error.cause,
+      "reattribution preserves the producing timeout",
+    ).toMatchObject({
+      _tag: "AnalysisTimeoutError",
+      operation: "server_health",
+      cause: busy,
+      diagnostics: { busy_tool: "config_json_get" },
+    });
     expect(
       elapsed,
       "the wait runs to the deadline, not less",
@@ -790,10 +814,14 @@ describe("headless IDA transient busy health", () => {
     if (result.ok) throw new Error("expected a busy timeout");
     expect(
       projectAnalysisError(result.error).details,
-      "an omitted busy_tool is reported as exactly unknown",
+      "the public operation stays independent of an omitted busy tool",
     ).toMatchObject({
-      operation: "server_health: headless worker still busy in unknown",
+      operation: "health",
     });
+    expect(result.error.diagnostics).toMatchObject({ busy_tool: "unknown" });
+    expect(projectAnalysisError(result.error).message).toContain(
+      "busy tool was unknown",
+    );
     await expectCleanClose(producer, client);
   });
 
@@ -814,11 +842,12 @@ describe("headless IDA transient busy health", () => {
         projectAnalysisError(result.error).details,
         "only a tool-name-shaped value is repeated",
       ).toMatchObject({
-        operation: "server_health: headless worker still busy in unknown",
+        operation: "health",
       });
+      expect(result.error.diagnostics).toMatchObject({ busy_tool: "unknown" });
       expect(
-        result.error.message,
-        "the producer text never reaches the error message",
+        projectAnalysisError(result.error).message,
+        "the producer text never reaches the public error message",
       ).not.toContain(tool);
       await expectCleanClose(producer, client);
     },
@@ -1896,7 +1925,8 @@ it("retains transport diagnostics on a cancellation regardless of stderr", async
   producer.beforeCall = async (name) => {
     if (name === "list_functions") {
       controller.abort();
-      throw new ProviderAdapterError("ida", "transport", {
+      throw new AnalysisCancelledError("list_functions", {
+        cause: controller.signal.reason,
         diagnostics: { reason: "upstream closed after cancellation" },
         capturedOutput: {
           stdout: "",
@@ -1920,4 +1950,120 @@ it("retains transport diagnostics on a cancellation regardless of stderr", async
     },
   });
   await client.close();
+});
+
+it.each([false, null] as const)(
+  "keeps valid headless readiness %s distinct from malformed output",
+  async (ready) => {
+    const { producer, client } = await fixture("headless");
+    producer.overrideCall = (name) =>
+      name === "server_health"
+        ? {
+            status: "ok",
+            input_path: producer.inputPath,
+            idb_path: `${producer.inputPath}.i64`,
+            module: "target.elf",
+            imagebase: "0x1000",
+            auto_analysis_ready: ready,
+          }
+        : undefined;
+    const result = await client.execute("health", {});
+    if (result.ok) throw new Error("Expected an unready worker refusal");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "capability_unavailable",
+      retryable: ready === false,
+      details: { diagnostics: { auto_analysis_ready: ready } },
+    });
+    delete producer.overrideCall;
+    expect((await client.execute("health", {})).ok).toBe(true);
+    await expectCleanClose(producer, client);
+  },
+);
+
+it.each([false, true])(
+  "preserves an established IDA provider failure with late abort=%s",
+  async (lateAbort) => {
+    const { producer, client } = await fixture("attached");
+    expect((await client.execute("health", {})).ok).toBe(true);
+    const controller = new AbortController();
+    const failure = new ProviderAdapterError("ida", "transport", {
+      diagnostics: { reason: "upstream closed before cancellation" },
+    });
+    producer.beforeCall = async (name) => {
+      if (name !== "list_functions") return;
+      if (lateAbort) queueMicrotask(() => controller.abort({ caller: "late" }));
+      throw failure;
+    };
+    const result = await client.execute(
+      "list_procedures",
+      {},
+      { signal: controller.signal },
+    );
+    if (result.ok) throw new Error("Expected provider failure");
+    expect(projectAnalysisError(result.error)).toMatchObject({
+      code: "execution_failure",
+      details: {
+        operation: "list_procedures",
+        diagnostics: { reason: "upstream closed before cancellation" },
+      },
+    });
+    expect(result.error.cause).toBe(failure);
+    await expectCleanClose(producer, client);
+  },
+);
+
+it.each(["before", "during"] as const)(
+  "preserves the exact caller abort reason %s an IDA operation",
+  async (phase) => {
+    const { producer, client } = await fixture(
+      phase === "before" ? "attached" : "headless",
+    );
+    const controller = new AbortController();
+    const reason = { caller: "selected opaque cancellation" };
+    if (phase === "before") controller.abort(reason);
+    else
+      producer.beforeCall = async (name) => {
+        if (name === "list_funcs") controller.abort(reason);
+      };
+    const result = await client.execute(
+      "list_procedures",
+      {},
+      { signal: controller.signal },
+    );
+    if (result.ok) throw new Error("Expected cancellation");
+    expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(result.error.cause).toBe(reason);
+    if (phase === "before") expect(producer.connects).toBe(0);
+    else
+      expect(result.error.partialObservation).toMatchObject({
+        operation: "list_procedures",
+      });
+    await expectCleanClose(producer, client);
+  },
+);
+
+it("attributes native IDA metadata timeout to the requested analysis operation", async () => {
+  const { producer, client } = await fixture("attached", 1000, "native");
+  producer.tools = [...nativeTools];
+  const timeout = new AnalysisTimeoutError("ida_mcp_read_resource", 40, {
+    diagnostics: { uri: "ida://idb/metadata" },
+  });
+  producer.readResource = async () => {
+    throw timeout;
+  };
+  const result = await client.execute("procedure_pseudo_code", {
+    procedure: "main",
+  });
+  if (result.ok) throw new Error("Expected metadata timeout");
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "provider_timeout",
+    details: {
+      operation: "procedure_pseudo_code",
+      timeout_ms: 40,
+      diagnostics: { uri: "ida://idb/metadata" },
+    },
+    recovery: { operation: "procedure_pseudo_code" },
+  });
+  expect(result.error.cause).toBe(timeout);
+  await expectCleanClose(producer, client);
 });

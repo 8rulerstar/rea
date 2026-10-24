@@ -1,6 +1,6 @@
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import {
-  readPointer,
+  readSlot,
   readUInt32,
   hasPointerArrayCoverage,
   type NativeImage,
@@ -52,8 +52,8 @@ interface TypeStyle {
   readonly byrefBit: number | null;
   /** A class or value type definition by TypeDefinitionIndex. */
   readonly definition: (index: number) => Text;
-  /** The definition part of an Il2CppGenericClass, before its arguments. */
-  readonly genericDefinition: (data: bigint, depth: number) => Text;
+  /** An Il2CppGenericClass with its instance arguments. */
+  readonly genericClass: (data: bigint, depth: number) => Text;
 }
 
 /**
@@ -69,12 +69,26 @@ const createTypeRenderer = (
   const fail = (message: string): never => {
     throw new Il2cppBinaryFormatFailure("invalid-type", message);
   };
-  const pointer = (address: bigint, label: string) =>
-    readPointer(image, address) ??
-    fail(`${label} at 0x${address.toString(16)} is not file mapped`);
-  const u32 = (address: bigint, label: string) =>
-    readUInt32(image, address) ??
-    fail(`${label} at 0x${address.toString(16)} is not file mapped`);
+  const unresolved = (address: bigint, label: string): never => {
+    throw new Il2cppBinaryFormatFailure(
+      "unsupported-pointer-encoding",
+      `${label} at 0x${address.toString(16)} is loader-unresolved; its stored bytes are not a resolved type value`,
+    );
+  };
+  const pointer = (address: bigint, label: string): bigint => {
+    const value = readSlot(image, address);
+    if (value === "unknown") return unresolved(address, label);
+    return (
+      value ?? fail(`${label} at 0x${address.toString(16)} is not file mapped`)
+    );
+  };
+  const u32 = (address: bigint, label: string): number => {
+    const value = readUInt32(image, address);
+    if (value === "unknown") return unresolved(address, label);
+    return (
+      value ?? fail(`${label} at 0x${address.toString(16)} is not file mapped`)
+    );
+  };
   let cachedBytes = 0;
   let work = 0;
   const guard = (bytes: number) => {
@@ -130,22 +144,13 @@ const createTypeRenderer = (
         if (rank === 0) fail("array rank is zero");
         result = join([
           yield* name(pointer(data, "array element"), depth + 1),
-          "[",
-          ",".repeat(rank - 1),
-          "]",
+          rank === 1 ? "[*]" : `[${",".repeat(rank - 1)}]`,
         ]);
       } else if (kind === 0x13 || kind === 0x1e)
         result =
           facts.genericParameterName(index) ??
           fail(`generic parameter ${index} is out of range`);
-      else if (kind === 0x15)
-        result = join([
-          yield* rules.genericDefinition(data, depth),
-          yield* instanceArguments(
-            pointer(data + 8n, "generic class instance"),
-            depth,
-          ),
-        ]);
+      else if (kind === 0x15) result = yield* rules.genericClass(data, depth);
       else
         throw new Il2cppBinaryFormatFailure(
           "unsupported-type-kind",
@@ -162,8 +167,11 @@ const createTypeRenderer = (
       active.delete(address);
     }
   }
-  /** `<A, B>` for one Il2CppGenericInst, reserved before each argument joins. */
-  function* instanceArguments(instance: bigint, depth: number): Text {
+  /** Il2CppGenericInst argument names, reserved before each one is kept. */
+  function* instanceArgumentList(
+    instance: bigint,
+    depth: number,
+  ): Generator<void, string[]> {
     const count = u32(instance, "generic argument count");
     const argv = pointer(instance + 8n, "generic arguments");
     guard(Math.max(count - 1, 0) * 2);
@@ -182,9 +190,14 @@ const createTypeRenderer = (
       guard(bytes);
       args.push(argument);
     }
+    return args;
+  }
+  /** `<A, B>` for one Il2CppGenericInst, reserved before each argument joins. */
+  function* instanceArguments(instance: bigint, depth: number): Text {
+    const args = yield* instanceArgumentList(instance, depth);
     return join(["<", join(args, ", "), ">"]);
   }
-  return { name, instanceArguments, tools };
+  return { name, instanceArgumentList, instanceArguments, tools };
 };
 
 type RenderTools = {
@@ -195,6 +208,22 @@ type RenderTools = {
   readonly join: (parts: readonly string[], separator?: string) => string;
   /** True on every 256th unit of work, when the caller yields. */
   readonly tick: () => boolean;
+};
+
+/** TypeDefinitionIndex of an Il2CppGenericClass's class or value type definition. */
+const genericClassDefinition = (
+  { fail, pointer, u32 }: RenderTools,
+  data: bigint,
+  version: number,
+): number => {
+  if (version < 27) return u32(data, "generic class definition");
+  const definitionType = pointer(data, "generic class type");
+  const definitionData = pointer(definitionType, "generic class definition");
+  const definitionKind =
+    (u32(definitionType + 8n, "generic class type attributes") >>> 16) & 0xff;
+  if (definitionKind !== 0x11 && definitionKind !== 0x12)
+    fail("generic class type is not a class or value type definition");
+  return Number(BigInt.asIntN(32, definitionData & 0xffff_ffffn));
 };
 
 /** Enclosing types outermost first, with the namespace of the outermost. */
@@ -219,6 +248,61 @@ function* declaringChain(
   return { parts: parts.reverse(), namespace };
 }
 
+/** Nested generic definitions take their own slice of the arguments. */
+function* genericDefinitionName(
+  metadata: Il2cppMetadataDecoded,
+  facts: Il2cppMetadataLinkFacts,
+  { fail, join, tick }: RenderTools,
+  index: number,
+  args: readonly string[],
+): Text {
+  if (!Number.isInteger(index) || index < 0 || index >= metadata.types.length)
+    fail(`type definition ${index} is out of range`);
+  const chain: number[] = [];
+  const seen = new Set<number>();
+  for (let at = index; at !== -1;) {
+    if (seen.has(at)) fail(`cyclic declaring type at ${at}`);
+    if (tick()) yield;
+    const type = metadata.types[at];
+    if (type === undefined)
+      return fail(`type definition ${at} is out of range`);
+    seen.add(at);
+    chain.push(at);
+    at = type.declaring_type;
+  }
+
+  let previousArgumentCount = 0;
+  const parts: string[] = [];
+  for (const typeIndex of chain.reverse()) {
+    if (tick()) yield;
+    const type = metadata.types[typeIndex]!;
+    const argumentCount = facts.genericTypeArgumentCounts[typeIndex];
+    if (
+      argumentCount === undefined ||
+      argumentCount < previousArgumentCount ||
+      argumentCount > args.length
+    )
+      return fail(
+        `generic argument count does not match nested type definition ${typeIndex}`,
+      );
+    const componentArguments = args.slice(previousArgumentCount, argumentCount);
+    previousArgumentCount = argumentCount;
+    const name = type.name.replace(/`\d+$/u, "");
+    parts.push(
+      componentArguments.length === 0
+        ? name
+        : join([name, "<", join(componentArguments, ", "), ">"]),
+    );
+  }
+  if (previousArgumentCount !== args.length)
+    fail(
+      `generic argument count ${args.length} does not match nested type definition ${index}`,
+    );
+  const name = join(parts, "+");
+  const namespace = metadata.types[chain[0]!]!.namespace;
+  return namespace === "" ? name : join([namespace, name], ".");
+}
+
 /** Render one snapshot's type graph cooperatively without allocating unchecked expansions. */
 export const createTypeNamer = (
   image: NativeImage,
@@ -241,17 +325,19 @@ export const createTypeNamer = (
       primitives: PRIMITIVES,
       byrefBit: version >= 29 ? 29 : 30,
       definition: definitionName,
-      *genericDefinition(data, depth) {
-        const definition =
-          version >= 27
-            ? yield* renderer.name(
-                tools.pointer(data, "generic class type"),
-                depth + 1,
-              )
-            : yield* definitionName(
-                tools.u32(data, "generic class definition"),
-              );
-        return definition.replace(/`\d+$/u, "");
+      *genericClass(data, depth) {
+        const definition = genericClassDefinition(tools, data, version);
+        const args = yield* renderer.instanceArgumentList(
+          tools.pointer(data + 8n, "generic class instance"),
+          depth,
+        );
+        return yield* genericDefinitionName(
+          metadata,
+          facts,
+          tools,
+          definition,
+          args,
+        );
       },
     };
   });
@@ -333,20 +419,15 @@ export const createMethodSpecNamer = (
         yield* containerParameters(tools, index),
       ]);
     },
-    *genericDefinition(data) {
-      const owner =
-        version >= 27
-          ? Number(
-              BigInt.asIntN(
-                32,
-                tools.pointer(
-                  tools.pointer(data, "generic class type"),
-                  "generic class definition",
-                ) & 0xffffffffn,
-              ),
-            )
-          : tools.u32(data, "generic class definition");
-      return yield* nestedName(tools, owner, false);
+    *genericClass(data, depth) {
+      const owner = genericClassDefinition(tools, data, version);
+      return tools.join([
+        yield* nestedName(tools, owner, false),
+        yield* renderer.instanceArguments(
+          tools.pointer(data + 8n, "generic class instance"),
+          depth,
+        ),
+      ]);
     },
   }));
   const { tools } = renderer;

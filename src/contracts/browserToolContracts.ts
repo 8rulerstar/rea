@@ -143,8 +143,17 @@ const exampleScenarioCapture = () => ({
       network_transaction_range: null,
     },
   },
-  completeness: scenarioCompleteness,
-  limitations: [],
+  completeness: {
+    status: "incomplete",
+    equality_eligible: false,
+    missing_sections: ["events"],
+    truncated_sections: [],
+  },
+  limitations: [
+    "CDP attachment cannot recover pre-attach events or guarantee launch-time context options.",
+    "Attached locale en-US applies to Intl formatting only; navigator.language(s) and Accept-Language remain caller-controlled. Use launch mode for matching page and request languages.",
+    "Detaching a CDP page session may clear caller-owned navigator.platform emulation. REA cannot snapshot the caller's complete user-agent/client-hint state before attachment; use launch mode to avoid mutating that external browser.",
+  ],
 });
 
 /** Passive browser reverse-engineering contracts. */
@@ -314,10 +323,10 @@ export const BROWSER_TOOL_CONTRACTS = [
 
 function exampleScreenshot() {
   return {
-    sha256: "153cf6c9a526a63053a37b10234c2fd85df38887c2dc0a800d90abfa6631d01c",
+    sha256: "cdb30873bdf16770bfea1fe86e44db7476e504c2dca1542b0660b20f47f523a7",
     bytes: 70,
     media_type: "image/png",
     data_base64:
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PzWvWQAAAABJRU5ErkJggg==",
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
   };
 }

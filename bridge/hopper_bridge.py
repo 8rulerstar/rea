@@ -324,20 +324,27 @@ def _name_matches(document, address, name):
     return observed == name or (not name and observed is None)
 
 
-def _bookmark_name(document, address):
-    getter = getattr(document, "getBookmarkName", None)
-    if not callable(getter):
+def _bookmark_api(document, name):
+    method = getattr(document, name, None)
+    if not callable(method):
         raise CapabilityUnavailableError(
-            "Hopper's public Python API does not expose getBookmarkName"
+            "Hopper's public Python API does not expose %s" % name
         )
-    return getter(address)
+    return method
 
 
-def _address(document, value=None):
-    """Keep explicit hexadecimal coordinates distinct from symbol names."""
+def _bookmark_name(document, address):
+    return _bookmark_api(document, "getBookmarkName")(address)
+
+
+def _address_selection(document, value=None):
+    """Own the coordinate and whether it was selected by symbol or address."""
     if value is None:
-        return document.getCurrentAddress()
+        return document.getCurrentAddress(), "cursor"
     _api_text(value, "Address")
+    if value.startswith("file-offset:"):
+        raise InvalidRequestError("Hopper does not support file-offset: selectors; select Ghidra for source-file coordinates or use a Hopper analysis address")
+    source = "address"
     if value.lower().startswith("0x"):
         try:
             address = int(value, 16)
@@ -348,6 +355,8 @@ def _address(document, value=None):
         # Prefer an observed symbol, retaining bare-hex compatibility only
         # when Hopper has no symbol with the supplied name.
         address = document.getAddressForName(value)
+        if address not in BAD_ADDRESSES:
+            source = "symbol"
         if address in BAD_ADDRESSES:
             try:
                 address = int(value, 16)
@@ -355,7 +364,11 @@ def _address(document, value=None):
                 raise InvalidRequestError("Unknown Hopper address or name: %s" % value) from error
     if not 0 <= address < 0xFFFFFFFFFFFFFFFF:
         raise InvalidRequestError("Address is outside Hopper's usable unsigned 64-bit range: %s" % value)
-    return address
+    return address, source
+
+
+def _address(document, value=None):
+    return _address_selection(document, value)[0]
 
 
 def _segment(document, address):
@@ -366,10 +379,15 @@ def _segment(document, address):
 
 
 def _procedure(document, value=None):
-    address = document.getCurrentAddress() if value is None else _address(document, value)
+    address, source = _address_selection(document, value)
     result = _segment(document, address).getProcedureAtAddress(address)
     if result is None:
         raise InvalidRequestError("No procedure exists at the requested address")
+    if source == "symbol" and address != result.getEntryPoint():
+        raise InvalidRequestError(
+            "Symbol %s at %s is inside procedure %s at %s; select its entry name/address or use resolve_containing_procedure for explicit containment"
+            % (value, _hex(address), _procedure_name(result), _hex(result.getEntryPoint()))
+        )
     return result
 
 
@@ -382,6 +400,7 @@ def _procedure_identity(procedure):
     return {
         "address": _hex(procedure.getEntryPoint()),
         "name": _procedure_name(procedure),
+        "symbol": None,
         "classification": None,
         "body": {
             "available": False,
@@ -1052,6 +1071,7 @@ def _dispatch(method, params):
             length = sum(max(0, _basic_block_end(procedure, block) - block.getStartingAddress()) for block in blocks)
             return {
                 "name": _procedure_name(procedure),
+                "symbol": None,
                 "entrypoint": _hex(procedure.getEntryPoint()),
                 "basicblock_count": procedure.getBasicBlockCount(),
                 "length": length,
@@ -1092,39 +1112,24 @@ def _dispatch(method, params):
         observed = getter(address)
         return observed == comment or (comment == "" and observed is None)
     if method == "list_bookmarks":
-        return [{"address": _hex(item), "name": _bookmark_name(document, item)} for item in document.getBookmarks()]
+        return [{"address": _hex(item), "name": _bookmark_name(document, item)} for item in _bookmark_api(document, "getBookmarks")()]
     if method == "set_bookmark":
         address = _address(document, params.get("address"))
         _segment(document, address)
         name = params.get("name")
         if name is not None:
             _api_text(name, "Bookmark name")
-        has_bookmark = getattr(document, "hasBookmarkAtAddress", None)
-        if not callable(has_bookmark):
-            raise CapabilityUnavailableError(
-                "Hopper's public Python API does not expose hasBookmarkAtAddress"
-            )
+        has_bookmark = _bookmark_api(document, "hasBookmarkAtAddress")
         exists = has_bookmark(address)
         if name is None and exists:
             # Omission means preserve the existing bookmark and its name.
             return True
-        if not callable(getattr(document, "getBookmarkName", None)):
-            raise CapabilityUnavailableError(
-                "Hopper's public Python API does not expose getBookmarkName"
-            )
+        _bookmark_api(document, "getBookmarkName")
         if name == "" and exists:
-            rename = getattr(document, "renameBookmarkAtAddress", None)
-            if not callable(rename):
-                raise CapabilityUnavailableError(
-                    "Hopper's public Python API does not expose renameBookmarkAtAddress"
-                )
+            rename = _bookmark_api(document, "renameBookmarkAtAddress")
             rename(address, name)
         else:
-            setter = getattr(document, "setBookmarkAtAddress", None)
-            if not callable(setter):
-                raise CapabilityUnavailableError(
-                    "Hopper's public Python API does not expose setBookmarkAtAddress"
-                )
+            setter = _bookmark_api(document, "setBookmarkAtAddress")
             setter(address, name)
         if not has_bookmark(address):
             return False
@@ -1136,10 +1141,12 @@ def _dispatch(method, params):
         address = _address(document, params.get("address"))
         # Permit removing a legacy orphan bookmark, but do not report success
         # for an unmapped address with no bookmark to remove.
-        if not document.hasBookmarkAtAddress(address):
+        has_bookmark = _bookmark_api(document, "hasBookmarkAtAddress")
+        remove_bookmark = _bookmark_api(document, "removeBookmarkAtAddress")
+        if not has_bookmark(address):
             _segment(document, address)
-        document.removeBookmarkAtAddress(address)
-        return not document.hasBookmarkAtAddress(address)
+        remove_bookmark(address)
+        return not has_bookmark(address)
     raise InvalidRequestError("Unknown bridge method")
 
 

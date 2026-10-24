@@ -40,6 +40,8 @@ const entryBaseShape = {
   path: relativePathSchema,
   classifications: z.array(classificationSchema).min(1),
   limitations: z.array(boundedTextSchema),
+  // Host presentation is retained evidence, separate from relocatable semantics.
+  local_diagnostics: z.array(boundedTextSchema).exactOptional(),
 };
 
 const sourceFileBaseShape = {
@@ -119,6 +121,7 @@ const sourceEntrySchema = z.union([
 const sourceRelationshipSchema = z.strictObject({
   from_path: relativePathSchema,
   to: z.string().min(1),
+  source_specifier: z.string().min(1).exactOptional(),
   kind: z.enum(["imports", "requires", "references", "declares-module"]),
   resolution: z.enum(["internal", "external", "unresolved", "unknown"]),
   parse_state: z.enum(["parsed", "partial", "unknown"]),
@@ -275,7 +278,7 @@ export const historicalSourceParseFailureKey = (
 export const historicalSourceRelationshipKey = (
   relationship: HistoricalSourceGraphInput["relationships"][number],
 ): string =>
-  `${relationship.from_path}\u0000${relationship.to}\u0000${relationship.kind}\u0000${relationship.resolution}\u0000${relationship.parse_state}`;
+  `${relationship.from_path}\u0000${relationship.to}\u0000${relationship.kind}\u0000${relationship.resolution}\u0000${relationship.parse_state}${relationship.source_specifier === undefined ? "" : `\u0000${relationship.source_specifier}`}`;
 
 const checkSortedUnique = (
   values: readonly string[],
@@ -569,10 +572,17 @@ export const parseHistoricalSourceGraph = (
   input: unknown,
 ): HistoricalSourceGraph => historicalSourceGraphSchema.parse(input);
 
-/** Compute a deterministic graph commitment containing no absolute root path. */
-export const computeHistoricalSourceGraphSha256 = (input: unknown): string =>
+/** Commit semantic graph facts while retaining host-local diagnostic metadata separately. */
+const computeHistoricalSourceGraphSha256 = (
+  graph: HistoricalSourceGraph,
+): string =>
   digestCanonicalValue(
-    parseHistoricalSourceGraph(input),
+    {
+      ...graph,
+      entries: graph.entries.map(
+        ({ local_diagnostics: _local, ...entry }) => entry,
+      ),
+    },
     "Reference source graph",
   );
 
@@ -594,18 +604,4 @@ export const createHistoricalSourceManifest = (
     ...semantic,
     manifest_id: `hsm_${digestCanonicalValue(semantic, "Reference source graph")}`,
   });
-};
-
-/** Parse and verify a historical source manifest's semantic identifier. */
-export const parseHistoricalSourceManifest = (
-  input: unknown,
-): HistoricalSourceManifest => {
-  const manifest = historicalSourceManifestBaseSchema.parse(input);
-  const { manifest_id: manifestId, ...semantic } = manifest;
-  if (
-    `hsm_${digestCanonicalValue(semantic, "Reference source graph")}` !==
-    manifestId
-  )
-    throw new TypeError("Historical source manifest identifier does not match");
-  return manifest;
 };

@@ -7,7 +7,8 @@ import { createAnalysisProfile } from "../../domain/analysisProfile.js";
 import { functionDossierSchema } from "../../domain/hopperValues.js";
 import { procedureInfoSchema } from "../../domain/native/procedureInfo.js";
 import {
-  nativeMatchingInventory,
+  nativeMatchingNamedInventory as nativeMatchingInventory,
+  nativeMatchingInventory as unqualifiedInventory,
   nativeMatchingDetails,
   nativeMatchingTarget,
   nativeMatchingProvider,
@@ -81,10 +82,10 @@ it("retains transitive provenance without treating dependencies as native observ
 });
 
 it("keeps symbol origin unknown when supplied metadata describes a different same-address alias", async () => {
-  const left = nativeMatchingInventory("1", [
+  const left = unqualifiedInventory("1", [
     { address: "0x10", value: "reported_name" },
   ]);
-  const right = nativeMatchingInventory("2", [
+  const right = unqualifiedInventory("2", [
     { address: "0x20", value: "reported_name" },
   ]);
   const alias = createEvidence(
@@ -109,13 +110,14 @@ it("keeps symbol origin unknown when supplied metadata describes a different sam
     },
   );
   const { report } = await compare({ left, right, left_observations: [alias] });
-  expect(report.summary.matched).toBe(1);
-  expect(report.matches[0]?.left[0]?.limitations).toContain(
-    "Symbol origin unavailable; exact-name matching uses the reported name and the existing automatic-name exclusion rule.",
+  expect(report.summary.matched).toBe(0);
+  const member = report.matches
+    .flatMap((match) => match.left)
+    .find((value) => value.address === "0x10");
+  expect(member?.limitations).toContain(
+    "Symbol origin unavailable; exact-name matching is unavailable. Independent complete body bytes remain eligible.",
   );
-  expect(report.matches[0]?.left[0]?.evidence_links).toContain(
-    alias.evidence_id,
-  );
+  expect(member?.evidence_links).toContain(alias.evidence_id);
 });
 
 it("preserves contradictory symbol origins from inventory/name facts or multiple name observations, independently of byte correspondence", async () => {
@@ -181,112 +183,152 @@ it("preserves contradictory symbol origins from inventory/name facts or multiple
   }
 });
 
-it("keeps informative CFG/call/string fingerprints as unresolved candidates and refuses incomplete structural observations", async () => {
-  const profile = createAnalysisProfile(nativeMatchingProvider, {
-    fixture: "structural-candidates-v1",
-  });
-  const observe = (
-    side: "1" | "2",
-    operation: string,
-    result: Parameters<typeof createEvidence>[2]["result"],
-    complete = true,
-  ) =>
-    createEvidence(nativeMatchingTarget(side), nativeMatchingProvider, {
-      operation,
-      parameters: {},
-      result,
-      analysisProfile: profile,
-      relationshipCoverage: complete
-        ? { status: "complete" }
-        : { status: "unknown", reason: "Missing direct call coverage" },
+it.each(["", "ram:"])(
+  "keeps informative %s CFG/call/string fingerprints as unresolved candidates and refuses incomplete structural observations",
+  async (space) => {
+    const profile = createAnalysisProfile(nativeMatchingProvider, {
+      fixture: "structural-candidates-v1",
     });
-  const left = observe("1", "list_procedures", [
-    { address: "0x10", value: "old_behavior" },
-  ]);
-  const right = observe("2", "list_procedures", [
-    { address: "0x20", value: "new_behavior" },
-  ]);
-  const dossier = (side: "1" | "2", address: string) => {
-    const value = functionDossierSchema.parse(
-      nativeMatchingDetails(side, address, "0102", true)[0]!.normalized_result,
+    const observe = (
+      side: "1" | "2",
+      operation: string,
+      result: Parameters<typeof createEvidence>[2]["result"],
+      complete = true,
+    ) =>
+      createEvidence(nativeMatchingTarget(side), nativeMatchingProvider, {
+        operation,
+        parameters: {},
+        result,
+        analysisProfile: profile,
+        relationshipCoverage: complete
+          ? { status: "complete" }
+          : { status: "unknown", reason: "Missing direct call coverage" },
+      });
+    const left = observe("1", "list_procedures", [
+      { address: `${space}0x10`, value: "old_behavior" },
+    ]);
+    const right = observe("2", "list_procedures", [
+      { address: `${space}0x20`, value: "new_behavior" },
+    ]);
+    const dossier = (side: "1" | "2", address: string) => {
+      const value = functionDossierSchema.parse(
+        nativeMatchingDetails(side, address, "0102", true)[0]!
+          .normalized_result,
+      );
+      value.basic_blocks = [
+        {
+          start: address,
+          end: `0x${(BigInt(address) + 2n).toString(16)}`,
+          successors: [],
+        },
+      ];
+      value.callees = [
+        {
+          address: "0x500",
+          name: "puts",
+          symbol: {
+            primary: true,
+            dynamic: false,
+            external: true,
+            type: "function",
+            source: "imported",
+          },
+          classification: null,
+          body: { available: false, reason: "Synthetic external target" },
+        },
+      ];
+      value.unresolved_calls = [];
+      value.referenced_strings = [
+        { address: "0x900", value: "marker", source_address: address },
+      ];
+      value.procedure.address = `${space}${address}`;
+      if (value.procedure.body.available)
+        value.procedure.body.ranges = value.procedure.body.ranges.map(
+          (range) => ({
+            start: `${space}${range.start}`,
+            end: `${space}${range.end}`,
+          }),
+        );
+      value.basic_blocks = value.basic_blocks.map((block) => ({
+        start: `${space}${block.start}`,
+        end: `${space}${block.end}`,
+        successors: block.successors.map((successor) => `${space}${successor}`),
+      }));
+      value.referenced_strings[0]!.source_address = `${space}${address}`;
+      return value;
+    };
+    const l = dossier("1", "0x10"),
+      r = dossier("2", "0x20");
+    const { report } = await compare({
+      left,
+      right,
+      left_observations: [observe("1", "analyze_function", l)],
+      right_observations: [observe("2", "analyze_function", r)],
+    });
+    expect(report.summary).toEqual({
+      matched: 0,
+      only_left: 0,
+      only_right: 0,
+      unresolved: 1,
+    });
+    expect(report.matches[0]?.left[0]?.structural_candidate_sha256).toMatch(
+      /^[a-f0-9]{64}$/u,
     );
-    value.basic_blocks = [
-      {
-        start: address,
-        end: `0x${(BigInt(address) + 2n).toString(16)}`,
-        successors: [],
-      },
-    ];
-    value.callees = [
-      {
-        address: "0x500",
-        name: "puts",
-        classification: null,
-        body: { available: false, reason: "Synthetic external target" },
-      },
-    ];
-    value.unresolved_calls = [];
-    value.referenced_strings = [
-      { address: "0x900", value: "marker", source_address: address },
-    ];
-    return value;
-  };
-  const l = dossier("1", "0x10"),
-    r = dossier("2", "0x20");
-  const { report } = await compare({
-    left,
-    right,
-    left_observations: [observe("1", "analyze_function", l)],
-    right_observations: [observe("2", "analyze_function", r)],
-  });
-  expect(report.summary).toEqual({
-    matched: 0,
-    only_left: 0,
-    only_right: 0,
-    unresolved: 1,
-  });
-  expect(report.matches[0]?.left[0]?.structural_candidate_sha256).toMatch(
-    /^[a-f0-9]{64}$/u,
-  );
-  expect(report.matches[0]?.left[0]?.structural_candidate_sha256).toBe(
-    report.matches[0]?.right[0]?.structural_candidate_sha256,
-  );
-  expect(report.matches[0]?.compare_functions_input).toBeNull();
-  const incomplete = await compare({
-    left,
-    right,
-    left_observations: [observe("1", "analyze_function", l, false)],
-    right_observations: [observe("2", "analyze_function", r)],
-  });
-  expect(incomplete.report.summary.unresolved).toBe(0);
-  expect(incomplete.report.source_coverage.left_structural_candidates).toBe(0);
-  const legacy = { ...l };
-  delete legacy.facet_availability;
-  const missingFacets = await compare({
-    left,
-    right,
-    left_observations: [observe("1", "analyze_function", legacy)],
-    right_observations: [observe("2", "analyze_function", r)],
-  });
-  expect(missingFacets.report.source_coverage.left_structural_candidates).toBe(
-    0,
-  );
-  expect(missingFacets.report.summary.unresolved).toBe(0);
-  l.callees = [];
-  l.referenced_strings = [];
-  r.callees = [];
-  r.referenced_strings = [];
-  const uninformative = await compare({
-    left,
-    right,
-    left_observations: [observe("1", "analyze_function", l)],
-    right_observations: [observe("2", "analyze_function", r)],
-  });
-  expect(uninformative.report.source_coverage.left_structural_candidates).toBe(
-    0,
-  );
-  expect(uninformative.report.summary.unresolved).toBe(0);
-});
+    expect(report.matches[0]?.left[0]?.structural_candidate_sha256).toBe(
+      report.matches[0]?.right[0]?.structural_candidate_sha256,
+    );
+    expect(report.matches[0]?.compare_functions_input).toBeNull();
+    const unknownOrigin = dossier("1", "0x10");
+    if (unknownOrigin.callees[0] === undefined)
+      throw new Error("Missing fixture callee");
+    unknownOrigin.callees[0].symbol = null;
+    const unqualified = await compare({
+      left,
+      right,
+      left_observations: [observe("1", "analyze_function", unknownOrigin)],
+      right_observations: [observe("2", "analyze_function", r)],
+    });
+    expect(unqualified.report.source_coverage.left_structural_candidates).toBe(
+      0,
+    );
+    const incomplete = await compare({
+      left,
+      right,
+      left_observations: [observe("1", "analyze_function", l, false)],
+      right_observations: [observe("2", "analyze_function", r)],
+    });
+    expect(incomplete.report.summary.unresolved).toBe(0);
+    expect(incomplete.report.source_coverage.left_structural_candidates).toBe(
+      0,
+    );
+    const legacy = { ...l };
+    delete legacy.facet_availability;
+    const missingFacets = await compare({
+      left,
+      right,
+      left_observations: [observe("1", "analyze_function", legacy)],
+      right_observations: [observe("2", "analyze_function", r)],
+    });
+    expect(
+      missingFacets.report.source_coverage.left_structural_candidates,
+    ).toBe(0);
+    expect(missingFacets.report.summary.unresolved).toBe(0);
+    l.callees = [];
+    l.referenced_strings = [];
+    r.callees = [];
+    r.referenced_strings = [];
+    const uninformative = await compare({
+      left,
+      right,
+      left_observations: [observe("1", "analyze_function", l)],
+      right_observations: [observe("2", "analyze_function", r)],
+    });
+    expect(
+      uninformative.report.source_coverage.left_structural_candidates,
+    ).toBe(0);
+    expect(uninformative.report.summary.unresolved).toBe(0);
+  },
+);
 
 it("matches symbols before bytes, retains exact renamed bytes, changed pairs, unpaired observations and duplicate candidates", async () => {
   const left = nativeMatchingInventory("1", [
@@ -617,8 +659,8 @@ it("does not use generated symbols and preserves literal named FUN_ symbols when
       })),
     });
   const { report } = await compare({
-    left: nativeMatchingInventory("1", entries),
-    right: nativeMatchingInventory("2", entries),
+    left: unqualifiedInventory("1", entries),
+    right: unqualifiedInventory("2", entries),
     left_observations: [names("1")],
     right_observations: [names("2")],
   });
@@ -649,7 +691,8 @@ it("assigns source authentication, role selection, context, and lookup failures 
         right: left,
         left_observations: nativeMatchingDetails("2", "0x10", "c3"),
       },
-      tag: "EvidenceIntegrityError",
+      tag: "AnalysisInputError",
+      path: ["left_observations", 0],
     },
     {
       input: {
@@ -953,5 +996,78 @@ it("retains zero-byte reads with unavailable addresses when no request coordinat
   expect(result.value.evidence.evidence_links).toContain(emptyRead.evidence_id);
   expect(result.value.sources.map((source) => source.evidence_id)).toContain(
     emptyRead.evidence_id,
+  );
+});
+
+it.each(["left_observations", "right_observations"] as const)(
+  "reports authentic mismatched provider/profile/document selections at %s without reauthentication advice",
+  async (field) => {
+    const inventory = nativeMatchingInventory("1", [
+      { address: "0x10", value: "main" },
+    ]);
+    const detail = nativeMatchingDetails("1", "0x10", "c3")[0]!;
+    const variants = [
+      createEvidence(
+        nativeMatchingTarget("1"),
+        { ...nativeMatchingProvider, version: "other" },
+        {
+          operation: detail.operation,
+          parameters: detail.parameters,
+          result: detail.normalized_result,
+        },
+      ),
+      createEvidence(nativeMatchingTarget("1"), nativeMatchingProvider, {
+        operation: detail.operation,
+        parameters: detail.parameters,
+        result: detail.normalized_result,
+        analysisProfile: createAnalysisProfile(nativeMatchingProvider, {
+          loader: "different",
+        }),
+      }),
+      createEvidence(nativeMatchingTarget("1"), nativeMatchingProvider, {
+        operation: detail.operation,
+        parameters: { ...detail.parameters, document: "another-document" },
+        result: detail.normalized_result,
+      }),
+    ];
+    for (const observation of variants) {
+      const result = await matchNativeFunctions({
+        left: inventory,
+        right: inventory,
+        [field]: [detail, observation],
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: { _tag: "AnalysisInputError", issues: [{ path: [field, 1] }] },
+      });
+    }
+    const restored = await compare({
+      left: inventory,
+      right: inventory,
+      [field]: [detail],
+    });
+    expect(restored.report.summary.matched).toBe(1);
+  },
+);
+
+it("does not propose exact-symbol correspondence from unqualified EntryPoint labels", async () => {
+  const { report } = await compare({
+    left: unqualifiedInventory("1", [{ address: "0x10", value: "EntryPoint" }]),
+    right: unqualifiedInventory("2", [
+      { address: "0x20", value: "EntryPoint" },
+    ]),
+  });
+  expect(report.summary.matched).toBe(0);
+  expect(
+    report.matches.flatMap((match) => [...match.left, ...match.right]),
+  ).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        name: "EntryPoint",
+        limitations: expect.arrayContaining([
+          "Symbol origin unavailable; exact-name matching is unavailable. Independent complete body bytes remain eligible.",
+        ]),
+      }),
+    ]),
   );
 });

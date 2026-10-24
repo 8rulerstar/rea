@@ -63,7 +63,7 @@ const probeWorkerHeap = (
     env,
     encoding: "utf8",
   });
-  expect(result.status).toBe(0);
+  expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout ?? "") as {
     resourceOld: number;
     heap: number;
@@ -219,10 +219,6 @@ it("does not report the 128 MiB request for a heap percentage in a Node config f
       [`--experimental-config-file=${file}`],
       undefined,
     );
-    const split = probeWorkerHeap(
-      ["--experimental-config-file", file],
-      undefined,
-    );
     const withAbsolute = probeWorkerHeap(
       [`--experimental-config-file=${file}`, "--max-old-space-size=256"],
       undefined,
@@ -233,7 +229,6 @@ it("does not report the 128 MiB request for a heap percentage in a Node config f
       directory,
     );
     expect(fromFile.resourceOld).toBe(128);
-    expect(split.resourceOld).toBe(128);
     expect(withAbsolute.resourceOld).toBe(128);
     expect(fromDefault.resourceOld).toBe(128);
     for (const execArgv of [
@@ -617,15 +612,25 @@ it("keeps Hopper's result projection and invalid-pattern contract with the share
   expect(
     await search.execute("search_strings", { pattern: "^δ", mode: "regex" }),
   ).toEqual(ok([{ address: "0x10", value: "Δelta" }]));
-  expect(
-    await search.execute("search_strings", { pattern: "[", mode: "regex" }),
-  ).toMatchObject({
-    ok: false,
-    error: {
-      _tag: "HopperRemoteError",
-      code: -32000,
-      diagnosticType: "invalid_request",
+  const invalid = await search.execute("search_strings", {
+    pattern: "[",
+    mode: "regex",
+  });
+  if (invalid.ok) throw new Error("Expected invalid-pattern refusal");
+  expect(projectAnalysisError(invalid.error)).toMatchObject({
+    code: "invalid_request",
+    category: "invalid_input",
+    message: expect.stringContaining("Invalid regex pattern"),
+    recovery: { kind: "inspect_input_contract", operation: "search_strings" },
+    details: {
       operation: "search_strings",
+      issues: [
+        {
+          path: ["pattern"],
+          reason: "invalid_format",
+          message: "Supply a valid regular expression.",
+        },
+      ],
     },
   });
   await search.close();

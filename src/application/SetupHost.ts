@@ -11,6 +11,7 @@ import { ConfigurationError } from "../domain/configurationErrors.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
 import {
   invokingPackageRunner,
+  registrationEntrypointPath,
   packageRunnerRegistrationCommand,
   type PackageRunner,
 } from "./ClientRegistrationIdentity.js";
@@ -26,7 +27,7 @@ import {
   type LinuxHopperInstallHost,
 } from "./LinuxHopper.js";
 import { installMacHopper, systemMacHopperInstallHost } from "./MacHopper.js";
-import { linuxHopperReleaseCacheDirectory } from "./LinuxHopperPublisher.js";
+import { linuxHopperReleaseCacheDirectory } from "./LinuxHopperCacheDirectory.js";
 import {
   clientEvidencePaths,
   supportedClients,
@@ -69,13 +70,17 @@ export const setupRegistrationCommand = (
   platform: NodeJS.Platform,
   packageRunner: PackageRunner | undefined,
   entrypointPath: string | undefined,
+  environment: Readonly<NodeJS.ProcessEnv> = {},
 ): readonly string[] => {
   if (packageRunner !== undefined)
     return packageRunnerRegistrationCommand(packageRunner, platform);
   if (entrypointPath === undefined || entrypointPath.length === 0) return [];
   return platform === "win32"
     ? [process.execPath, entrypointPath, "mcp"]
-    : [entrypointPath, "mcp"];
+    : [
+        registrationEntrypointPath(entrypointPath, environment, platform),
+        "mcp",
+      ];
 };
 
 /**
@@ -91,6 +96,7 @@ const setupRegistration = (
     platform,
     invokingPackageRunner(environment, platform),
     CURRENT_ENTRYPOINT_PATH,
+    environment,
   );
   const registrationCommandBlocker =
     registrationCommand.length === 0
@@ -213,7 +219,10 @@ export const systemSetupHost = (
         );
         const detail =
           result.verificationFailure?.message ??
-          result.pythonRuntimeFailure?.message;
+          result.pythonRuntimeFailure?.message ??
+          (result.operationFailure === undefined
+            ? undefined
+            : `${result.operationFailure.operation}${result.operationFailure.path === undefined ? "" : ` at ${result.operationFailure.path}`}: ${result.operationFailure.systemCode === undefined ? "" : `${result.operationFailure.systemCode}: `}${result.operationFailure.detail}`);
         return detail !== undefined
           ? {
               ...failure,

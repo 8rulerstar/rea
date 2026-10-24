@@ -1,4 +1,6 @@
+import { PCAP_CAPTURE_UNSUPPORTED_HOST_REASON } from "../domain/pcap/pcapAnalysis.js";
 import { DEFAULT_CALL_RELATIONSHIP_DIRECTION } from "../contracts/enhancedInputs.js";
+import { FIRMWARE_TOOL_REQUIREMENTS } from "../contracts/firmware/firmwareToolRequirements.js";
 import { CALL_RELATIONSHIP_TRAVERSALS } from "./CallRelationshipTraversal.js";
 import { NATIVE_DISPATCH_METADATA_SOURCES } from "./native/NativeDispatchMetadataInspection.js";
 import { NATIVE_UI_ACTION_OPERATIONS } from "./native/NativeUiActionTrace.js";
@@ -23,6 +25,10 @@ import {
   type ToolAvailabilityMode,
   type ToolUnavailabilityReason,
 } from "../contracts/toolOutputSchemaPrimitives.js";
+import {
+  annotationsFromEffects,
+  type ToolEffects,
+} from "../contracts/toolEffects.js";
 import type { ToolKind } from "../contracts/toolContractTypes.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import { isMachOFormat } from "../domain/binaryTargetTypes.js";
@@ -31,13 +37,17 @@ import type {
   ProviderAvailability,
 } from "./AnalysisProvider.js";
 import type { JebAnalysisAvailability } from "./jeb/JebAnalysisPort.js";
-import { TOOL_CONTRACTS } from "../contracts/toolContracts.js";
 import { FRIDA_TOOL_CONTRACTS } from "../contracts/fridaToolContracts.js";
+import { TOOL_CONTRACTS } from "../contracts/toolContracts.js";
 import {
   clientRequirementsFor,
   NO_CLIENT_FEATURES,
 } from "./CapabilityClientRequirements.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
+
+const FRIDA_OPERATION_NAMES: ReadonlySet<string> = new Set(
+  FRIDA_TOOL_CONTRACTS.map(({ name }) => name),
+);
 
 const statusSchema = z.object({
   open: z.boolean(),
@@ -55,6 +65,7 @@ type ProviderDescriptor = ProviderCapability;
 /** Optional integrations whose verified hosts exclude some platforms. */
 export const HOST_RESTRICTED_FEATURES = [
   "packetCapture",
+  "pcapCapture",
   "signalRecording",
   "evmInterface",
   "binaryLayout",
@@ -118,6 +129,7 @@ type AvailabilityContext = {
   readonly name: string;
   readonly kind: ToolKind;
   readonly targetOpen: boolean;
+  readonly requiresActiveTarget: boolean;
   readonly targetKind:
     | "executable"
     | "database"
@@ -189,6 +201,7 @@ const ENHANCED_REQUIREMENTS: ReadonlyMap<string, ProviderComposition> = new Map(
     get_objc_classes: ["list_names"],
     get_objc_protocols: ["list_names"],
     batch_decompile: ["procedure_pseudo_code"],
+    decompile_all: ["list_procedures", "procedure_pseudo_code"],
     get_call_graph: CALL_RELATIONSHIP_COMPOSITION,
     trace_call_path: CALL_RELATIONSHIP_COMPOSITION,
     analyze_swift_types: ["list_procedures"],
@@ -207,17 +220,6 @@ const ENHANCED_REQUIREMENTS: ReadonlyMap<string, ProviderComposition> = new Map(
       "resolve_containing_procedure",
     ],
   } satisfies Readonly<Record<EnhancedContractName, ProviderComposition>>),
-);
-
-/** Contract kinds whose operations run on the active session target. */
-const ACTIVE_TARGET_KINDS: ReadonlySet<ToolKind> = new Set([
-  "official-proxy",
-  "enhanced",
-  "native-provider",
-  "artifact-provider",
-]);
-const FRIDA_OPERATION_NAMES: ReadonlySet<string> = new Set(
-  FRIDA_TOOL_CONTRACTS.map(({ name }) => name),
 );
 
 /** Native contracts defined only for an active Mach-O executable. */
@@ -260,6 +262,9 @@ export const buildCapabilityInventory = (
       name: contract.name,
       kind: contract.kind,
       targetOpen: status.open,
+      requiresActiveTarget:
+        "requiresActiveTarget" in contract &&
+        contract.requiresActiveTarget === true,
       targetKind: status.kind,
       targetFormat: status.format,
       descriptors,
@@ -270,6 +275,12 @@ export const buildCapabilityInventory = (
       clientFeatures,
     );
     const clientBlocked = clientRequirements.missing_required.length > 0;
+    const effects = composedEffects(
+      contract.name,
+      contract.effects,
+      status.capabilities,
+    );
+    const annotations = annotationsFromEffects(effects);
     const facts = {
       name: contract.name,
       surface: contract.kind,
@@ -280,12 +291,12 @@ export const buildCapabilityInventory = (
         ? {}
         : { modes: [...availability.modes] }),
       client_requirements: clientRequirements,
-      effects: { ...contract.effects },
+      effects,
       annotations: {
-        read_only: contract.annotations.readOnlyHint ?? false,
-        destructive: contract.annotations.destructiveHint ?? false,
-        idempotent: contract.annotations.idempotentHint ?? false,
-        open_world: contract.annotations.openWorldHint ?? true,
+        read_only: annotations.readOnlyHint,
+        destructive: annotations.destructiveHint,
+        idempotent: annotations.idempotentHint,
+        open_world: annotations.openWorldHint,
       },
     };
     if (clientBlocked)
@@ -373,12 +384,14 @@ const availabilityFor = (context: AvailabilityContext): Availability => {
     context.name === "inspect_web_event_listeners"
   )
     return { reason: "available", remediation: null };
-  if (context.name === "get_navigation_context")
-    return availabilityForModes(
+  if (context.name === "get_navigation_context") {
+    const modes = availabilityForModes(
       NAVIGATION_CONTEXT_MODES,
       "current_selection",
       context.descriptors,
     );
+    return { ...modes, ...targetAvailability(context) };
+  }
   const javascriptApplication = javascriptApplicationAvailability(context);
   if (javascriptApplication !== null) return javascriptApplication;
   const failure = optionalProviderFailureFor(context);
@@ -516,7 +529,7 @@ const workflowAvailabilityFor = ({
         };
   if (name === "inspect_pe_resources" || name === "inspect_native_exports")
     return { reason: "available", remediation: null };
-  if (name === "inspect_pe_certificates")
+  if (name === "inspect_pe_certificates" || name === "inspect_pe_imports")
     return { reason: "available", remediation: null };
   if (name === "inspect_elf_notes")
     return { reason: "available", remediation: null };
@@ -541,6 +554,7 @@ const workflowAvailabilityFor = ({
       "On Linux x64, set absolute REA_PWNTOOLS_PYTHON to caller-supplied Python with pwntools 4.15.0. No active binary target is required.",
     );
   if (kind === "firmware-provider") {
+    const { binwalk, unblob } = FIRMWARE_TOOL_REQUIREMENTS;
     const inspection = name === "inspect_firmware_regions";
     return hostRestrictedAvailability(
       policy,
@@ -548,7 +562,7 @@ const workflowAvailabilityFor = ({
       inspection
         ? policy.firmwareInspectionEnabled
         : policy.firmwareExtractionEnabled,
-      "On Linux, provide an absolute REA_BINWALK_COMMAND (Binwalk 3.1.x, verified with 3.1.0) or REA_UNBLOB_COMMAND (Unblob 26.6.x, verified with 26.6.4) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.",
+      `On Linux, provide an absolute ${binwalk.commandEnvironment} (${binwalk.name} ${binwalk.line}, verified with ${binwalk.version}) or ${unblob.commandEnvironment} (${unblob.name} ${unblob.line}, verified with ${unblob.version}) path and util-linux prlimit. Extraction also requires the selected format’s external extractor.`,
     );
   }
   if (kind === "android-provider")
@@ -600,6 +614,13 @@ const workflowAvailabilityFor = ({
       remediation: "Run process capture on a supported Linux or macOS host.",
     };
   if (kind === "application") return { reason: "available", remediation: null };
+  if (name === "inspect_pcap_capture")
+    return hostRestrictedAvailability(
+      policy,
+      "pcapCapture",
+      true,
+      PCAP_CAPTURE_UNSUPPORTED_HOST_REASON,
+    );
   if (kind === "pcap-provider" || kind === "flutter-provider")
     return { reason: "available", remediation: null };
   const electron = electronProviderAvailability(name, kind, policy);
@@ -722,10 +743,10 @@ const targetAvailability = ({
   targetKind,
   targetFormat,
   targetOpen,
+  requiresActiveTarget,
   descriptors,
 }: AvailabilityContext): Availability | null => {
-  if (FRIDA_OPERATION_NAMES.has(name)) return null;
-  if (!targetOpen && ACTIVE_TARGET_KINDS.has(kind))
+  if (!targetOpen && requiresActiveTarget)
     return {
       reason: "target_required",
       remediation: "Call open_binary with a supported local target.",
@@ -966,4 +987,40 @@ const availabilityFailurePriority = (
     default:
       return 3;
   }
+};
+
+/** Use the same composition requirements as availability when exposing provider effects. */
+const composedEffects = (
+  name: string,
+  base: ToolEffects,
+  descriptors: readonly ProviderDescriptor[],
+): ToolEffects => {
+  const composition: ProviderComposition | undefined =
+    name === "get_navigation_context"
+      ? { modes: NAVIGATION_CONTEXT_MODES }
+      : ENHANCED_REQUIREMENTS.get(name);
+  const requirements: CompositionRequirements =
+    composition === undefined
+      ? []
+      : "modes" in composition
+        ? composition.modes.flatMap(({ requirements }) => requirements)
+        : composition;
+  const operations = new Set<string>([
+    name,
+    ...requirements.flatMap((group) =>
+      typeof group === "string" ? [group] : group,
+    ),
+  ]);
+  const effects = { ...base };
+  for (const descriptor of descriptors) {
+    if (!operations.has(descriptor.operation)) continue;
+    const source = descriptor.effects;
+    effects.mutatesTarget ||= source.mutates_artifact;
+    effects.launchesProcess ||= source.launches_process;
+    effects.changesUiState ||= source.may_show_ui;
+    effects.accessesNetwork ||= source.may_access_network;
+    effects.writesFilesystem ||=
+      source.may_write_filesystem || source.changes_permissions;
+  }
+  return effects;
 };

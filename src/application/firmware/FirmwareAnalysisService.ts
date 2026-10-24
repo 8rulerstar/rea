@@ -1,7 +1,5 @@
-import {
-  createAnalysisExecutionEvidence,
-  type ExecutionOptions,
-} from "../AnalysisProvider.js";
+import type { ExecutionOptions } from "../AnalysisProvider.js";
+import { createAnalysisExecutionEvidence } from "../../domain/analysisObservation.js";
 import type { FirmwareAnalysisPort } from "./FirmwareAnalysisPort.js";
 import {
   firmwareRequestSchema,
@@ -44,7 +42,14 @@ export class FirmwareAnalysisService {
         new AnalysisInputError(
           operation,
           { cause: parsed.error },
-          projectInputIssues(parsed.error.issues, { operation, input }),
+          projectInputIssues(parsed.error.issues, { operation, input }).map(
+            (issue) => ({
+              ...issue,
+              // `input` is the internal discriminated request envelope.
+              path:
+                issue.path[0] === "input" ? issue.path.slice(1) : issue.path,
+            }),
+          ),
         ),
       );
     const executed = await this.provider.execute(parsed.data, options);

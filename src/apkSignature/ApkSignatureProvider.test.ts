@@ -24,36 +24,10 @@ import {
   zipWith,
 } from "../../tests/fixtures/apkSignature/v1SignatureBlock.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { apkSignatureResultSchema } from "../domain/apkSignature/apkSignatureReport.js";
 import { ApkSignatureProvider } from "./ApkSignatureProvider.js";
 import { apkSignatureFailure } from "./apkSignatureFailures.js";
 import { apkSchemeValue } from "../../tests/fixtures/apkSignature/signingScheme.js";
-
-type V1Signer = {
-  signature_file: string;
-  block_file: string;
-  certificate: { sha256_fingerprint: string; subject: string | null } | null;
-  certificates: { sha256_fingerprint: string; subject: string | null }[];
-  signer_infos: Record<string, unknown>[];
-  decode_error: string | null;
-};
-type Report = {
-  schemes: { v1: { present: boolean; signers: V1Signer[] } } & Record<
-    string,
-    {
-      present: boolean;
-      signers?: {
-        certificate: unknown;
-        digests: { algorithm: string; matches_apk: boolean | null }[];
-      }[];
-    }
-  >;
-  posture: Record<string, unknown>;
-  source_stamp: {
-    present: boolean;
-    certificate: { sha256_fingerprint: string } | null;
-    decode_error: string | null;
-  };
-};
 
 const zipOf = async (names: readonly string[]): Promise<Uint8Array> => {
   const writer = new ZipWriter(new Uint8ArrayWriter());
@@ -168,10 +142,10 @@ const write = async (
   await writeFile(path, bytes);
   return path;
 };
-const reportOf = async (path: string): Promise<Report> => {
+const reportOf = async (path: string) => {
   const result = await provider.inspect({ path });
   if (!result.ok) throw new Error(`expected ok: ${result.error.message}`);
-  return result.value.result as Report;
+  return apkSignatureResultSchema.parse(result.value.result);
 };
 
 describe("ApkSignatureProvider without the Android SDK", () => {
@@ -389,7 +363,7 @@ describe("ApkSignatureProvider v1 signers", () => {
       ),
     });
     if (!result.ok) throw new Error(result.error.message);
-    const report = result.value.result as Report;
+    const report = apkSignatureResultSchema.parse(result.value.result);
     expect(report.posture.v1_signers_match_block_signers).toBeNull();
     expect(result.value.limitations).toContain(
       "v1_signers_match_block_signers is null: the v3 signer's declared rotation lineage could not be decoded, so the original certificate v1 is expected to carry is unknown.",
@@ -477,7 +451,7 @@ describe("ApkSignatureProvider v1 signers", () => {
   });
 });
 
-describe("ApkSignatureProvider failure surfaces", () => {
+const registerSignatureInputAdmissionCases = () => {
   it("keeps only a non-regular path as input; reader I/O and defects are adapter errors", () => {
     const tagOf = (cause: unknown): string =>
       apkSignatureFailure(cause, "/x.apk")._tag;
@@ -510,6 +484,70 @@ describe("ApkSignatureProvider failure surfaces", () => {
     expect(result.error._tag).toBe("AnalysisUnsupportedTargetError");
   });
 
+  it("reports a damaged supported Zip64 end record as input failure while accepting the intact and restored controls", async () => {
+    const classic = Buffer.from(await zipOf(["entry.txt"]));
+    const endOffset = classic.length - 22;
+    expect(classic.readUInt32LE(endOffset)).toBe(0x06054b50);
+    const count = classic.readUInt16LE(endOffset + 10);
+    const size = classic.readUInt32LE(endOffset + 12);
+    const offset = classic.readUInt32LE(endOffset + 16);
+    const record = Buffer.from([
+      ...u32(0x06064b50),
+      ...u64(44),
+      ...u16(45),
+      ...u16(45),
+      ...u32(0),
+      ...u32(0),
+      ...u64(count),
+      ...u64(count),
+      ...u64(size),
+      ...u64(offset),
+    ]);
+    const locator = Buffer.from([
+      ...u32(0x07064b50),
+      ...u32(0),
+      ...u64(endOffset),
+      ...u32(1),
+    ]);
+    const end = Buffer.from(classic.subarray(endOffset));
+    end.writeUInt16LE(0xffff, 8);
+    end.writeUInt16LE(0xffff, 10);
+    end.writeUInt32LE(0xffffffff, 12);
+    end.writeUInt32LE(0xffffffff, 16);
+    const valid = Buffer.concat([
+      classic.subarray(0, endOffset),
+      record,
+      locator,
+      end,
+    ]);
+    const corrupt = Buffer.from(valid);
+    corrupt.writeUInt32LE(0x06064b51, endOffset);
+    const restored = Buffer.from(corrupt);
+    restored.writeUInt32LE(0x06064b50, endOffset);
+    expect(restored).toEqual(valid);
+    for (const [name, bytes] of [
+      ["valid", valid],
+      ["restored", restored],
+    ] as const) {
+      const result = await provider.inspect({
+        path: await write(`${name}.zip`, bytes),
+      });
+      expect(result.ok).toBe(true);
+    }
+    const damaged = await provider.inspect({
+      path: await write("damaged.zip", corrupt),
+    });
+    expect(damaged.ok).toBe(false);
+    if (!damaged.ok) {
+      expect(damaged.error._tag).toBe("AnalysisInputError");
+      expect(JSON.stringify(damaged.error)).toContain(
+        "invalid Zip64 EOCD signature",
+      );
+    }
+  });
+};
+
+const registerSigningStructureFailureCases = () => {
   it("reports a malformed signing block as an input error", async () => {
     const result = await provider.inspect({
       path: await write(
@@ -599,7 +637,10 @@ describe("ApkSignatureProvider failure surfaces", () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect((result.value.result as Report).posture.self_consistent).toBeNull();
+    expect(
+      apkSignatureResultSchema.parse(result.value.result).posture
+        .self_consistent,
+    ).toBeNull();
     expect(result.value.limitations.at(-1)).toContain(
       "not immediately followed by the end-of-central-directory",
     );
@@ -621,6 +662,11 @@ describe("ApkSignatureProvider failure surfaces", () => {
     expect(result.error._tag).toBe("AnalysisResourceConstraintError");
     expect(result.error.message).toContain("output budget");
   });
+};
+
+describe("ApkSignatureProvider failure surfaces", () => {
+  registerSignatureInputAdmissionCases();
+  registerSigningStructureFailureCases();
 });
 
 describe("ApkSignatureProvider output budget", () => {

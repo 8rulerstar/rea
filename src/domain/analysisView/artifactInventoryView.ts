@@ -123,10 +123,13 @@ export const artifactInventorySummarySchema = z.strictObject({
   limitation_count: z.number().int().nonnegative(),
 });
 
-const inputError = (message: string): AnalysisInputError =>
+const inputError = (
+  field: "source" | "view",
+  message: string,
+): AnalysisInputError =>
   new AnalysisInputError("inspect_analysis_view", undefined, [
     {
-      path: ["source"],
+      path: [field],
       reason: "invalid_value",
       message,
     },
@@ -221,7 +224,7 @@ const sourceFailure = (
   if (cause instanceof z.ZodError)
     return err(analysisViewResultInputError(input, cause));
   if (!(cause instanceof ArtifactInventoryValidationError)) throw cause;
-  return err(inputError(cause.message));
+  return err(inputError("source", cause.message));
 };
 
 /** Project exact source records; exhausted pages cover available records, not runtime behavior. */
@@ -233,12 +236,16 @@ export const projectArtifactInventoryView = (
   if (operation !== "inventory_artifact" && operation !== "inspect_artifact")
     return err(
       inputError(
+        "source",
         "Inventory views require inventory_artifact or inspect_artifact Evidence.",
       ),
     );
   if (view.kind !== "summary" && view.kind !== "inventory")
     return err(
-      inputError("Artifact Evidence supports summary and inventory views."),
+      inputError(
+        "view",
+        "Artifact Evidence supports summary and inventory views.",
+      ),
     );
   const parsed = parseSource(parent);
   if (!parsed.ok) return parsed;
@@ -258,7 +265,7 @@ export const projectArtifactInventoryView = (
     view.kind === "inventory" ||
     inventory.manifest.root_format === "godot-pck" ||
     inventory.manifest.root_format === "pyinstaller";
-  const counts = includeHashCounts ? inventoryCounts(source) : undefined;
+  const counts = inventoryCounts(source);
   const limitations = uniqueSorted([
     ...parent.limitations,
     ...inventory.limitations,
@@ -280,8 +287,7 @@ export const projectArtifactInventoryView = (
             "Producer traversal coverage is unknown; missing matches do not prove source absence.",
           ]
         : []),
-      ...(counts !== undefined &&
-      (counts.hashes.unavailable > 0 || counts.hashes["not-hashed"] > 0)
+      ...(counts.hashes.unavailable > 0 || counts.hashes["not-hashed"] > 0
         ? [
             "Content hashes are unknown for some recorded files; missing node IDs do not prove content absence.",
           ]
@@ -302,7 +308,6 @@ export const projectArtifactInventoryView = (
     | "unknowns"
   >;
   if (view.kind === "summary") {
-    const counts = inventoryCounts(source);
     const examined =
       inventory.nodes.length +
       inventory.occurrences.length +

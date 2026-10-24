@@ -32,7 +32,7 @@ export class FakeSetupHost implements SetupHost {
   }
   registrationCommand: readonly string[];
   registrationCommandBlocker?: string;
-  nodeVersion = "24.18.0";
+  nodeVersion = "24.22.1";
   version: string | undefined = "14.5";
   distribution: LinuxDistribution | undefined;
   hopper: string | undefined;
@@ -141,7 +141,7 @@ export class FakeSetupHost implements SetupHost {
     Promise.resolve(
       this.clientInspections.get(client.name) ?? { status: "update" },
     );
-  skillNeedsInstall = (): Promise<boolean> =>
+  skillNeedsInstall: SetupHost["skillNeedsInstall"] = (): Promise<boolean> =>
     Promise.resolve(this.skill !== "unchanged");
   validateSkillDirectories = (
     clientIds: readonly string[],

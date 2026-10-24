@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  machoImageSlices,
   traceDylibLoading,
   type DylibTreeEntry,
   type DylibTreeView,
@@ -59,6 +60,36 @@ const parsed = (...slices: MachoSlice[]): MachoImageFacts => ({
 
 const executable = (overrides: Partial<MachoSlice> = {}): MachoImageFacts =>
   parsed(slice({ file_type: "execute", ...overrides }));
+
+it("uses hidden ARM64 slices as selectable images while preserving their marker", async () => {
+  const declared = slice({
+    architecture: "arm",
+    cpu_type: 12,
+    cpu_subtype: 9,
+    file_type: "execute",
+  });
+  const hidden = slice({
+    architecture: "arm64",
+    hidden: true,
+    file_type: "execute",
+    slice_offset: 8192,
+  });
+  const facts: MachoImageFacts = {
+    status: "parsed",
+    slices: [declared],
+    hiddenSlices: [hidden],
+  };
+  const trace = await traceDylibLoading(memoryView({ [MAIN]: facts }), {
+    roots: [MAIN],
+    architecture: "arm64",
+  });
+  expect(machoImageSlices(facts)).toEqual([declared, hidden]);
+  expect(trace.roots).toEqual([{ image: MAIN, architecture: "arm64" }]);
+  expect(trace.coverage.roots_without_architecture).toEqual([]);
+  expect(trace.images[0]?.slices).toContainEqual(
+    expect.objectContaining({ architecture: "arm64", hidden: true }),
+  );
+});
 
 /** In-memory tree: files are images (or "data"), symlinks map to targets. */
 const memoryView = (
@@ -867,6 +898,34 @@ describe("loader-relative dylib resolution", () => {
 });
 
 describe("dyld slice compatibility and coverage", () => {
+  it("keeps an unmodeled ARM32 subtype uncertain when matching slices exist", async () => {
+    const trace = await traceDylibLoading(
+      memoryView({
+        [MAIN]: executable({
+          architecture: "arm",
+          cpu_type: 12,
+          cpu_subtype: 42,
+          dependencies: [dependency("@executable_path/libarm.dylib")],
+        }),
+        "Contents/MacOS/libarm.dylib": parsed(
+          slice({ architecture: "arm", cpu_type: 12, cpu_subtype: 42 }),
+          slice({ architecture: "arm", cpu_type: 12, cpu_subtype: 9 }),
+        ),
+      }),
+      { roots: [MAIN] },
+    );
+
+    expect(trace.edges[0]).toMatchObject({
+      candidates: [
+        {
+          outcome: "undetermined",
+          resolved_path: "Contents/MacOS/libarm.dylib",
+        },
+      ],
+      resolution: { status: "undetermined", image: null },
+    });
+  });
+
   it("lets an x86_64h process load generic x86_64 but not arm64e load arm64", async () => {
     const files = {
       [MAIN]: parsed(

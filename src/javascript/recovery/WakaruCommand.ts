@@ -3,10 +3,13 @@ import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
+  AnalysisArtifactChangedError,
   AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
+import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
+import type { ArtifactResourceScope } from "../../artifacts/ArtifactResourceScope.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { prlimitArgumentVector } from "../../process/LinuxResourceLimits.js";
@@ -68,6 +71,8 @@ export class WakaruCleanupFailure extends ProviderCleanupError {
 /** Resolve and fingerprint explicitly configured tools; acquire nothing at startup. */
 export const resolveWakaruCommand = async (
   environment: Readonly<Record<string, string | undefined>>,
+  resources?: ArtifactResourceScope,
+  signal?: AbortSignal,
 ) => {
   const configured = environment.REA_WAKARU_COMMAND;
   if (
@@ -87,6 +92,8 @@ export const resolveWakaruCommand = async (
     const fingerprint = await fingerprintRecoveryFile(
       command,
       RECOVERY_LIMITS.outputBytes,
+      signal,
+      resources,
     );
     const limiter =
       environment.REA_JAVASCRIPT_PRLIMIT_COMMAND ?? "/usr/bin/prlimit";
@@ -97,6 +104,13 @@ export const resolveWakaruCommand = async (
       throw new TypeError(`Resource limiter is not a regular file: ${limiter}`);
     return { command, limiter, ...fingerprint };
   } catch (cause: unknown) {
+    if (
+      cause instanceof AnalysisCancelledError ||
+      cause instanceof AnalysisArtifactChangedError ||
+      (cause instanceof ArtifactReaderFailure &&
+        (cause.cleanup !== undefined || cause.reason === "cancelled"))
+    )
+      throw cause;
     const reason = `Configured Wakaru or util-linux prlimit is unavailable: ${recoveryFailureMessage(cause)}`;
     throw new AnalysisCapabilityUnavailableError("wakaru", OPERATION, reason, {
       cause,
@@ -115,6 +129,7 @@ type WakaruCommandContext = {
   signal?: AbortSignal;
   launcher?: WakaruLauncher;
   staging?: string;
+  resources?: ArtifactResourceScope;
 };
 
 /** Run one bounded command and verify cleanup before consuming its output. */
@@ -142,7 +157,9 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
     env: { TMPDIR: context.cwd, RAYON_NUM_THREADS: "1", NO_COLOR: "1" },
   }).catch((cause: unknown) => {
     if (context.signal?.aborted === true)
-      throw new AnalysisCancelledError(OPERATION);
+      throw new AnalysisCancelledError(OPERATION, {
+        cause: context.signal.reason,
+      });
     throw new ProviderAdapterError("wakaru", OPERATION, {
       cause,
       diagnostics: {
@@ -183,7 +200,11 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
           ),
         );
       if (context.staging !== undefined)
-        await inventoryRecoveryFiles(context.staging, context.signal);
+        await inventoryRecoveryFiles(
+          context.staging,
+          context.signal,
+          context.resources,
+        );
     }
     checkRecoveryDeadline(context.deadline, context.signal);
     if (oversized)
@@ -210,7 +231,9 @@ export const runWakaruCommand = async (context: WakaruCommandContext) => {
     );
   if (failure !== undefined) throw failure;
   if (context.signal?.aborted === true)
-    throw new AnalysisCancelledError(OPERATION);
+    throw new AnalysisCancelledError(OPERATION, {
+      cause: context.signal.reason,
+    });
   return {
     exit_code: snapshot.exitCode ?? null,
     signal: snapshot.signal ?? null,

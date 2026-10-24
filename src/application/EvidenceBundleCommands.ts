@@ -1,3 +1,4 @@
+import { readArtifactInspectionSources } from "../domain/artifactInspection.js";
 import { dispatchQueuedInterrupts } from "../process/queuedInterrupts.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { requireAuthenticationHeadroom } from "./JsonAuthenticationHeadroom.js";
@@ -7,7 +8,10 @@ import {
   type PublishedEvidenceFile,
 } from "../domain/evidenceErrors.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
-import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+import {
+  AnalysisCancelledError,
+  AnalysisInputError,
+} from "../domain/analysisErrorCore.js";
 import type { Evidence } from "../domain/evidence.js";
 import {
   createImmutableEvidenceBundle,
@@ -16,7 +20,10 @@ import {
 import type { JsonValue } from "../domain/jsonValue.js";
 import { jsonValueSchema } from "../domain/jsonValue.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { compareBundles } from "../domain/bundleComparison.js";
+import {
+  compareBundles,
+  type BundleRecordPair,
+} from "../domain/bundleComparison.js";
 import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import {
   readEvidenceBundle,
@@ -78,7 +85,16 @@ export const deliverAnalysisEvidence = async (
   });
   if (!headroom.ok)
     return err(headroom.error.retainPartialObservation(evidence));
-  const bundle = createImmutableEvidenceBundle([evidence]);
+  const sourceEvidence =
+    evidence.operation === "inspect_artifact"
+      ? readArtifactInspectionSources(evidence.normalized_result)
+      : ok([]);
+  if (!sourceEvidence.ok)
+    return err(sourceEvidence.error.retainPartialObservation(evidence));
+  const bundle = createImmutableEvidenceBundle([
+    ...sourceEvidence.value,
+    evidence,
+  ]);
   const delivered =
     detail === "summary"
       ? inspectAnalysisViewValidated(
@@ -136,8 +152,23 @@ export const publishEvidenceDelivery = async (input: {
   // Deliver interrupts queued during final publication cleanup before the
   // command's signal owner accepts completion and removes its listeners.
   await dispatchQueuedInterrupts();
-  if (!written.ok)
-    return err(written.error.retainPartialObservation(input.complete));
+  if (!written.ok) {
+    const original = written.error;
+    // This publication workflow never overwrites. The standalone export
+    // command retains its own overwrite-capable recovery guidance.
+    const failure =
+      original instanceof EvidenceFileError && original.reason === "exists"
+        ? new EvidenceFileError(original.operation, original.reason, {
+            cause: original,
+            ...(original.path === undefined ? {} : { path: original.path }),
+            userMessage:
+              "Evidence file already exists. Choose another output path.",
+            cleanup: original.cleanup,
+            diagnostics: original.diagnostics,
+          }).bindCleanupDependencies([original])
+        : original;
+    return err(failure.retainPartialObservation(input.complete));
+  }
   if (signal?.aborted)
     return err(
       new AnalysisCancelledError(operation, {
@@ -185,6 +216,7 @@ const persistEvidenceBundleCommand = async (
 export const compareEvidenceBundlesCommand = async (input: {
   readonly leftPath: string;
   readonly rightPath: string;
+  readonly recordPairs?: readonly BundleRecordPair[];
 }): Promise<Result<JsonValue, AnalysisError>> => {
   // Sealed snapshots let comparison and its bundle digests reuse this
   // authentication instead of re-validating every record twice more.
@@ -204,7 +236,16 @@ export const compareEvidenceBundlesCommand = async (input: {
   ]);
   if (!left.ok) return left;
   if (!right.ok) return right;
-  return ok(jsonValueSchema.parse(compareBundles(left.value, right.value)));
+  try {
+    return ok(
+      jsonValueSchema.parse(
+        compareBundles(left.value, right.value, input.recordPairs),
+      ),
+    );
+  } catch (cause: unknown) {
+    if (cause instanceof AnalysisInputError) return err(cause);
+    throw cause;
+  }
 };
 
 const projectWrite = (

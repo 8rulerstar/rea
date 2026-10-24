@@ -120,12 +120,13 @@ export function* linkGenericMethodsSteps(
       ? null
       : Number(value);
   };
-  // Int32 record fields; null when not file backed. readUInt32 refuses plain
-  // zero-fill, so a .bss record never reads as index 0; only a relocated
-  // pointer written into zero-fill would read, as its low 32 bits.
+  // Int32 record fields; null when not file backed or loader-unresolved.
+  // readUInt32 refuses plain zero-fill, so a .bss record never reads as index
+  // 0; only a relocated pointer written into zero-fill would read, as its low
+  // 32 bits.
   const i32 = (address: bigint) => {
     const value = readUInt32(image, address);
-    return value === null ? null : value | 0;
+    return typeof value === "number" ? value | 0 : null;
   };
   const genericInstsCount = count(metadataRegistration + 16n);
   const genericInsts = word(metadataRegistration + 24n);
@@ -268,7 +269,9 @@ export function* linkGenericMethodsSteps(
     const given = readUInt32(image, instance);
     const declared =
       container === -1 ? 0 : facts.genericContainer(container)?.count;
-    if (given === null || given === declared) return null;
+    // An unread or loader-unresolved count is left to the namer, which
+    // refuses it with its own message.
+    if (typeof given !== "number" || given === declared) return null;
     // Versions with generic linking decode every container record, so a miss
     // is a damaged index, not an unread layout.
     return declared === undefined

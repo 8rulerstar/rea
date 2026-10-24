@@ -7,6 +7,7 @@ import {
   createElfNotesService,
   createPeResourcesService,
   createPeCertificatesService,
+  createPeImportsService,
   createNativeExportsService,
 } from "../composition/binaryDiagnostics.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
@@ -18,11 +19,17 @@ import { inspectBinaryLayoutInputSchema } from "../domain/native/binaryLayout.js
 import { inspectRecordedCrashInputSchema } from "../domain/native/recordedCrash.js";
 import { inspectPeResourcesInputSchema } from "../domain/native/peResources.js";
 import { inspectPeCertificatesInputSchema } from "../domain/native/peCertificates.js";
+import { inspectPeImportsInputSchema } from "../domain/native/peImports.js";
 import { inspectNativeExportsInputSchema } from "../domain/native/nativeExports.js";
 import { inspectElfNotesInputSchema } from "../domain/native/elfNotes.js";
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
+import {
+  analysisEvidenceDeliveryOptions,
+  deliverCliAnalysisEvidence,
+} from "./analysisEvidenceDelivery.js";
 
 /** Inspect operator-selected files through the same shared workflow as MCP. */
 export const registerBinaryDiagnosticsCommands = (
@@ -33,7 +40,9 @@ export const registerBinaryDiagnosticsCommands = (
   cli.command(CLI_COMMANDS.inspectElfNotes, {
     description:
       "Inspect ELF PT_NOTE and SHT_NOTE identities without executing the image",
-    args: z.object({ path: z.string().describe("Local ELF32/ELF64 image") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local ELF32/ELF64 image"),
+    }),
     options: z.object({
       maxFileBytes: inspectElfNotesInputSchema.shape.max_file_bytes,
       maxEntries: inspectElfNotesInputSchema.shape.max_entries,
@@ -67,7 +76,7 @@ export const registerBinaryDiagnosticsCommands = (
   cli.command(CLI_COMMANDS.inspectByteEntropy, {
     description:
       "Inspect file-wide and block byte entropy without executing the file",
-    args: z.object({ path: z.string().describe("Local file") }),
+    args: z.object({ path: localPathStringSchema.describe("Local file") }),
     options: z.object({
       blockSize: inspectByteEntropyInputSchema.shape.block_size.describe(
         "Power-of-two block size from 256 to 65536 bytes (default 4096)",
@@ -104,7 +113,9 @@ export const registerBinaryDiagnosticsCommands = (
   cli.command(CLI_COMMANDS.inspectPeCertificates, {
     description:
       "Inspect PE Authenticode certificate table identities without verifying signatures",
-    args: z.object({ path: z.string().describe("Local PE32/PE32+ image") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local PE32/PE32+ image"),
+    }),
     options: z.object({
       maxFileBytes: inspectPeCertificatesInputSchema.shape.max_file_bytes,
       maxEntries: inspectPeCertificatesInputSchema.shape.max_entries,
@@ -134,10 +145,47 @@ export const registerBinaryDiagnosticsCommands = (
         );
       }),
   });
+  cli.command(CLI_COMMANDS.inspectPeImports, {
+    description:
+      "Inspect PE import and delay-load table identities without executing the image",
+    args: z.object({ path: z.string().describe("Local PE32/PE32+ image") }),
+    options: z.object({
+      maxFileBytes: inspectPeImportsInputSchema.shape.max_file_bytes,
+      maxDlls: inspectPeImportsInputSchema.shape.max_dlls,
+      maxFunctions: inspectPeImportsInputSchema.shape.max_functions,
+    }),
+    run: ({ args, options }) =>
+      withCommandCancellation(async (signal) => {
+        const pe = createPeImportsService();
+        return await logCliCommand(
+          logger,
+          CLI_COMMANDS.inspectPeImports,
+          async () =>
+            finishAnalysisCommand(
+              () =>
+                pe.inspect(
+                  {
+                    path: absoluteCallerPath(args.path),
+                    max_file_bytes: options.maxFileBytes,
+                    max_dlls: options.maxDlls,
+                    max_functions: options.maxFunctions,
+                  },
+                  { signal },
+                ),
+              pe,
+              "rea-pe-imports",
+              "inspect_pe_imports",
+              signal,
+            ),
+        );
+      }),
+  });
   cli.command(CLI_COMMANDS.inspectPeResources, {
     description:
       "Inspect PE resource identities, payload ranges, hashes and icon-group relationships",
-    args: z.object({ path: z.string().describe("Local PE32/PE32+ image") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local PE32/PE32+ image"),
+    }),
     options: z.object({
       maxFileBytes: inspectPeResourcesInputSchema.shape.max_file_bytes,
       maxEntries: inspectPeResourcesInputSchema.shape.max_entries,
@@ -170,9 +218,12 @@ export const registerBinaryDiagnosticsCommands = (
   cli.command(CLI_COMMANDS.inspectNativeExports, {
     description:
       "Inspect a PE or ELF image's export table without executing it",
-    args: z.object({ path: z.string().describe("Local PE or ELF image") }),
+    args: z.object({
+      path: localPathStringSchema.describe("Local PE or ELF image"),
+    }),
     options: z.object({
       maxFileBytes: inspectNativeExportsInputSchema.shape.max_file_bytes,
+      ...analysisEvidenceDeliveryOptions,
     }),
     run: ({ args, options }) =>
       withCommandCancellation(async (signal) => {
@@ -181,8 +232,8 @@ export const registerBinaryDiagnosticsCommands = (
           logger,
           CLI_COMMANDS.inspectNativeExports,
           async () =>
-            finishAnalysisCommand(
-              () =>
+            deliverCliAnalysisEvidence({
+              run: () =>
                 exports.inspect(
                   {
                     path: absoluteCallerPath(args.path),
@@ -190,11 +241,13 @@ export const registerBinaryDiagnosticsCommands = (
                   },
                   { signal },
                 ),
-              exports,
-              "rea-native-exports",
-              "inspect_native_exports",
+              service: exports,
+              providerId: "rea-native-exports",
+              operation: "inspect_native_exports",
               signal,
-            ),
+              detail: options.detail,
+              evidenceOutput: options.evidence_output,
+            }),
         );
       }),
   });
@@ -203,7 +256,9 @@ export const registerBinaryDiagnosticsCommands = (
     description:
       "Inspect binary file/linked layout without executing the selected object",
     args: z.object({
-      path: z.string().describe("Local ELF binary or relocatable object"),
+      path: localPathStringSchema.describe(
+        "Local ELF binary or relocatable object",
+      ),
     }),
     options: z.object({
       pwntoolsTimeoutMs:
@@ -230,9 +285,9 @@ export const registerBinaryDiagnosticsCommands = (
     description:
       "Inspect supplied core registers/signals and optional debugger mapping evidence",
     args: z.object({
-      path: z
-        .string()
-        .describe("Local Linux ELF64 amd64 or AArch64 little-endian core"),
+      path: localPathStringSchema.describe(
+        "Local Linux ELF64 amd64 or AArch64 little-endian core",
+      ),
     }),
     options: z.object({
       debuggerContext: z

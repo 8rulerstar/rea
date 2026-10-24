@@ -1,7 +1,9 @@
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import {
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
+  artifactSelectedPathErrno,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
 } from "../artifacts/ArtifactFileOperation.js";
@@ -112,8 +114,16 @@ const inputBudgetRemediation = (
   }
 };
 
-const beamFailurePrimary = (cause: unknown, input: InspectErlangBeamInput) => {
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
+const beamFailurePrimary = (
+  facts: ArtifactFilePrimaryFacts,
+  input: InspectErlangBeamInput,
+) => {
+  const { cause, origin } = facts;
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "integrity"
+  )
     return new AnalysisArtifactChangedError(
       OPERATION,
       input.path,
@@ -122,11 +132,18 @@ const beamFailurePrimary = (cause: unknown, input: InspectErlangBeamInput) => {
         cause,
       },
     );
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "cancelled"
+  )
     return new AnalysisCancelledError(OPERATION, {
       cause: artifactFileCancellationCause(cause),
     });
-  if (cause instanceof ArtifactReaderFailure) {
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure
+  ) {
     if (cause.reason === "limit") {
       const remediationAction = inputBudgetRemediation(cause, input);
       return new AnalysisResourceConstraintError(
@@ -163,22 +180,21 @@ const beamFailurePrimary = (cause: unknown, input: InspectErlangBeamInput) => {
       return new AnalysisAccessDeniedError(OPERATION, input.path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    const pathErrno = artifactSelectedPathErrno(cause);
+    if (pathErrno !== undefined)
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],
           reason: "invalid_value",
-          message: `Selected BEAM file could not be read (${String(cause.code)}): ${input.path}.`,
+          message: `Selected BEAM file could not be read (${pathErrno}): ${input.path}.`,
         },
       ]);
   }
   return new ArtifactOperationError(
     OPERATION,
-    cause instanceof ArtifactReaderFailure ? cause.reason : "io",
+    origin === "owned-or-classified" && cause instanceof ArtifactReaderFailure
+      ? cause.reason
+      : "io",
     undefined,
     cause instanceof Error ? cause.message : "BEAM inspection failed.",
     { cause },
@@ -186,7 +202,7 @@ const beamFailurePrimary = (cause: unknown, input: InspectErlangBeamInput) => {
 };
 
 const beamFailure = (cause: unknown, input: InspectErlangBeamInput) => {
-  const primary = beamFailurePrimary(artifactFilePrimaryFailure(cause), input);
+  const primary = beamFailurePrimary(artifactFilePrimaryFacts(cause), input);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(

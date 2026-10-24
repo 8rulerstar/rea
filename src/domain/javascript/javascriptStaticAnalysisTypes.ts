@@ -22,6 +22,8 @@ export interface JavaScriptSourceRange {
 }
 
 interface JavaScriptStaticReferenceState {
+  /** Resolution discovers a target without loading or executing it. */
+  readonly operation: "load" | "resolve";
   readonly kind:
     | "static-import"
     | "dynamic-import"
@@ -31,6 +33,8 @@ interface JavaScriptStaticReferenceState {
   readonly module_key: string | null;
   /** Recovered factory runtime; absent in older or unbundled findings. */
   readonly module_runtime?: string;
+  /** Source-relative filename selected by a proven createRequire factory. */
+  readonly resolution_base_path?: string;
   readonly location: JavaScriptSourceRange;
 }
 

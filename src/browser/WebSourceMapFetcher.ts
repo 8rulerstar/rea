@@ -1,8 +1,5 @@
 import * as t from "@babel/types";
-import {
-  decodeValidatedSourceMapLeaves,
-  isBeforeSourceMapLeafStop,
-} from "../javascript/sourceMaps/DecodedSourceMap.js";
+import { decodeValidatedSourceMapLeaves } from "../javascript/sourceMaps/DecodedSourceMap.js";
 
 import { sanitizeBrowserUrl } from "../domain/browserObservation.js";
 import { AnalysisResourceConstraintError } from "../domain/analysisErrorCore.js";
@@ -27,7 +24,7 @@ import { createWebTextArtifact } from "../domain/webContentArtifact.js";
 import { safeParseJson } from "../domain/safeJson.js";
 import { sourceMapJsonText } from "../domain/sourceMapEnvelope.js";
 import { resolveJavaScriptSourceMapUrl } from "../domain/javascript/javascriptSourceMapPaths.js";
-import { jsonParts } from "../domain/jsonSerialization.js";
+import { jsonByteLength } from "../domain/jsonSerialization.js";
 import {
   inspectSourceMapValue,
   SourceMapFormatFailure,
@@ -290,7 +287,10 @@ const fetchOne = async (
     const { response, fetchedUrl } = fetched;
     try {
       // Admit the resolution identity before reading or retaining its body.
-      consumeExpandedBytes(budget.decodedRecords, jsonBytes(fetchedUrl) - 4);
+      consumeExpandedBytes(
+        budget.decodedRecords,
+        jsonByteLength(fetchedUrl) - 4,
+      );
     } catch (cause: unknown) {
       try {
         await response.body?.cancel();
@@ -590,17 +590,15 @@ const normalizeSourceMap = (
       SOURCE_MAP_SUCCESS_ENVELOPE_BYTES;
     consumeExpandedBytes(
       context.budget,
-      jsonBytes(text) +
+      jsonByteLength(text) +
         artifactMetadataBytes("application/source-map+json", text) -
         4,
     );
     const sourcesByRaw = new Map<string, string>();
-    const resolvedByRoot = new Map<string | null, Map<string, string>>();
-    preflightResolvedSourceBytes(
+    const resolvedByRoot = prepareResolvedSources(
       inspected.leaves,
       fetchedUrl,
       context.budget,
-      resolvedByRoot,
       sourcesByRaw,
       check,
     );
@@ -614,11 +612,12 @@ const normalizeSourceMap = (
     const nameJsonBytes = new Map<string, number>();
     const originalSources: ParsedSourceMapItem["original_sources"] = [];
     let declarationIndex = 0;
-    for (const { leaf, resolvedSources } of decoded) {
+    for (const { leaf } of decoded) {
+      const resolvedSources = resolvedByRoot.get(leaf.map.sourceRoot ?? null);
       for (const [index, rawSource] of leaf.map.sources.entries()) {
         if ((index & 255) === 0) check();
         const resolved =
-          rawSource === null ? null : (resolvedSources[index] ?? null);
+          rawSource === null ? null : (resolvedSources?.get(rawSource) ?? null);
         const sanitized =
           resolved === null ? null : cachedSanitized(sourcesByRaw, resolved);
         const content = leaf.map.sourcesContent?.[index] ?? null;
@@ -632,7 +631,7 @@ const normalizeSourceMap = (
             (originalSources.length === 0 ? 0 : 1) +
             (content === null
               ? 0
-              : jsonBytes(content) +
+              : jsonByteLength(content) +
                 artifactMetadataBytes(mediaType, content) -
                 4),
         );
@@ -647,18 +646,20 @@ const normalizeSourceMap = (
     }
     const mappings: ParsedSourceMapItem["mappings"] = [];
     declarationIndex = 0;
-    for (const { leaf, rows, resolvedSources } of decoded) {
+    for (const { leaf, rows } of decoded) {
+      const resolvedSources = resolvedByRoot.get(leaf.map.sourceRoot ?? null);
       const declarationBase = declarationIndex;
       declarationIndex += leaf.map.sources.length;
       for (const [line, row] of rows.entries()) {
         if ((line & 255) === 0) check();
         for (const segment of row) {
-          if (!isBeforeSourceMapLeafStop(leaf, line, segment[0])) continue;
           if (segment.length === 1) continue;
           const rawSource = leaf.map.sources[segment[1]];
           if (rawSource === undefined) continue;
           const resolved =
-            rawSource === null ? null : (resolvedSources[segment[1]] ?? null);
+            rawSource === null
+              ? null
+              : (resolvedSources?.get(rawSource) ?? null);
           const source =
             resolved === null ? null : cachedSanitized(sourcesByRaw, resolved);
           const name =
@@ -703,7 +704,7 @@ const normalizeSourceMap = (
     if (modules.incomplete.length > 0)
       consumeExpandedBytes(
         context.budget,
-        jsonBytes(
+        jsonByteLength(
           `Module edges are incomplete: ${modules.incomplete.length} of ${originalSources.filter(({ artifact }) => artifact !== null).length} original sources could not be parsed in full (${modules.incomplete.join(", ")}).`,
         ) - 4,
       );
@@ -741,7 +742,10 @@ const normalizeSourceMap = (
     return emptySourceMapItem(
       request,
       "invalid",
-      "Source-map JSON mappings could not be decoded safely.",
+      cause instanceof SourceMapFormatFailure &&
+        cause.reason === "section-overlap"
+        ? cause.message
+        : "Source-map JSON mappings could not be decoded safely.",
       fetchedUrl,
     );
   }
@@ -906,14 +910,15 @@ const sanitizeSource = (value: string): string => {
   }
 };
 
-const preflightResolvedSourceBytes = (
+/** Resolve and admit source identities once, before allocating public mapping rows. */
+const prepareResolvedSources = (
   leaves: readonly SourceMapLeaf[],
   mapUrl: string,
   budget: { readonly expandedBytes: number; resolvedSourceBytes: number },
-  resolvedByRoot: Map<string | null, Map<string, string>>,
   sanitizedByResolved: Map<string, string>,
   check: () => void,
-): void => {
+): ReadonlyMap<string | null, ReadonlyMap<string, string>> => {
+  const resolvedByRoot = new Map<string | null, Map<string, string>>();
   let estimate = budget.expandedBytes;
   let resolvedBytes = budget.resolvedSourceBytes;
   for (const { map } of leaves) {
@@ -927,24 +932,28 @@ const preflightResolvedSourceBytes = (
       if (source === null) continue;
       const sourceKey = source;
       let resolved = sourcesForRoot.get(sourceKey);
-      if (resolved === undefined)
-        resolved = resolveJavaScriptSourceMapUrl(
+      if (resolved === undefined) {
+        const candidate = resolveJavaScriptSourceMapUrl(
           source,
           map.sourceRoot,
           mapUrl,
         );
+        if (candidate === null) continue;
+        resolved = candidate;
+      }
       const bytes = Buffer.byteLength(resolved, "utf8");
       if (bytes > SOURCE_MAP_RESPONSE_BYTES - resolvedBytes)
         throw resolvedSourceLimitFailure();
       resolvedBytes += bytes;
       sourcesForRoot.set(sourceKey, resolved);
       const sanitized = cachedSanitized(sanitizedByResolved, resolved);
-      estimate += jsonBytes(sanitized);
+      estimate += jsonByteLength(sanitized);
       if (estimate > WEB_SOURCE_MAP_LIMITS.outputBytes)
         throw expandedOutputFailure();
     }
   }
   budget.resolvedSourceBytes = resolvedBytes;
+  return resolvedByRoot;
 };
 
 const consumeExpandedBytes = (
@@ -979,12 +988,6 @@ const resolvedSourceLimitFailure = (): SourceMapFormatFailure =>
     "limit",
     `Resolved source-map identities exceed the ${String(SOURCE_MAP_RESPONSE_BYTES / (1024 * 1024))} MiB decoder representation budget. ${noRuntimeOverrideSentence("That representation budget stays fixed.", "source_map_fetch_timeout_ms")}`,
   );
-
-const jsonBytes = (value: string): number => {
-  let bytes = 0;
-  for (const part of jsonParts(value)) bytes += Buffer.byteLength(part, "utf8");
-  return bytes;
-};
 
 const artifactMetadataBytes = (mediaType: string, text: string): number =>
   Buffer.byteLength(
@@ -1025,17 +1028,17 @@ const sourceMapFailureReservation = (
   >["status"] = "fetch_failed",
 ): number =>
   SOURCE_MAP_FAILURE_ENVELOPE_BYTES +
-  jsonBytes(request.declaredUrl) +
-  jsonBytes(request.scriptKey) +
-  (effectiveUrl === null ? 0 : jsonBytes(effectiveUrl) - 4) +
+  jsonByteLength(request.declaredUrl) +
+  jsonByteLength(request.scriptKey) +
+  (effectiveUrl === null ? 0 : jsonByteLength(effectiveUrl) - 4) +
   Math.max(
     0,
-    (limitation === undefined ? 0 : jsonBytes(limitation)) -
+    (limitation === undefined ? 0 : jsonByteLength(limitation)) -
       SOURCE_MAP_FAILURE_LIMITATION_RESERVE -
       2,
   ) +
-  jsonBytes(status) -
-  jsonBytes("fetch_failed");
+  jsonByteLength(status) -
+  jsonByteLength("fetch_failed");
 
 const sourceEntryOverheadBytes = (
   sourceIndex: number,
@@ -1048,7 +1051,7 @@ const sourceEntryOverheadBytes = (
 const cachedJsonBytes = (cache: Map<string, number>, value: string): number => {
   const cached = cache.get(value);
   if (cached !== undefined) return cached;
-  const bytes = jsonBytes(value);
+  const bytes = jsonByteLength(value);
   cache.set(value, bytes);
   return bytes;
 };

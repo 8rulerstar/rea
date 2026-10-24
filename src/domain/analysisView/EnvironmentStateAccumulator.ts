@@ -1,7 +1,13 @@
 import { z } from "zod";
+import type { ScenarioResponseBodyRetention } from "./scenarioCaptureRecords.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { parseExactJson } from "../exactJsonNumber.js";
 import { MAX_JSON_DEPTH, type JsonValue } from "../jsonValue.js";
+import {
+  compareOffsetDateTimeInstants,
+  readRecordedDateTime,
+  type OffsetDateTimeInstant,
+} from "../offsetDateTime.js";
 import { ok, type Result } from "../result.js";
 import {
   WEB_NETWORK_CAPTURE_LIMITS,
@@ -26,6 +32,7 @@ import {
 import {
   base64PrefixChars,
   readRecordedResponseBody,
+  recordedResponseBodyIsEmpty,
   type RecordedResponseBody,
 } from "./recordedResponseBody.js";
 import {
@@ -98,19 +105,14 @@ const requestSchema = z.object({
     postData: z.object({ mimeType: z.string(), text: z.string() }),
   }),
 });
-const responseSizeSchema = z.object({
-  response: z.object({
-    status: z.number(),
-    content: z.object({ text: z.string().optional() }).optional(),
-  }),
-});
 
 interface RecordEntry {
   readonly facts: StateRecordFacts;
   /** Null for a write whose URL was redacted: its target is unknown, so it bounds every type. */
   readonly origin: string | null;
   readonly contentType: string;
-  readonly timed: boolean;
+  /** Exact ordering fact; request interval coordinates remain milliseconds. */
+  readonly startInstant: OffsetDateTimeInstant | undefined;
   readonly record: WebNetworkCaptureRecord;
 }
 
@@ -148,23 +150,51 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
     return false;
   }
 
-  override add(record: WebNetworkCaptureRecord): Result<void, AnalysisError> {
-    const grouped = super.add(record);
+  override add(
+    record: WebNetworkCaptureRecord,
+    scenarioResponseBody?: ScenarioResponseBodyRetention,
+  ): Result<void, AnalysisError> {
+    const grouped = super.add(record, scenarioResponseBody);
     if (!grouped.ok) return grouped;
     try {
       const line = readRecordedRequestLine(record.reported, true, this.scratch);
       if (line === null) return this.overBudget();
       const timing = timingSchema.safeParse(record.reported);
-      const start = timing.success
-        ? Date.parse(timing.data.startedDateTime)
-        : Number.NaN;
-      const timed = timing.success && Number.isFinite(start);
+      // Admit normalization and fraction parsing before materializing their strings.
+      if (
+        timing.success &&
+        !this.scratch(
+          RECORD_SCRATCH_BYTES +
+            textBytes(timing.data.startedDateTime.length + 6) * 3,
+        )
+      )
+        return this.overBudget();
+      const startInstant = timing.success
+        ? readRecordedDateTime(timing.data.startedDateTime)?.instant
+        : undefined;
+      // Keep the established millisecond interval policy independently of sorting.
+      const start =
+        startInstant === undefined
+          ? record.ordinal
+          : startInstant.epochSecond * 1000 +
+            Number(startInstant.fraction.slice(0, 3).padEnd(3, "0"));
+      // A fraction substring may retain its normalized timestamp's backing store,
+      // including trailing zeroes removed from the exact comparison value.
+      const instantBytes =
+        timing.success && startInstant !== undefined
+          ? ENTRY_BYTES + textBytes(timing.data.startedDateTime.length + 6)
+          : 0;
       if (line.kind === "excluded")
         return line.reason === "url-redacted"
           ? this.#redactedWrite(
               record,
-              timing.success && timed
-                ? { start, end: start + timing.data.time }
+              timing.success && startInstant !== undefined
+                ? {
+                    start,
+                    end: start + timing.data.time,
+                    startInstant,
+                    instantBytes,
+                  }
                 : undefined,
             )
           : ok(undefined);
@@ -172,6 +202,7 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       if (
         !this.retain(
           ENTRY_BYTES * 8 +
+            instantBytes +
             textBytes(
               line.method.length +
                 line.origin.length +
@@ -189,12 +220,15 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
           path: line.path,
           query: line.query === "" ? undefined : line.query,
           status: line.status,
-          start: timed ? start : record.ordinal,
-          end: timed ? start + timing.data.time : record.ordinal,
+          start,
+          end:
+            timing.success && startInstant !== undefined
+              ? start + timing.data.time
+              : record.ordinal,
         },
         origin: line.origin,
         contentType: line.rawMime,
-        timed,
+        startInstant,
         record,
       });
       return ok(undefined);
@@ -206,7 +240,14 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
   /** Keep a successful write whose URL was redacted, with an empty path whose root relates to every type. */
   #redactedWrite(
     record: WebNetworkCaptureRecord,
-    timing: { readonly start: number; readonly end: number } | undefined,
+    timing:
+      | {
+          readonly start: number;
+          readonly end: number;
+          readonly startInstant: OffsetDateTimeInstant;
+          readonly instantBytes: number;
+        }
+      | undefined,
   ): Result<void, AnalysisError> {
     const parsed = redactedWriteSchema.safeParse(record.reported);
     if (!parsed.success) return ok(undefined);
@@ -221,13 +262,19 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       end: timing?.end ?? record.ordinal,
     };
     if (!isStateWrite(facts)) return ok(undefined);
-    if (!this.retain(ENTRY_BYTES * 8 + textBytes(facts.method.length)))
+    if (
+      !this.retain(
+        ENTRY_BYTES * 8 +
+          textBytes(facts.method.length) +
+          (timing?.instantBytes ?? 0),
+      )
+    )
       return this.overBudget();
     this.#entries.set(record.ordinal, {
       facts,
       origin: null,
       contentType: "",
-      timed: timing !== undefined,
+      startInstant: timing?.startInstant,
       record,
     });
     return ok(undefined);
@@ -279,16 +326,12 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
     }
   }
 
-  /** Whether a record's response carried no body: a 204, or empty content. */
+  /** Whether a record's response carried no body: a 204, or known decoded empty content. */
   #emptyResponse(ordinal: number): boolean {
-    const parsed = responseSizeSchema.safeParse(
-      this.#entries.get(ordinal)?.record.reported,
-    );
-    return (
-      parsed.success &&
-      (parsed.data.response.status === 204 ||
-        (parsed.data.response.content?.text ?? "") === "")
-    );
+    const entry = this.#entries.get(ordinal);
+    if (entry === undefined) return false;
+    if (entry.facts.status === 204) return true;
+    return recordedResponseBodyIsEmpty(entry.record);
   }
 
   /** Project the init state of the manifest's primary origin; records keep timeline order. */
@@ -303,16 +346,20 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       (entry) => entry.origin === null,
     ).length;
     const timeline: StateTimeline =
-      entries.length > 0 && entries.every((entry) => entry.timed)
+      entries.length > 0 &&
+      entries.every((entry) => entry.startInstant !== undefined)
         ? "recorded-start-time"
         : "record-order";
     const records = entries
-      .map((entry) => entry.facts)
       .sort((left, right) =>
         timeline === "record-order"
-          ? left.ordinal - right.ordinal
-          : left.start - right.start || left.ordinal - right.ordinal,
+          ? left.facts.ordinal - right.facts.ordinal
+          : compareOffsetDateTimeInstants(
+              left.startInstant!,
+              right.startInstant!,
+            ) || left.facts.ordinal - right.facts.ordinal,
       )
+      .map((entry) => entry.facts)
       .map((facts) =>
         timeline === "record-order"
           ? { ...facts, start: facts.ordinal, end: facts.ordinal }

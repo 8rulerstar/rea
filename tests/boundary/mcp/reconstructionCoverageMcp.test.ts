@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 import {
   completeReconstructionCoverageData,
   reconstructionCoverageEvidenceId,
+  reconstructionCoverageDataFixture,
 } from "../../../src/domain/reconstructionCoverage.fixture.js";
-import { createReconstructionCoverageData } from "../../../src/domain/reconstructionCoverage.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { createEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
@@ -47,7 +47,7 @@ describe("reconstruction coverage inline Evidence", () => {
           confidence: "inferred",
         },
       );
-      const weakCoverage = createReconstructionCoverageData({
+      const weakCoverage = reconstructionCoverageDataFixture({
         ...coverage,
         evidence_bundle: createEvidenceBundle([
           ...coverage.evidence_bundle.records,
@@ -85,7 +85,7 @@ describe("reconstruction coverage inline Evidence", () => {
           confidence: "inferred",
         },
       );
-      const weakCoverage = createReconstructionCoverageData({
+      const weakCoverage = reconstructionCoverageDataFixture({
         ...coverage,
         evidence_bundle: createEvidenceBundle([
           ...coverage.evidence_bundle.records,
@@ -123,13 +123,49 @@ describe("reconstruction coverage inline Evidence", () => {
 });
 
 describe("reconstruction coverage selection", () => {
+  it.each([
+    {
+      label: "unknown root argument",
+      selection: { boundary_id: "replacement.cli", unexpected: true },
+      path: ["unexpected"],
+      reason: "unknown_argument",
+    },
+    {
+      label: "missing boundary",
+      selection: {},
+      path: ["boundary_id"],
+      reason: "missing_argument",
+    },
+  ])(
+    "rejects $label through the shared owner",
+    async ({ selection, path, reason }) => {
+      await withCoverageMcp(async ({ client, session }) => {
+        const result = await client.callTool({
+          name: "evaluate_reconstruction_coverage",
+          arguments: { coverage: currentFixtureCoverage(), ...selection },
+        });
+        expect(result.isError).toBe(true);
+        expect(parseMcpToolError(result)).toMatchObject({
+          error: {
+            code: "invalid_request",
+            details: {
+              operation: "evaluate_reconstruction_coverage",
+              issues: [{ path, reason }],
+            },
+          },
+        });
+        expect(session.exportEvidenceBundle().records).toEqual([]);
+      });
+    },
+  );
+
   it("reports ambiguity when multiple verifier results cover one claim", async () => {
     await withCoverageMcp(async ({ client }) => {
       const coverage = currentFixtureCoverage();
       const latest = coverage.verifier_results[0];
       if (latest === undefined)
         throw new Error("Expected fixture verifier result");
-      const ambiguousCoverage = createReconstructionCoverageData({
+      const ambiguousCoverage = reconstructionCoverageDataFixture({
         ...coverage,
         verifier_results: [
           latest,
@@ -259,7 +295,7 @@ const withCoverageMcp = async <T>(
 
 const currentFixtureCoverage = () => {
   const coverage = completeReconstructionCoverageData();
-  return createReconstructionCoverageData({
+  return reconstructionCoverageDataFixture({
     ...coverage,
     verifier_results: coverage.verifier_results.map((result) => ({
       ...result,

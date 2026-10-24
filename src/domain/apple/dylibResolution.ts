@@ -81,6 +81,7 @@ const dependencySchema = z.strictObject({
 /** Observed dylib-loading facts of one Mach-O slice. */
 export const machoSliceSchema = z.strictObject({
   architecture: z.string().min(1),
+  hidden: z.boolean().exactOptional(),
   /** Physical identity observed in the thin header and, for FAT, its table. */
   slice_offset: z.int().nonnegative(),
   slice_size: z.int().positive(),
@@ -107,12 +108,25 @@ export type MachoSlice = z.infer<typeof machoSliceSchema>;
 
 /** Header parse of one file; malformed and unsupported images keep their reason. */
 export type MachoImageFacts =
-  | { readonly status: "parsed"; readonly slices: readonly MachoSlice[] }
+  | {
+      readonly status: "parsed";
+      readonly slices: readonly MachoSlice[];
+      /** Apple lipo's ARM64 compatibility row, stored beyond raw nfat_arch. */
+      readonly hiddenSlices?: readonly MachoSlice[];
+    }
   | {
       readonly status: "malformed" | "unsupported";
       readonly reason: string;
     }
   | { readonly status: "not-mach-o" };
+
+/** Return every slice that can participate in architecture selection. */
+export const machoImageSlices = (
+  facts: Extract<MachoImageFacts, { readonly status: "parsed" }>,
+): readonly MachoSlice[] =>
+  facts.hiddenSlices === undefined
+    ? facts.slices
+    : [...facts.slices, ...facts.hiddenSlices];
 
 /** One observed path below the analyzed root. Symlink targets are not followed by the view. */
 export type DylibTreeEntry =
@@ -350,12 +364,17 @@ const evaluateCandidate = async (
   let outcome: Candidate["outcome"];
   if (facts.status !== "parsed") outcome = facts.status;
   else {
-    const slice = compatibleSlice(facts.slices, context.processIdentity);
-    if (slice === undefined) outcome = "architecture-missing";
+    const selection = compatibleSlice(
+      machoImageSlices(facts),
+      context.processIdentity,
+    );
+    if (selection.kind === "unknown") outcome = "undetermined";
+    else if (selection.kind === "missing") outcome = "architecture-missing";
     // Dependency commands require a dylib; generic dyld image loadability
     // also admits main executables and bundles for different operations.
-    else if (slice.file_type_code !== 6) outcome = "not-loadable";
+    else if (selection.slice.file_type_code !== 6) outcome = "not-loadable";
     else {
+      const { slice } = selection;
       const platformResult = platformLoadability(context, slice);
       outcome =
         platformResult.outcome === "compatible"
@@ -544,10 +563,11 @@ const resolveDependency = async (
       : searched;
   const image =
     resolved.image === null ? undefined : context.images.get(resolved.image);
-  const slice =
+  const selection =
     image?.status === "parsed"
-      ? compatibleSlice(image.slices, context.processIdentity)
+      ? compatibleSlice(machoImageSlices(image), context.processIdentity)
       : undefined;
+  const slice = selection?.kind === "selected" ? selection.slice : undefined;
   return {
     root: context.root,
     architecture: context.processIdentity.architecture,
@@ -602,11 +622,12 @@ const traceProcess = async (
       const image = edge.resolution.image;
       if (image === null || context.loaded.has(image)) continue;
       const facts = context.images.get(image);
-      const slice =
+      const selection =
         facts?.status === "parsed"
-          ? compatibleSlice(facts.slices, context.processIdentity)
+          ? compatibleSlice(machoImageSlices(facts), context.processIdentity)
           : undefined;
-      if (slice === undefined) continue;
+      if (selection?.kind !== "selected") continue;
+      const { slice } = selection;
       context.loaded.set(image, {
         slice,
         chain: [...current.chain, image],
@@ -627,6 +648,12 @@ const traceProcess = async (
   return edges;
 };
 
+/** Observed completeness of deriving executable roots from a directory walk. */
+export interface DylibRootEnumeration {
+  readonly status: "complete" | "unknown";
+  readonly limitations: readonly string[];
+}
+
 const projectTraceResult = (input: {
   readonly images: ReadonlyMap<string, MachoImageFacts>;
   readonly roots: DylibTrace["roots"];
@@ -636,6 +663,7 @@ const projectTraceResult = (input: {
   readonly environmentRoots: ReadonlySet<string>;
   readonly unknownPlatformCandidates: ReadonlySet<string>;
   readonly implicitMacOSPlatformCandidates: ReadonlySet<string>;
+  readonly rootEnumeration: DylibRootEnumeration | undefined;
 }): DylibTrace => {
   const reported = [...input.images.entries()]
     .filter(([, facts]) => facts.status !== "not-mach-o")
@@ -654,7 +682,9 @@ const projectTraceResult = (input: {
           ? null
           : facts.reason,
       slices:
-        facts.status === "parsed" ? facts.slices.map(withoutDependencies) : [],
+        facts.status === "parsed"
+          ? machoImageSlices(facts).map(withoutDependencies)
+          : [],
     })),
     edges: [...input.edges],
     findings: deriveFindings(input.edges, input.rootSlices),
@@ -663,7 +693,8 @@ const projectTraceResult = (input: {
         unparsed.length === 0 &&
         input.withoutArchitecture.length === 0 &&
         input.environmentRoots.size === 0 &&
-        input.unknownPlatformCandidates.size === 0
+        input.unknownPlatformCandidates.size === 0 &&
+        input.rootEnumeration?.status !== "unknown"
           ? "complete"
           : "partial",
       unparsed_images: unparsed,
@@ -671,6 +702,7 @@ const projectTraceResult = (input: {
     },
     limitations: [
       ...DYLIB_RESOLUTION_LIMITATIONS,
+      ...(input.rootEnumeration?.limitations ?? []),
       ...(input.environmentRoots.size === 0
         ? []
         : [
@@ -697,6 +729,7 @@ export const traceDylibLoading = async (
     readonly roots: readonly string[];
     /** Mach-O files whose root role could not be classified because they did not parse. */
     readonly unclassified?: readonly string[];
+    readonly rootEnumeration?: DylibRootEnumeration;
     readonly architecture?: string;
     readonly signal?: AbortSignal;
   },
@@ -715,7 +748,7 @@ export const traceDylibLoading = async (
     const facts = await view.image(root);
     images.set(root, facts);
     if (facts.status !== "parsed") continue;
-    const slices = facts.slices.filter(
+    const slices = machoImageSlices(facts).filter(
       ({ architecture }) =>
         request.architecture === undefined ||
         architecture === request.architecture,
@@ -773,6 +806,7 @@ export const traceDylibLoading = async (
     environmentRoots,
     unknownPlatformCandidates,
     implicitMacOSPlatformCandidates,
+    rootEnumeration: request.rootEnumeration,
   });
 };
 
@@ -780,6 +814,7 @@ const withoutDependencies = (
   slice: MachoSlice,
 ): Omit<MachoSlice, "dependencies"> => ({
   architecture: slice.architecture,
+  ...(slice.hidden === undefined ? {} : { hidden: slice.hidden }),
   slice_offset: slice.slice_offset,
   slice_size: slice.slice_size,
   cpu_type: slice.cpu_type,

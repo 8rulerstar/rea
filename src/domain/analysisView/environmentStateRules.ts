@@ -207,8 +207,12 @@ export const IDENTITY_NAMES = [
 ];
 const VERSION_SEGMENT = /^v\d+(?:\.\d+)*$/u;
 
-export const segmentsOf = (path: string): string[] =>
-  path.split("/").filter((segment) => segment.length > 0);
+export const segmentsOf = (path: string): string[] => {
+  const segments = path.split("/");
+  if (segments[0] === "") segments.shift();
+  if (segments.at(-1) === "") segments.pop();
+  return segments;
+};
 export const isParam = (segment: string): boolean =>
   segment.startsWith("{") && segment.endsWith("}");
 export const isObject = (value: JsonValue | undefined): value is JsonObject =>
@@ -296,7 +300,7 @@ export const selectedCollection = (
 export const lastSegmentValue = (path: string): string =>
   decodedSegment(segmentsOf(path).at(-1) ?? "");
 
-/** A path's non-empty segments, so a trailing slash names the same collection. */
+/** A path's segments, preserving repeated separators; one trailing slash names the same collection. */
 export const normalizedPath = (path: string): string =>
   `/${segmentsOf(path).join("/")}`;
 
@@ -383,16 +387,17 @@ export const rootOf = (
 };
 
 /** Value bytes as retained state, charged before a value is kept. */
-export const jsonBytes = (value: JsonValue): number => {
+export const stateValueRetentionBytes = (value: JsonValue): number => {
   if (typeof value === "string") return textBytes(value.length);
   if (Array.isArray(value))
     return value.reduce<number>(
-      (sum, item) => sum + jsonBytes(item),
+      (sum, item) => sum + stateValueRetentionBytes(item),
       ENTRY_BYTES,
     );
   if (isObject(value))
     return Object.entries(value).reduce<number>(
-      (sum, [name, item]) => sum + textBytes(name.length) + jsonBytes(item),
+      (sum, [name, item]) =>
+        sum + textBytes(name.length) + stateValueRetentionBytes(item),
       ENTRY_BYTES,
     );
   return ENTRY_BYTES;
@@ -591,6 +596,25 @@ export const listItems = (
   return Array.isArray(items) && items.every(isObject) ? items : undefined;
 };
 
+/** An observed item count, retaining the original value separately for rendering. */
+export const recordedItemCount = (
+  value: JsonValue | undefined,
+): number | undefined =>
+  typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/u.test(value)
+      ? Number(value)
+      : undefined;
+
+/** Spell a changed count with the recorded numeric/string type and digit width. */
+export const formatItemCount = (
+  count: number,
+  observed: JsonValue,
+): JsonValue =>
+  typeof observed === "string"
+    ? String(count).padStart(observed.length, "0")
+    : count;
+
 /** One entity as a view shows it: the view's fields it has, view-specific values first; volatile fields take `observed` values when given. */
 export const renderStateEntity = (
   entity: StateEntity,
@@ -645,10 +669,13 @@ export const renderStateList = (
 ): JsonValue => {
   const listed = listItems(base, view.pointer)?.length;
   return view.counters.reduce(
-    (body, name) =>
-      at(base, pointerTo(name)) === listed
-        ? replaceAt(body, pointerTo(name), items.length)
-        : body,
+    (body, name) => {
+      const observed = at(base, pointerTo(name));
+      if (listed === undefined || recordedItemCount(observed) !== listed)
+        return body;
+      const count = formatItemCount(items.length, observed!);
+      return replaceAt(body, pointerTo(name), count);
+    },
     replaceAt(base, view.pointer, [...items]),
   );
 };

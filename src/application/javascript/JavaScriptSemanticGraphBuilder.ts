@@ -19,7 +19,10 @@ import type {
 import { sourceRangesEqual as rangesEqual } from "../../domain/javascript/javascriptStaticAnalysisHelpers.js";
 import type { JavaScriptApplicationGraph } from "../../domain/javascript/javascriptApplicationGraph.js";
 import type { JavaScriptArtifactAnalysis } from "./JavaScriptArtifactAnalysisTypes.js";
-import type { JavaScriptArtifactFile } from "../../domain/javascript/javascriptArtifactFiles.js";
+import {
+  javaScriptSemanticSourceExclusion,
+  type JavaScriptArtifactFile,
+} from "../../domain/javascript/javascriptArtifactFiles.js";
 import {
   projectSemanticEvents,
   projectSemanticTimers,
@@ -31,6 +34,7 @@ import {
   projectSemanticRequests,
 } from "./JavaScriptSemanticGraphDataProjection.js";
 import { projectSemanticResources } from "./JavaScriptSemanticGraphResourceProjection.js";
+import { projectSemanticAssignments } from "./JavaScriptSemanticGraphAssignmentProjection.js";
 import { projectSemanticObjects } from "./JavaScriptSemanticGraphObjectProjection.js";
 import { projectSemanticValues } from "./JavaScriptSemanticGraphValueProjection.js";
 import {
@@ -156,16 +160,19 @@ export const buildJavaScriptSemanticGraph = ({
         analyzed.semantic.ir,
         analyzed.javascript?.electron.call_paths,
       );
-    else if (
-      !analyzed.file.text.included &&
-      analyzed.file.text.reason === "outside-analysis-scope"
-    )
-      projection.recordUnavailableFile(
+    else {
+      const reason = javaScriptSemanticSourceExclusion(
         analyzed.file,
-        "Source was not analyzed because it is outside the caller-selected source_paths.",
-        null,
-        "incomplete-module",
+        analyzed.javascript?.parse_status ?? null,
       );
+      if (reason !== null)
+        projection.recordUnavailableFile(
+          analyzed.file,
+          reason,
+          null,
+          "incomplete-module",
+        );
+    }
   }
   return projection.finish(rootArtifactSha256, applicationGraph);
 };
@@ -706,6 +713,8 @@ function* projectFileSteps(
     returnSiteNodes,
     argumentNodes: new Map(),
     referenceNodes: [],
+    readNodes: [],
+    writeNodes: [],
     callResolutions: new Map(
       ir.callSites.map((call) => [
         call.callSiteId,
@@ -852,7 +861,11 @@ function* projectDefinitionsAndReferences(
       reference.bindingId === null
         ? undefined
         : context.bindingNodes.get(reference.bindingId);
-    if (expression !== null) context.referenceNodes.push(expression);
+    if (expression !== null) {
+      context.referenceNodes.push(expression);
+      if (reference.role === "read") context.readNodes.push(expression);
+      if (reference.role === "write") context.writeNodes.push(expression);
+    }
     if (binding === undefined || expression === null) continue;
     if (reference.role === "read")
       addRelation(context.state, {
@@ -971,6 +984,7 @@ const FILE_PROJECTION_PASSES: readonly ((
 ) => Iterator<void, void> | void)[] = [
   projectSemanticValues,
   projectSemanticObjects,
+  projectSemanticAssignments,
   projectCalls,
   projectSemanticPromises,
   projectSemanticEvents,

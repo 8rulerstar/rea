@@ -1,3 +1,4 @@
+import { createMcpSchemaValidation } from "../../fixtures/mcpSchemaValidation.js";
 import { advertisedMcpToolSchemas } from "../../fixtures/advertisedMcpTool.js";
 import { API_SURFACE_EXAMPLE } from "../../../src/contracts/analysisViewApiSurfaceExample.js";
 import { ENVIRONMENT_MANIFEST_EXAMPLE } from "../../../src/contracts/analysisViewEnvironmentManifestExample.js";
@@ -14,8 +15,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
-import { Ajv2020 } from "ajv/dist/2020.js";
-import { expect, it, onTestFinished } from "vitest";
+import { afterAll, expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
 
 import { BinaryLayoutService } from "../../../src/application/binaryDiagnostics/BinaryLayoutService.js";
@@ -51,6 +51,9 @@ import { wasmArtifactFixture } from "../../fixtures/wasm/artifact.js";
 import { evmInterfaceFixture } from "../../fixtures/evm/interface.js";
 import type { RelationshipCoverage } from "../../../src/domain/relationshipCoverage.js";
 
+const schemaValidation = createMcpSchemaValidation();
+afterAll(() => schemaValidation.clear());
+
 const connect = async (
   binaryLayout?: BinaryLayoutService,
   webNetworkCapture?: WebNetworkCaptureService,
@@ -67,7 +70,10 @@ const connect = async (
       ...(webNetworkCapture === undefined ? {} : { webNetworkCapture }),
     },
   );
-  const client = new Client({ name: "analysis-view-mcp", version: "1" });
+  const client = new Client(
+    { name: "analysis-view-mcp", version: "1" },
+    { jsonSchemaValidator: schemaValidation },
+  );
   onTestFinished(async () => {
     await client.close();
     await server.close();
@@ -85,6 +91,7 @@ it("preserves native relationship coverage through inline and retained MCP views
   const { ajv, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const coverages: (RelationshipCoverage | undefined)[] = [
     {
@@ -156,6 +163,7 @@ it("advertises typed module references and preserves portable/retained Evidence 
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const view = {
     kind: "javascript",
@@ -262,9 +270,7 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
   const advertised = (await client.listTools()).tools.find(
     (tool) => tool.name === "inspect_analysis_view",
   );
-  expect(advertised?.description).toContain(
-    'Native function Evidence requires kind native: view: {kind: "native", facet: "procedure"}',
-  );
+  expect(advertised?.name).toBe("inspect_analysis_view");
   const provider = { id: "ghidra", name: "Ghidra", version: "12.1.4" };
   const profile = createAnalysisProfile(provider, { language: "fixture" });
   const parent = createEvidence(
@@ -294,22 +300,24 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
     const retained = session.recordEvidence(record);
     if (!retained.ok) throw retained.error;
   }
-  const unsupportedSummary = await client.callTool({
+  // The summary stays compact however large the retained pseudocode is.
+  const summary = await client.callTool({
     name: "inspect_analysis_view",
     arguments: {
       source: { kind: "retained-evidence", evidence_id: parent.evidence_id },
       view: { kind: "summary" },
     },
   });
-  expect(parseMcpToolError(unsupportedSummary).error).toMatchObject({
-    code: "invalid_request",
-    details: {
-      issues: [
-        {
-          path: ["view"],
-          message: "analyze_function Evidence requires a native view.",
-        },
-      ],
+  expect(summary.isError, JSON.stringify(summary.content)).not.toBe(true);
+  expect(
+    toolContract("inspect_analysis_view").outputSchema.parse(
+      summary.structuredContent,
+    ).normalized_result,
+  ).toMatchObject({
+    kind: "summary",
+    parent_evidence_id: parent.evidence_id,
+    summary: {
+      pseudocode: { available: true, code_units: 6 * 1024 * 1024 },
     },
   });
   const broad = await client.callTool({
@@ -340,9 +348,10 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
   const result = toolContract("get_evidence_bundle").outputSchema.parse(
     response.structuredContent,
   ).result;
+  // Two analyze_function records plus the retained summary view.
   expect(result).toMatchObject({
     kind: "evidence-bundle-summary",
-    total_retained_records: 2,
+    total_retained_records: 3,
     matching_records: 1,
     records: [
       {
@@ -406,6 +415,7 @@ it("advertises exact schemas and projects one layout section from retained Evide
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   expect(
     ajv.validate(inputSchema, {
@@ -757,7 +767,7 @@ it("delivers a bounded native dossier view over MCP without a Ghidra provider or
   );
   if (advertised?.outputSchema === undefined)
     throw new Error("missing view schemas");
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  const ajv = schemaValidation.assertions;
   const inputSchema: Record<string, unknown> = advertised.inputSchema;
   const outputSchema: Record<string, unknown> = advertised.outputSchema;
   const arguments_ = {
@@ -958,9 +968,10 @@ it("reads successive native source pages directly from a completed-result transp
   );
   onTestFinished(() => harness.close());
   const { mcp: client, session, calls } = harness;
+  // Complete delivery of an oversized dossier fails transport and points at the retained parent.
   const failed = await client.callTool({
     name: "analyze_function",
-    arguments: { procedure: "0x401000" },
+    arguments: { procedure: "0x401000", detail: "complete" },
   });
   expect(failed.isError).toBe(true);
   const limits = z
@@ -1230,6 +1241,7 @@ it("extracts an environment state identically from retained, portable and file M
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const capture = environmentStateCaptureFixture();
   const parent = analysisViewCaptureEvidence(capture);
@@ -1303,6 +1315,7 @@ it("projects an environment manifest identically from retained, portable and fil
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const capture = environmentManifestCaptureFixture();
   const parent = analysisViewCaptureEvidence(capture);

@@ -1,6 +1,8 @@
+import { isSelectedRegularFileError } from "../filesystem/RegularFile.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import {
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
   artifactFileCancellationCause,
   assertArtifactReadActive,
   bindArtifactFileCleanup,
@@ -101,7 +103,12 @@ export class RustBinaryProvider implements RustBinaryPort {
           selected.fileOffset,
         );
         const report = {
-          ...image,
+          format: image.format,
+          architecture: image.architecture,
+          bits: image.bits,
+          byte_order: image.byte_order,
+          auditable_metadata: image.auditable_metadata,
+          rustc_commit: image.rustc_commit,
           artifact: {
             path: input.path,
             sha256: snapshot.sha256,
@@ -172,9 +179,19 @@ const limitationsFor = (
   "Embedded dependency metadata is file content. It does not authenticate package names, versions, sources, or the compiler that produced the binary.",
   "Only the .dep-v0 dependency section and read-only compiler path strings are inspected. Functions, types, and runtime behavior are not recovered.",
   "Resource guards bound the selected file to 256 MiB, a dependency section to 1 MiB, inflated JSON to the smaller of 8 MiB and 64 times the section size, and the complete report to 8 MiB. Package and dependency counts are admitted against that output budget before schema cloning, graph objects, or reverse-edge allocation.",
-  ...(image.auditable_metadata === null
+  ...(image.section_names_limitation === undefined
+    ? []
+    : [image.section_names_limitation]),
+  ...(image.auditable_metadata === null &&
+  image.section_names_limitation === undefined
     ? [
         "No .dep-v0 section was found. Absence of .dep-v0 does not mean the binary has no dependencies.",
+      ]
+    : []),
+  ...(image.auditable_metadata === null &&
+  image.section_names_limitation !== undefined
+    ? [
+        "The presence of .dep-v0 could not be determined because ELF section names are unavailable.",
       ]
     : []),
   ...unknownFormatLimitation(image.auditable_metadata?.format_version),
@@ -222,8 +239,13 @@ const rustcLimitation = (
   ];
 };
 
-const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
-  if (cause instanceof AnalysisError) return cause;
+const failureForPrimary = (
+  facts: ArtifactFilePrimaryFacts,
+  path: string,
+): AnalysisError => {
+  const { cause, origin } = facts;
+  if (origin === "owned-or-classified" && cause instanceof AnalysisError)
+    return cause;
   if (cause instanceof RustAuditableResourceFailure)
     return new AnalysisResourceConstraintError(
       OPERATION,
@@ -258,11 +280,11 @@ const failureForPrimary = (cause: unknown, path: string): AnalysisError => {
             message: `Selected artifact ${path}: ${cause.message}`,
           },
         ]);
-  return artifactFailure(cause, path);
+  return artifactFailure(facts, path);
 };
 
 const failureFor = (cause: unknown, path: string): AnalysisError => {
-  const primary = failureForPrimary(artifactFilePrimaryFailure(cause), path);
+  const primary = failureForPrimary(artifactFilePrimaryFacts(cause), path);
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
     return primary;
   const cleanup = new ProviderCleanupError(
@@ -276,19 +298,22 @@ const failureFor = (cause: unknown, path: string): AnalysisError => {
   return error;
 };
 
-const artifactFailure = (cause: unknown, path: string): AnalysisError => {
-  if (cause instanceof ArtifactReaderFailure)
+const artifactFailure = (
+  facts: ArtifactFilePrimaryFacts,
+  path: string,
+): AnalysisError => {
+  const { cause, origin } = facts;
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure
+  )
     return artifactReaderFailure(cause, path);
   if (cause instanceof Error && "code" in cause) {
     if (cause.code === "EACCES" || cause.code === "EPERM")
       return new AnalysisAccessDeniedError(OPERATION, path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],

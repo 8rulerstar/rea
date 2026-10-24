@@ -13,6 +13,7 @@ import {
   DEFAULT_GHIDRA_STARTUP_TIMEOUT_MS,
   DEFAULT_HOPPER_STARTUP_TIMEOUT_MS,
   DEFAULT_SWIFTC_COMPILE_TIMEOUT_MS,
+  ghidraDecompileTimeoutSchema,
   providerStartupTimeoutSchema,
 } from "./providerStartupTimeout.js";
 import { mcpInputSchemaProfileSchema } from "./mcpInputSchemaProfile.js";
@@ -30,6 +31,7 @@ import {
   mcpToolsListBudgetMsSchema,
 } from "./mcpStartupBudgets.js";
 import { parseLoaderArgs, parseStringArray } from "./parsers.js";
+import { processStartConfigurationSchema } from "./processStart.js";
 
 const environmentSchema = z.object({
   REA_ANALYSIS_PROVIDER: analysisProviderSelectorSchema.default("auto"),
@@ -76,6 +78,7 @@ const environmentSchema = z.object({
   REA_SWIFTC_COMPILE_TIMEOUT_MS: providerStartupTimeoutSchema.default(
     DEFAULT_SWIFTC_COMPILE_TIMEOUT_MS,
   ),
+  REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS: ghidraDecompileTimeoutSchema.optional(),
   REA_GHIDRA_LANGUAGE_ID: ghidraLanguageIdSchema.optional(),
   REA_GHIDRA_COMPILER_SPEC_ID: ghidraCompilerSpecIdSchema.optional(),
   REA_GHIDRA_DISABLED_ANALYZERS: ghidraDisabledAnalyzersSchema.optional(),
@@ -93,9 +96,7 @@ const environmentSchema = z.object({
   HOPPER_TARGET_PATH: z.string().min(1).optional(),
   HOPPER_TARGET_KIND: z.enum(["executable", "database"]).default("executable"),
   HOPPER_LOADER_ARGS_JSON: z.string().optional(),
-  REA_LOG_LEVEL: z
-    .enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"])
-    .default("info"),
+  REA_LOG_LEVEL: processStartConfigurationSchema.shape.REA_LOG_LEVEL,
   REA_REFERENCE_SECRET_PATTERNS_JSON: z.string().default("[]"),
 });
 
@@ -120,7 +121,7 @@ export const parseJebMcpTimeoutMs = (
   );
 };
 
-type Environment = Omit<
+export type Environment = Omit<
   z.infer<typeof environmentSchema>,
   "HOPPER_LOADER_ARGS_JSON" | "REA_REFERENCE_SECRET_PATTERNS_JSON"
 > & {

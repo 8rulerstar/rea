@@ -250,6 +250,8 @@ export class JavaScriptRouteScan {
   };
   readonly #rejected = new WeakSet<t.Node>();
   readonly #seen = new Set<string>();
+  readonly #nextPaths: { value: string; node: t.Node; computed: boolean }[] =
+    [];
   readonly #literalPaths: { value: string; node: t.Node }[] = [];
   readonly #propertyValues = new WeakSet<t.Node>();
   readonly #dynamicValues = new WeakMap<t.Node, DynamicRouteValueOwner>();
@@ -533,34 +535,36 @@ export class JavaScriptRouteScan {
       }
       const value = stringValue(node);
       if (value === undefined) return;
-      const next = classifyNextAppRoutePath(value);
-      if (
+      const reference =
+        expressionParent !== null &&
+        (t.isImportDeclaration(expressionParent) ||
+          t.isExportNamedDeclaration(expressionParent) ||
+          t.isExportAllDeclaration(expressionParent) ||
+          t.isImportExpression(expressionParent) ||
+          t.isCallExpression(expressionParent) ||
+          t.isOptionalCallExpression(expressionParent) ||
+          t.isNewExpression(expressionParent));
+      const next = classifyNextAppRoutePath(
+        value,
+        reference
+          ? { kind: "source-reference" }
+          : { kind: "source-literal", runtime: "unknown" },
+      );
+      const computed =
         (t.isBinaryExpression(expressionParent) &&
           expressionParent.operator === "+") ||
         (t.isTemplateLiteral(expressionParent) &&
-          expressionParent.expressions.length > 0)
-      ) {
-        if (next !== undefined)
-          this.#unknown(
-            "next-app-chunk",
-            expressionParent!,
-            "The module filename is part of a computed expression; a complete page path remains unknown.",
-          );
-        return;
-      }
-      if (next?.kind === "unknown") {
-        this.#unknown("next-app-chunk", node, next.reason);
-        return;
-      }
-      if (next?.kind === "known")
-        this.#emit(
-          next.path,
-          "next-app-chunk",
-          [{ value, location: range(node), origin: "next-app-path" }],
+          expressionParent.expressions.length > 0);
+      if (next !== undefined && this.#queue(node, value))
+        this.#nextPaths.push({
+          value,
           node,
-          false,
-        );
+          computed,
+        });
       if (
+        !computed &&
+        !reference &&
+        next === undefined &&
         !this.#propertyValues.has(node) &&
         routePath(value) !== undefined &&
         this.#queue(node, value)
@@ -703,6 +707,30 @@ export class JavaScriptRouteScan {
   *finishSteps(): Generator<void, JavaScriptRouteSourceFacts> {
     const index = this.index;
     if (this.#result.capacity !== null) return this.#result;
+    for (const { value, node, computed } of this.#nextPaths) {
+      yield;
+      if (this.#result.capacity !== null) return this.#result;
+      const next = classifyNextAppRoutePath(value, {
+        kind: "source-literal",
+        runtime: this.#nextRuntime ? "next" : "unknown",
+      });
+      if (computed) {
+        this.#unknown(
+          "next-app-chunk",
+          node,
+          "The module filename is part of a computed expression; a complete page path remains unknown.",
+        );
+      } else if (next?.kind === "unknown")
+        this.#unknown("next-app-chunk", node, next.reason);
+      else if (next?.kind === "known")
+        this.#emit(
+          next.path,
+          "next-app-chunk",
+          [{ value, location: range(node), origin: "next-app-path" }],
+          node,
+          false,
+        );
+    }
     if (
       this.#calls.length > 0 ||
       this.#automaticRoots.size > 0 ||
@@ -982,8 +1010,16 @@ export class JavaScriptRouteScan {
       if (!t.isIdentifier(node)) return node;
       if (seen.has(node) || !this.#queue(node)) return;
       seen.add(node);
+      const binding = index.bindingForReferenceAt(node);
+      if (binding === undefined) return;
+      const read = semanticBindingAtRead(
+        binding,
+        node,
+        index.bindings.parentsByNode,
+      );
+      if (!read.hasDefiniteInitializer) return;
       const initializer = semanticStableInitializer(
-        index.bindingForReferenceAt(node),
+        read.binding,
         index.bindings,
       );
       if (
@@ -1132,17 +1168,29 @@ export class JavaScriptRouteScan {
         visited: new WeakMap(),
       };
       pending.push({ kind: "finish", lookup: work, key, values });
-      for (const reference of this.#selectedReferences(work.receiver, work.key))
+      for (const reference of this.#selectedReferences(
+        work.receiver,
+        work.key,
+      )) {
+        if (reference.widenedGetterResult === true)
+          this.#unknown(
+            mechanism,
+            node,
+            "An incomplete getter selection, including cyclic expansion, cannot establish its complete data sources.",
+          );
         if (
           !this.#retainSelection(
             pending,
-            reference.node,
+            // The reference owner identifies the allocation directly; a
+            // declaration identifier here is not a read before initialization.
+            reference.ownerInitializer ?? reference.node,
             reference.path,
             0,
             returned,
           )
         )
           return;
+      }
     }
   }
 
@@ -1379,7 +1427,11 @@ export class JavaScriptRouteScan {
         fields.unknownKeys ||
         [...fields.dynamicNames].some(
           (key) =>
-            typed || key === "path" || key === "route" || key === "children",
+            typed ||
+            key === "path" ||
+            key === "route" ||
+            key === "children" ||
+            key === "index",
         );
       if (uncertain) {
         this.#unknown(
@@ -1433,8 +1485,16 @@ export class JavaScriptRouteScan {
         };
         emit = true;
       } else if (!typed) {
-        const value = own.get("index")?.value;
+        const flag = own.get("index")?.value;
+        const value =
+          flag === undefined ? undefined : this.#resolve(flag, site, index);
         emit = t.isBooleanLiteral(value) && value.value;
+        if (flag !== undefined && !t.isBooleanLiteral(value))
+          this.#unknown(
+            mechanism,
+            flag,
+            "The index-route flag is not a known boolean at this use.",
+          );
       }
       if (emit && link !== undefined) {
         const segments: JavaScriptRouteSegment[] = [];

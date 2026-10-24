@@ -1,4 +1,4 @@
-import { writeFile, type FileHandle } from "node:fs/promises";
+import { open, writeFile, type FileHandle } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -63,19 +63,32 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { RustBinaryProvider } from "../../src/rust/RustBinaryProvider.js";
 import { RustBinaryService } from "../../src/application/rust/RustBinaryService.js";
 import { AnalysisError } from "../../src/domain/analysisErrorBase.js";
-import { parseEvidence } from "../../src/domain/evidence.js";
+import { createEvidence, parseEvidence } from "../../src/domain/evidence.js";
 import { projectAnalysisError } from "../../src/domain/analysisErrorProjection.js";
 import {
   AnalysisCancelledError,
+  AnalysisInputError,
   AnalysisArtifactChangedError,
   AnalysisAccessDeniedError,
   AnalysisResourceConstraintError,
 } from "../../src/domain/analysisErrorCore.js";
 import {
   ArtifactFileCleanupFailure,
+  mapArtifactFileFailure,
+  artifactFilePrimaryFacts,
   withArtifactRegularFile,
 } from "../../src/artifacts/ArtifactFileOperation.js";
+import { AnalysisCleanupLease } from "../../src/artifacts/AnalysisCleanupLease.js";
+import { translateArtifactFailure } from "../../src/artifacts/ArtifactOperationFailure.js";
+import { OwnedFileHandle } from "../../src/filesystem/OwnedFileHandle.js";
+import {
+  OwnedRegularFileOperationFailure,
+  RegularFileCleanupFailure,
+  regularFileCancellation,
+} from "../../src/filesystem/OwnedRegularFile.js";
+import { RegularFileOperationCancelled } from "../../src/filesystem/RegularFile.js";
 import { ArtifactResourceScope } from "../../src/artifacts/ArtifactResourceScope.js";
+import { readStableArtifact } from "../../src/artifacts/readStableArtifact.js";
 import { ArtifactReaderFailure } from "../../src/artifacts/ArtifactReader.js";
 import { GoBinaryProvider } from "../../src/go/GoBinaryProvider.js";
 import { PythonPycProvider } from "../../src/python/PythonPycProvider.js";
@@ -84,10 +97,12 @@ import { PeResourcesProvider } from "../../src/native/pe/PeResourcesProvider.js"
 import { Il2cppMetadataProvider } from "../../src/il2cpp/Il2cppMetadataProvider.js";
 import { ElfNotesProvider } from "../../src/native/elf/ElfNotesProvider.js";
 import { PeCertificatesProvider } from "../../src/native/pe/PeCertificatesProvider.js";
+import { PeImportsProvider } from "../../src/native/pe/PeImportsProvider.js";
 import { NativeExportsProvider } from "../../src/native/exports/NativeExportsProvider.js";
 import { BeamProvider } from "../../src/erlang/BeamProvider.js";
 import { inspectElfNotesInputSchema } from "../../src/domain/native/elfNotes.js";
 import { inspectPeCertificatesInputSchema } from "../../src/domain/native/peCertificates.js";
+import { inspectPeImportsInputSchema } from "../../src/domain/native/peImports.js";
 import { inspectNativeExportsInputSchema } from "../../src/domain/native/nativeExports.js";
 import { inspectErlangBeamInputSchema } from "../../src/domain/erlang/beam.js";
 import { ModelArtifactProvider } from "../../src/model/ModelArtifactProvider.js";
@@ -696,13 +711,160 @@ it("preserves upstream resource-bound facts through an unconfirmed descriptor cl
   }
 });
 
-const fileFailureProviders = [
+it.each([
+  "physical cancellation",
+  "mapped foreign artifact",
+  "foreign nested artifact",
+] as const)(
+  "preserves %s provenance while retrying only the owned descriptor",
+  async (shape) => {
+    const path = await selectedImage();
+    const foreignPath = join(path, "..", "foreign.txt");
+    await writeFile(foreignPath, "foreign owner bytes");
+    const foreign = new OwnedFileHandle(await open(foreignPath, "r"));
+    const foreignLease = AnalysisCleanupLease.forCloseOwner(
+      foreign,
+      foreignPath,
+    );
+    const foreignPartial = createEvidence(
+      undefined,
+      { id: "foreign", name: "foreign owner", version: null },
+      {
+        operation: "inspect_artifact",
+        parameters: {},
+        result: { foreign: true },
+        confidence: "observed",
+      },
+    );
+    const foreignReason = { source: "foreign cancellation" };
+    const foreignFailure = new ArtifactReaderFailure(
+      "cancelled",
+      "foreign artifact failure",
+      {
+        cause: foreignReason,
+        cancellation: { reason: foreignReason },
+        cleanup: { resources: [foreignPath], reason: "foreign cleanup" },
+        cleanupLeases: [foreignLease],
+        partialObservation: foreignPartial,
+      },
+    );
+    const raw =
+      shape === "physical cancellation"
+        ? new RegularFileOperationCancelled(foreignReason)
+        : shape === "foreign nested artifact"
+          ? new ArtifactFileCleanupFailure(
+              new RegularFileCleanupFailure({
+                path: foreignPath,
+                owner: foreign,
+                outcome: { kind: "failed", cause: foreignFailure },
+                cleanupCause: new Error("foreign descriptor close failure"),
+              }),
+              foreignLease,
+            )
+          : foreignFailure;
+    const marker = new OwnedRegularFileOperationFailure(raw);
+    const controller = new AbortController();
+    const lateReason = { source: "late owned-close abort" };
+    fault.onClose = () => controller.abort(lateReason);
+    const scope = new ArtifactResourceScope();
+    try {
+      const failure = await scope
+        .run(() =>
+          withArtifactRegularFile(path, scope, controller.signal, async () => {
+            throw marker;
+          }),
+        )
+        .catch((cause: unknown) => cause);
+      if (!(failure instanceof ArtifactFileCleanupFailure))
+        throw new Error("Expected the actual input descriptor's failed close");
+      expect(artifactFilePrimaryFacts(failure)).toEqual({
+        cause: raw,
+        origin: "opaque-operation",
+      });
+      const projected = mapArtifactFileFailure(failure, (primary) => {
+        expect(primary).toBe(raw);
+        return shape === "mapped foreign artifact"
+          ? new ArtifactReaderFailure(
+              "unavailable",
+              "authored permission classification",
+              { cause: raw },
+            )
+          : primary;
+      });
+      if (!(projected instanceof ArtifactFileCleanupFailure))
+        throw new Error(
+          "Expected the same owned descriptor envelope after projection",
+        );
+      for (const envelope of [failure, projected]) {
+        expect(envelope.reason).toBe(
+          envelope === projected && shape === "mapped foreign artifact"
+            ? "unavailable"
+            : "io",
+        );
+        expect(envelope.cancellation).toBeUndefined();
+        expect(envelope.partialObservation).toBeUndefined();
+        expect(envelope.cleanup?.resources).toEqual([path]);
+        expect(
+          regularFileCancellation(envelope.fileCleanupFailure),
+        ).toBeUndefined();
+      }
+      expect(failure.fileCleanupFailure.outcome).toEqual({
+        kind: "failed",
+        cause: raw,
+      });
+      expect(projected.fileCleanupFailure.operationFailure).toBe(marker);
+      expect(artifactFilePrimaryFacts(projected).cause).toBe(
+        projected.fileCleanupFailure.outcome.kind === "failed"
+          ? projected.fileCleanupFailure.outcome.cause
+          : undefined,
+      );
+      expect(artifactFilePrimaryFacts(projected).origin).toBe(
+        shape === "mapped foreign artifact"
+          ? "owned-or-classified"
+          : "opaque-operation",
+      );
+      expect(marker.operationCause).toBe(raw);
+      expect(projected.cleanupLease).toBe(failure.cleanupLease);
+      expect(projected.cleanupLeases).toEqual([failure.cleanupLease]);
+      const error = translateArtifactFailure("inspect_artifact", projected);
+      expect(error.cleanupResources).toEqual([path]);
+      expect(error.cleanupIncomplete).toBe(true);
+      expect(error.partialObservation).toBeUndefined();
+      expect(controller.signal.reason).toBe(lateReason);
+      expect(fault.handles).toHaveLength(1);
+      expect(fault.handles[0]!.fd).toBeGreaterThanOrEqual(0);
+      await expect(scope.close()).rejects.toThrow();
+      expect(foreign.handle.fd).toBeGreaterThanOrEqual(0);
+      fault.blocked.clear();
+      await scope.close();
+      expect(fault.handles[0]!.fd).toBe(-1);
+      expect(error.cleanupIncomplete).toBe(false);
+      expect(error.cleanupResources).toEqual([]);
+      expect(foreign.handle.fd).toBeGreaterThanOrEqual(0);
+      expect(foreignLease.released).toBe(false);
+      expect(foreignFailure.cleanup?.resources).toEqual([foreignPath]);
+      expect(foreignFailure.partialObservation).toBe(foreignPartial);
+    } finally {
+      fault.onClose = undefined;
+      fault.blocked.clear();
+      await scope.close();
+      await foreign.close();
+    }
+  },
+);
+
+const stableArtifactProviders = [
   ...staticProviders,
   ["ELF notes", () => new ElfNotesProvider()],
   ["PE certificates", () => new PeCertificatesProvider()],
+  ["PE imports", () => new PeImportsProvider()],
   ["native exports", () => new NativeExportsProvider()],
-  ["BEAM", () => new BeamProvider()],
   ["Python pyc", () => new PythonPycProvider()],
+] as const;
+
+const fileFailureProviders = [
+  ...stableArtifactProviders,
+  ["BEAM", () => new BeamProvider()],
 ] as const;
 
 const inspectFileFailure = (
@@ -726,6 +888,11 @@ const inspectFileFailure = (
       inspectPeCertificatesInputSchema.parse({ path }),
       options,
     );
+  if (provider instanceof PeImportsProvider)
+    return provider.inspect(
+      inspectPeImportsInputSchema.parse({ path }),
+      options,
+    );
   if (provider instanceof NativeExportsProvider)
     return provider.inspect(
       inspectNativeExportsInputSchema.parse({ path }),
@@ -743,6 +910,55 @@ const inspectFileFailure = (
     );
   return provider.inspect({ path }, options);
 };
+
+it.each(
+  stableArtifactProviders.flatMap(([name, makeProvider]) =>
+    [
+      ["ESTALE", "AnalysisInputError"],
+      ["ENOTFILE", "AnalysisInputError"],
+      ["EISDIR", "AnalysisInputError"],
+      ["ELOOP", "AnalysisInputError"],
+      ["EACCES", "AnalysisAccessDeniedError"],
+      ["EIO", undefined],
+    ].map(([code, expectedTag]) => ({ name, makeProvider, code, expectedTag })),
+  ),
+)(
+  "preserves $name descriptor failure classification for $code",
+  async ({ makeProvider, code, expectedTag }) => {
+    const path = await selectedImage();
+    const provider = makeProvider();
+    const physical = Object.assign(new Error("descriptor metadata failed"), {
+      code,
+    });
+    fault.blockNew = false;
+    fault.readFailure = { cause: physical };
+    try {
+      const result = await inspectFileFailure(provider, path);
+      if (result.ok) throw new Error("Expected physical read failure");
+      expect(result.error.cause).toBe(physical);
+      expect(result.error._tag).toBe(
+        expectedTag ??
+          (provider instanceof ElfNotesProvider ||
+          provider instanceof PeCertificatesProvider ||
+          provider instanceof PeResourcesProvider
+            ? "ArtifactOperationError"
+            : "ProviderAdapterError"),
+      );
+      if (result.error instanceof AnalysisInputError)
+        expect(result.error.issues).toEqual([
+          {
+            path: ["path"],
+            reason: "invalid_value",
+            message: expect.stringContaining(path),
+          },
+        ]);
+      expect(fault.handles).toHaveLength(1);
+      expect(fault.handles[0]!.fd).toBe(-1);
+    } finally {
+      await provider.close();
+    }
+  },
+);
 
 it.each(fileFailureProviders)(
   "uses the original %s physical failure across nested descriptor owners",
@@ -805,11 +1021,12 @@ it.each(
     try {
       const failure = await scope
         .run(() =>
-          withArtifactRegularFile(
+          readStableArtifact(
             path,
-            scope,
+            1024 * 1024,
             timing === "recorded" ? controller.signal : undefined,
-            async () => undefined,
+            undefined,
+            scope,
           ),
         )
         .catch((cause: unknown) => cause);

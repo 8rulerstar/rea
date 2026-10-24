@@ -175,6 +175,17 @@ const isReleasedWorkerRow = (entry: {
   entry.owned === false &&
   entry.is_active === false;
 
+/** Format-owner facts for a refused database/target binding, before any operation replies exist. */
+class IdaIdentityRefusal extends AnalysisProtocolError {
+  constructor(
+    readonly reason: string,
+    readonly recovery: string,
+    check: string,
+  ) {
+    super(reason, { diagnostics: { identity_check: check, reason, recovery } });
+  }
+}
+
 /** Serial read-only session whose lifecycle authority excludes an attached GUI. */
 export class IdaSessionClient implements AnalysisClient {
   #tail: Promise<void> = Promise.resolve();
@@ -228,7 +239,11 @@ export class IdaSessionClient implements AnalysisClient {
     const call = this.#tail.then(() => {
       if (!this.#ready || this.#closed || this.#closing) return undefined;
       if (wasCancelled(options))
-        return err(new AnalysisCancelledError(operation));
+        return err(
+          new AnalysisCancelledError(operation, {
+            cause: options?.signal?.reason,
+          }),
+        );
       return this.#execute(operation, parameters, options, true);
     });
     this.#tail = call.then(
@@ -237,7 +252,11 @@ export class IdaSessionClient implements AnalysisClient {
     );
     const result = await waitForAbortable(call, options?.signal);
     return result === ABORTED
-      ? err(new AnalysisCancelledError(operation))
+      ? err(
+          new AnalysisCancelledError(operation, {
+            cause: options?.signal?.reason,
+          }),
+        )
       : result;
   }
 
@@ -254,7 +273,11 @@ export class IdaSessionClient implements AnalysisClient {
         ),
       );
     if (wasCancelled(options))
-      return err(new AnalysisCancelledError(operation));
+      return err(
+        new AnalysisCancelledError(operation, {
+          cause: options?.signal?.reason,
+        }),
+      );
     if (operation !== "health" && !isIdaOperation(operation))
       return err(
         new AnalysisCapabilityUnavailableError(
@@ -320,7 +343,10 @@ export class IdaSessionClient implements AnalysisClient {
       if (!readyOnly) await this.#start(operation);
       const before = await this.#observe(options);
       failureContext.metadataBefore = before;
-      if (wasCancelled(options)) throw new AnalysisCancelledError(operation);
+      if (wasCancelled(options))
+        throw new AnalysisCancelledError(operation, {
+          cause: options?.signal?.reason,
+        });
       if (operation === "health") return this.#health(before);
       if (!isIdaOperation(operation))
         throw new AnalysisProtocolError(
@@ -329,14 +355,20 @@ export class IdaSessionClient implements AnalysisClient {
       const runner = this.#runner(options);
       failureContext.runner = runner;
       const result = await runner.run(operation, parameters);
-      if (wasCancelled(options)) throw new AnalysisCancelledError(operation);
+      if (wasCancelled(options))
+        throw new AnalysisCancelledError(operation, {
+          cause: options?.signal?.reason,
+        });
       failureContext.postOperationIdentityCheck = "started";
       const after = await this.#observe(
         options,
         (observed) => (failureContext.metadataAfter = observed),
       );
       failureContext.postOperationIdentityCheck = "verified";
-      if (wasCancelled(options)) throw new AnalysisCancelledError(operation);
+      if (wasCancelled(options))
+        throw new AnalysisCancelledError(operation, {
+          cause: options?.signal?.reason,
+        });
       return ok(
         createAnalysisExecution(result, IDA_PROVIDER_IDENTITY, {
           rawResult: {
@@ -411,29 +443,47 @@ export class IdaSessionClient implements AnalysisClient {
     context: IdaOperationFailureContext,
   ) {
     let failure: AnalysisError;
-    if (wasCancelled(options)) {
-      failure = new AnalysisCancelledError(operation, {
+    if (cause instanceof IdaIdentityRefusal) {
+      failure = new AnalysisOutputError(operation, cause.reason, {
         cause,
-        ...(cause instanceof AnalysisError
-          ? {
-              capturedOutput: cause.capturedOutput,
-              diagnostics: cause.diagnostics,
-              partialObservation: cause.partialObservation,
-              cleanup:
-                cause.cleanup ??
-                (cause.cleanupIncomplete
-                  ? {
-                      reason: cause.message,
-                      resources: cause.cleanupResources,
-                    }
-                  : undefined),
-            }
-          : {}),
+        userMessage: cause.reason,
+        remediationAction: cause.recovery,
+        diagnostics: cause.diagnostics,
       });
-      if (cause instanceof AnalysisError)
-        failure
-          .bindCleanupDependencies([cause])
-          .bindCleanupResourceOwner(cause);
+    } else if (cause instanceof AnalysisCancelledError) {
+      failure = new AnalysisCancelledError(operation, {
+        cause:
+          cause.cause === undefined ? options?.signal?.reason : cause.cause,
+        capturedOutput: cause.capturedOutput,
+        diagnostics: cause.diagnostics,
+        partialObservation: cause.partialObservation,
+        cleanup:
+          cause.cleanup ??
+          (cause.cleanupIncomplete
+            ? { reason: cause.message, resources: cause.cleanupResources }
+            : undefined),
+      })
+        .bindCleanupDependencies([cause])
+        .bindCleanupResourceOwner(cause);
+    } else if (
+      cause instanceof AnalysisTimeoutError &&
+      cause.operation !== operation
+    ) {
+      failure = new AnalysisTimeoutError(operation, cause.timeoutMs, {
+        cause,
+        capturedOutput: cause.capturedOutput,
+        diagnostics: cause.diagnostics,
+        partialObservation: cause.partialObservation,
+        cleanup: cause.cleanup,
+        ...(cause.userMessage === undefined
+          ? {}
+          : { userMessage: cause.userMessage }),
+        ...(cause.remediationAction === undefined
+          ? {}
+          : { remediationAction: cause.remediationAction }),
+      })
+        .bindCleanupDependencies([cause])
+        .bindCleanupResourceOwner(cause);
     } else if (
       cause instanceof ProviderAdapterError &&
       cause.operation === "transport"
@@ -648,12 +698,16 @@ export class IdaSessionClient implements AnalysisClient {
       if (
         !sameIdaHostPath(opened.session.input_path, this.#workspace.inputPath)
       )
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           "IDA opened a different input than the private admitted target copy.",
+          "Check the selected input and upstream worker binding. Retry only after retained private-worker cleanup is confirmed.",
+          "opened_input",
         );
       if (opened.session.session_id !== this.#workspace.sessionId)
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           "IDA returned an adopted or unexpected session instead of the requested private worker.",
+          "Use an IDA supervisor that honors the requested private worker session ID. Confirm retained cleanup before reopening the target.",
+          "worker_session",
         );
       const inventory = databaseListSchema.parse(
         await this.connection.call("idb_list", {}),
@@ -676,20 +730,22 @@ export class IdaSessionClient implements AnalysisClient {
         entry.is_active !== true ||
         !sameIdaHostPath(entry.input_path, this.#workspace.inputPath)
       )
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           "IDA did not return an active owned headless worker for the private input copy.",
+          "Configure the supervisor to return an active owned worker for the private input. Confirm retained cleanup before reopening the target.",
+          "owned_worker_binding",
         );
       this.#database = opened.session.session_id;
     }
     this.#ready = true;
   }
 
-  async #nativeMetadata(): Promise<JsonValue> {
+  async #nativeMetadata(signal?: AbortSignal): Promise<JsonValue> {
     if (this.connection.readResource === undefined)
       throw new AnalysisProtocolError(
         "Native IDA MCP requires resources/read for recorded input metadata.",
       );
-    return this.connection.readResource("ida://idb/metadata");
+    return this.connection.readResource("ida://idb/metadata", { signal });
   }
 
   async #observe(
@@ -700,14 +756,20 @@ export class IdaSessionClient implements AnalysisClient {
     if (this.config.mode === "attached") {
       const raw =
         this.config.protocol === "native"
-          ? await this.#nativeMetadata()
-          : await this.connection.call("get_metadata", {});
+          ? await this.#nativeMetadata(options?.signal)
+          : await this.connection.call(
+              "get_metadata",
+              {},
+              { signal: options?.signal },
+            );
       const metadata = legacyMetadataSchema.parse(raw);
       this.#metadata = raw;
       onObserved?.(raw);
       if (metadata.sha256.toLowerCase() !== this.target.sha256.toLowerCase())
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           `The attached IDA input SHA-256 does not match the selected target ${this.target.path}; open that target in IDA or use headless mode.`,
+          "Open the selected original input in IDA, or configure headless mode and reopen the target through REA.",
+          "attached_sha256",
         );
       identity = JSON.stringify([
         metadata.path,
@@ -716,8 +778,10 @@ export class IdaSessionClient implements AnalysisClient {
       ]);
     } else {
       if (this.#database === undefined || this.#workspace === undefined)
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           "IDA headless session has no database binding.",
+          "Close the REA analysis session and reopen the selected target using the configured headless supervisor.",
+          "database_binding",
         );
       const raw = await readSettledHealth(this.connection, {
         database: this.#database,
@@ -732,12 +796,26 @@ export class IdaSessionClient implements AnalysisClient {
         (await idaFileDigest(this.#workspace.inputPath)) !==
           this.#workspace.inputSha256
       )
-        throw new AnalysisProtocolError(
+        throw new IdaIdentityRefusal(
           "IDA headless input identity changed after target admission.",
+          "Close the REA analysis session, confirm private-worker cleanup, then reopen the selected original target.",
+          "headless_input",
         );
       if (metadata.auto_analysis_ready !== true)
-        throw new AnalysisProtocolError(
-          "IDA auto-analysis is incomplete or readiness is unknown; retry after analysis completes.",
+        throw new AnalysisCapabilityUnavailableError(
+          "ida",
+          "server_health",
+          metadata.auto_analysis_ready === false
+            ? "IDA auto-analysis is incomplete."
+            : "IDA auto-analysis readiness is unknown.",
+          {
+            retryable: metadata.auto_analysis_ready === false,
+            remediationAction:
+              metadata.auto_analysis_ready === false
+                ? "Wait for IDA auto-analysis to complete, then retry the request."
+                : "Inspect the upstream IDA worker's analysis readiness before retrying; unknown readiness does not establish active analysis.",
+            diagnostics: { auto_analysis_ready: metadata.auto_analysis_ready },
+          },
         );
       identity = JSON.stringify([
         this.#database,
@@ -750,8 +828,10 @@ export class IdaSessionClient implements AnalysisClient {
       this.#initialIdentity !== undefined &&
       identity !== this.#initialIdentity
     )
-      throw new AnalysisProtocolError(
-        "The attached IDA target or image base changed during the REA session; reopen the target.",
+      throw new IdaIdentityRefusal(
+        "The IDA target or image base changed during the REA session; reopen the target.",
+        "Close the REA analysis session and reopen the selected target after confirming the intended input and image base in IDA.",
+        "session_identity",
       );
     this.#initialIdentity = identity;
     return this.#metadata;
