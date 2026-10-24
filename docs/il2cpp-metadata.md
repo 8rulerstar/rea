@@ -375,8 +375,13 @@ resolved, the smallest row for every table entry is checked against the
 remaining report budget; each row and issue is then admitted as it is retained.
 Compact summaries omit `binary.generic_methods.issues` and keep its count in
 `counts.generic_method_issues`; query `collection: "generic_method_issues"`
-with `rows`, `indices`, `fields` and pagination. Like
-method addresses, these rows are derived from static tables; layout agreement
+with `rows`, `indices`, `fields` and pagination. Select only the instance and
+issue facts needed for the question. For a small report where both collections
+are needed, `detail: "complete"` can cost less than a summary followed by two
+pages. Paging saves irrelevant row text but adds calls and schema overhead; it
+does not imply lower total latency or memory. See the
+[completed-query measurements](verification/il2cpp-generic-instances-2026-10-24.md).
+Like method addresses, these rows are derived from static tables; layout agreement
 is structural evidence, not proof of runtime use.
 
 Contributor-reported verification against Il2CppDumper's `script.json` (same
