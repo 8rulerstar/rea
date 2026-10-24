@@ -437,9 +437,9 @@ it.each(["Game_Data", "Game_Data/Managed"])(
       buildManagedPeFixture({ references: ["UnityEngine.CoreModule"] }),
     );
     const { report } = await inspect(join(root, rootDirectory));
-    expect(report.next_probes.map((probe) => probe.operation)).not.toContain(
-      "inspect_managed_members",
-    );
+    const operations = report.next_probes.map((probe) => probe.operation);
+    expect(operations).toContain("inspect_managed_artifact");
+    expect(operations).not.toContain("inspect_managed_members");
   },
 );
 
