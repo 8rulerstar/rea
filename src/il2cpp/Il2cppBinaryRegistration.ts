@@ -569,8 +569,30 @@ function* findTypeTableByCode(
   // Stored words only nominate slots: a slot the loader binds or leaves
   // unresolved has no known value, so a run it bounds has an unknown extent
   // whatever its placeholder holds.
-  const unresolved = (address: bigint) =>
-    readSlot(image, address) === "unknown";
+  // The same holds for a record's kind word and its definition index.
+  const recordState = (target: bigint): "type" | "other" | "unknown" => {
+    if (recordOffset(target) < 0) return "other";
+    const attributes = readUInt32(image, target + 8n);
+    if (attributes === "unknown") return "unknown";
+    if (attributes === null) return "other";
+    const kind = il2cppTypeKind(attributes);
+    if (!isDefinedTypeKind(kind)) return "other";
+    if (!isDefinitionTypeKind(kind)) return "type";
+    const data = readSlot(image, target);
+    if (data === "unknown") return "unknown";
+    return typeof data === "bigint" && data < BigInt(typeDefinitions)
+      ? "type"
+      : "other";
+  };
+  // A word whose slot or record the loader leaves unknown bounds a run with
+  // an unknown extent.
+  const unresolved = (address: bigint) => {
+    const slot = readSlot(image, address);
+    return (
+      slot === "unknown" ||
+      (typeof slot === "bigint" && recordState(slot) === "unknown")
+    );
+  };
   for (const mapping of container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
     let runStart = -1;
@@ -583,14 +605,15 @@ function* findTypeTableByCode(
         const raw = bytes.readBigUInt64LE(mapping.offset + at);
         if (isType(raw)) {
           const slot = readSlot(image, address);
-          if (slot === raw) {
+          const state = slot === raw ? recordState(slot) : "other";
+          if (state === "type") {
             if (runStart < 0) {
               runStart = at;
               startUnknown = at === start || unresolved(address - 8n);
             }
             continue;
           }
-          endUnknown = slot === "unknown";
+          endUnknown = slot === "unknown" || state === "unknown";
         } else if (runStart >= 0) endUnknown = unresolved(address);
       }
       if (runStart >= 0 && (at - runStart) / 8 >= requiredTypes) {

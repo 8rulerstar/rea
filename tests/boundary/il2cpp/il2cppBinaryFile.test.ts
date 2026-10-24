@@ -699,6 +699,33 @@ it("does not let a dyld-bound slot's placeholder decide the type-table run", () 
   expect(outcome(0n)).toBe("metadata-registration-not-found");
 });
 
+it("does not let a dyld-bound record field decide the type-table run", () => {
+  const outcome = (bound: boolean) => {
+    // The int record (0x9b0) is the table's last entry. Binding the word
+    // that holds its kind leaves that kind to the loader, although the
+    // stored placeholder still reads as a valid kind.
+    const kindWord = createIl2cppBinaryFixture().readBigUInt64LE(0x9b8);
+    const bytes = bound
+      ? createIl2cppDyldBindFixture(kindWord, 0x9b8)
+      : createIl2cppBinaryFixture();
+    bytes.fill(0, 0x800, 0x880);
+    createIl2cppBinaryFixture({ adrpAdd: [[0xc20, 0x900]] }).copy(
+      bytes,
+      0xc20,
+      0xc20,
+      0xc28,
+    );
+    try {
+      return linkWholeTable(bytes).types_count;
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      return cause.reason;
+    }
+  };
+  expect(outcome(false)).toBe(4);
+  expect(outcome(true)).toBe("metadata-registration-not-found");
+});
+
 it("keeps metadata-registration-not-found when x86-64 code loads an address inside the run", () => {
   const image = createIl2cppBinaryFixture({ metadataRegistration: false });
   image.set([0x48, 0x8d, 0x0d], 0xc40);
