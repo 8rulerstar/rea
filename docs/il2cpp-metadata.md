@@ -313,7 +313,8 @@ index but can differ from `typesCount`: a type-shaped pointer after the table
 would lengthen it, and an unreadable slot (such as an unresolved relocation)
 would end it early. Only the type indices the metadata references are read. A
 second long-enough run anywhere, a run that a type-shaped neighbour extends
-before the loaded address, a run touching a mapping end, and a covered
+before the loaded address, a run touching a mapping end or a slot the loader
+binds or leaves unresolved (its stored word is only a placeholder), and a covered
 128-byte record whose two counts match but whose other fields are unusable all
 leave `metadata-registration-not-found` rather than a guess; the search stops
 at the second run. The length requirement only separates the type table from

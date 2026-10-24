@@ -8,6 +8,7 @@ import {
   isMapped,
   hasPointerArrayCoverage,
   readPointer,
+  readSlot,
   readUInt32,
   type NativeImage,
 } from "./Il2cppBinaryImage.js";
@@ -565,24 +566,37 @@ function* findTypeTableByCode(
   // neighbouring one, so its length and start are unknown; it still counts as
   // a candidate but cannot be chosen.
   const runs = new Map<bigint, number | null>();
+  // Stored words only nominate slots: a slot the loader binds or leaves
+  // unresolved has no known value, so a run it bounds has an unknown extent
+  // whatever its placeholder holds.
+  const unresolved = (address: bigint) =>
+    readSlot(image, address) === "unknown";
   for (const mapping of container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
     let runStart = -1;
+    let startUnknown = false;
     for (let at = start; at <= mapping.size; at += 8) {
       if ((at & 0xffff) < 8) yield;
-      if (
-        at + 8 <= mapping.size &&
-        isType(bytes.readBigUInt64LE(mapping.offset + at))
-      ) {
-        if (runStart < 0) runStart = at;
-        continue;
+      const address = mapping.address + BigInt(at);
+      let endUnknown = at + 8 > mapping.size;
+      if (!endUnknown) {
+        const raw = bytes.readBigUInt64LE(mapping.offset + at);
+        if (isType(raw)) {
+          const slot = readSlot(image, address);
+          if (slot === raw) {
+            if (runStart < 0) {
+              runStart = at;
+              startUnknown = at === start || unresolved(address - 8n);
+            }
+            continue;
+          }
+          endUnknown = slot === "unknown";
+        } else if (runStart >= 0) endUnknown = unresolved(address);
       }
       if (runStart >= 0 && (at - runStart) / 8 >= requiredTypes) {
         runs.set(
           mapping.address + BigInt(runStart),
-          at + 8 > mapping.size || runStart === start
-            ? null
-            : (at - runStart) / 8,
+          endUnknown || startUnknown ? null : (at - runStart) / 8,
         );
         // Another long-enough run could be the real table while code loads
         // only this one, so a second candidate fails closed at once.

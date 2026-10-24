@@ -673,6 +673,32 @@ it("says why no MetadataRegistration or inferred type table was accepted", () =>
   ).toContain("no single code-loaded run of Il2CppType pointers");
 });
 
+it("does not let a dyld-bound slot's placeholder decide the type-table run", () => {
+  const outcome = (placeholder: bigint) => {
+    // The last table slot (0x918) is bound by dyld; its stored word is only a
+    // placeholder. Remove the static registration and load the table by code.
+    const bytes = createIl2cppDyldBindFixture(placeholder, 0x918);
+    bytes.fill(0, 0x800, 0x880);
+    createIl2cppBinaryFixture({ adrpAdd: [[0xc20, 0x900]] }).copy(
+      bytes,
+      0xc20,
+      0xc20,
+      0xc28,
+    );
+    try {
+      return linkWholeTable(bytes).types_count;
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      return cause.reason;
+    }
+  };
+  // A type-shaped placeholder and a zero one give the same refusal.
+  expect(outcome(FIXTURE_BINARY_BASE + 0x9b0n)).toBe(
+    "metadata-registration-not-found",
+  );
+  expect(outcome(0n)).toBe("metadata-registration-not-found");
+});
+
 it("keeps metadata-registration-not-found when x86-64 code loads an address inside the run", () => {
   const image = createIl2cppBinaryFixture({ metadataRegistration: false });
   image.set([0x48, 0x8d, 0x0d], 0xc40);
