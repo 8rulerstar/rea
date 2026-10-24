@@ -1278,6 +1278,25 @@ it.each<
   expect(genericFailure(options, version)).toEqual({ reason, kind });
 });
 
+it("refuses generic linking when the type table was inferred", () => {
+  // Without a static MetadataRegistration, genericMethodTable has no anchor.
+  expect(() =>
+    linkGeneric(
+      {},
+      31,
+      createIl2cppBinaryFixture({
+        metadataRegistration: false,
+        adrpAdd: [[0xc20, 0x900]],
+      }),
+    ),
+  ).toThrow(
+    expect.objectContaining({
+      reason: "generic-methods-unsupported",
+      message: expect.stringContaining("no static MetadataRegistration"),
+    }),
+  );
+});
+
 it("keeps contradicting rows unknown and reports the record address", () => {
   const issues = (options: GenericMethodFixtureOptions) => {
     const generic = linkGeneric(options).generic_methods!;

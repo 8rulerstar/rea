@@ -228,7 +228,7 @@ export function* linkIl2cppBinarySteps(
           facts,
           registration_.field,
           // findMetadataRegistration reports typesCount, word 6.
-          registration.field - 48n,
+          registration.field === null ? null : registration.field - 48n,
           options,
         )
       : null;
