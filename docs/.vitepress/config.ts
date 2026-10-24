@@ -32,6 +32,12 @@ export default defineConfig({
           { text: "IL2CPP metadata", link: "/il2cpp-metadata" },
           { text: "Model artifacts", link: "/model-artifacts" },
           { text: "Rust dependencies", link: "/rust-binaries" },
+          { text: "PE certificates", link: "/pe-certificates" },
+          { text: "PE imports", link: "/pe-imports" },
+          { text: "ELF notes", link: "/elf-notes" },
+          { text: "Apple IPS crash reports", link: "/apple-ips" },
+          { text: "CPython pyc files", link: "/python-pyc" },
+          { text: "Erlang BEAM", link: "/erlang-beam" },
           {
             text: "JavaScript and Electron",
             link: "/javascript-artifact-reconstruction",
@@ -50,6 +56,10 @@ export default defineConfig({
           { text: "Electron fuses", link: "/electron-fuses" },
           { text: "Process capture", link: "/process-capture" },
           { text: ".NET assemblies", link: "/managed-code-analysis" },
+          {
+            text: "Python packaged applications",
+            link: "/python-packaged-applications",
+          },
           { text: "Android applications", link: "/android-analysis" },
           { text: "Apple applications", link: "/apple-application-analysis" },
           { text: "Desktop installations", link: "/desktop-applications" },
@@ -79,6 +89,10 @@ export default defineConfig({
         items: [
           { text: "MCP contracts", link: "/mcp-contracts" },
           { text: "Tool design", link: "/tool-design" },
+          {
+            text: "Admission limits and recovery",
+            link: "/design/limits-and-recovery",
+          },
           { text: "Testing", link: "/testing" },
           { text: "Client verification", link: "/client-verification" },
           {

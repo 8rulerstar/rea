@@ -78,37 +78,33 @@ describe("canonical test-project ownership", () => {
   });
 
   it.each([
-    { flags: [], heap: 384, timeout: 30_000, lines: 68 },
-    { flags: ["--coverage"], heap: 512, timeout: 60_000, lines: 68 },
-    { flags: ["--coverage.enabled"], heap: 512, timeout: 60_000, lines: 68 },
-    { flags: ["--coverage=false"], heap: 384, timeout: 30_000, lines: 68 },
+    { flags: [], timeout: 30_000, lines: 68 },
+    { flags: ["--coverage"], timeout: 60_000, lines: 68 },
+    { flags: ["--coverage.enabled"], timeout: 60_000, lines: 68 },
+    { flags: ["--coverage=false"], timeout: 30_000, lines: 68 },
     {
       flags: ["--coverage.enabled=false"],
-      heap: 384,
       timeout: 30_000,
       lines: 68,
     },
     {
       flags: ["--coverage.provider=v8"],
-      heap: 384,
       timeout: 30_000,
       lines: 68,
     },
     {
       flags: ["--coverage.enabled", "--shard", "1/6"],
-      heap: 512,
       timeout: 60_000,
       lines: 0,
     },
     {
       flags: ["--coverage.enabled=false", "--shard=1/6"],
-      heap: 384,
       timeout: 30_000,
       lines: 0,
     },
   ])(
     "resolves worker resources from actual CLI options: $flags",
-    async ({ flags, heap, timeout, lines }) => {
+    async ({ flags, timeout, lines }) => {
       const root = await createTestTempDirectory("rea-vitest-worker-policy-");
       const script = join(root, "worker-policy.mjs");
       await writeFile(
@@ -134,10 +130,66 @@ describe("canonical test-project ownership", () => {
         },
       );
       expect(JSON.parse(result.stdout)).toEqual({
-        execArgv: [`--max-old-space-size=${String(heap)}`],
+        execArgv: ["--max-old-space-size=512"],
         timeout,
         lines,
       });
     },
   );
+});
+
+describe("test module isolation", () => {
+  it.each([
+    [
+      "tests/process-global/evidenceBundleHeadroom.test.ts",
+      "process-global",
+      "built",
+    ],
+    [
+      "tests/process-global/javascriptAnalysisCancellation.test.ts",
+      "process-global",
+      "built",
+    ],
+  ])("keeps %s in its isolated preparation group", (path, name, group) => {
+    expect(projectForTest(path)).toMatchObject({ name, group });
+  });
+
+  it("keeps module mocks out of projects that share one module graph", async () => {
+    // A mock registered after another file in the same worker loaded the
+    // module never applies, so the test's outcome depends on file scheduling.
+    const root = await createTestTempDirectory("rea-vitest-mock-isolation-");
+    const script = join(root, "project-isolation.mjs");
+    await writeFile(
+      script,
+      `
+      import config from ${JSON.stringify(pathToFileURL(join(repository, "vitest.config.ts")).href)};
+      console.log(JSON.stringify(Object.fromEntries(
+        config.test.projects.map(project => [project.test.name, project.test.isolate !== false]),
+      )));
+    `,
+    );
+    const result = await execFileOutput(
+      process.execPath,
+      ["--import", "tsx", script],
+      {
+        cwd: repository,
+        timeout: 10_000,
+        maxBuffer: 64 * 1024,
+        stopSignal: "SIGTERM",
+      },
+    );
+    const isolated = JSON.parse(result.stdout) as Record<string, boolean>;
+    const mocking = execFileSync(
+      "git",
+      ["grep", "-l", "-E", String.raw`vi\.(mock|doMock)\(`, "--", "*.test.ts"],
+      { cwd: repository, encoding: "utf8" },
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    expect(mocking.length).toBeGreaterThan(0);
+    expect(
+      mocking.filter((file) => isolated[projectForTest(file).name] !== true),
+    ).toEqual([]);
+  });
 });

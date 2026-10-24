@@ -1,17 +1,17 @@
 import type { Il2cppMethodAddress } from "../domain/il2cpp/il2cppMetadata.js";
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
-import {
-  openImageSteps,
-  readPointer,
-  readSlot,
-  isExecutable,
-} from "./Il2cppBinaryImage.js";
+import { openImageSteps, readSlot, isExecutable } from "./Il2cppBinaryImage.js";
 import {
   findModules,
   findCodeRegistration,
   findMetadataRegistration,
 } from "./Il2cppBinaryRegistration.js";
 import { createTypeNamer } from "./Il2cppBinaryTypes.js";
+import {
+  genericMethodLayouts,
+  linkGenericMethodsSteps,
+  type Il2cppGenericMethodLink,
+} from "./Il2cppBinaryGenerics.js";
 import type {
   Il2cppMetadataDecoded,
   Il2cppMetadataLinkFacts,
@@ -57,6 +57,8 @@ export interface Il2cppBinaryLink {
   readonly return_types: Il2cppTypeReference[];
   readonly field_types: Il2cppTypeReference[];
   readonly parameter_types: Il2cppTypeReference[];
+  /** Null unless generic instances were requested. */
+  readonly generic_methods: Il2cppGenericMethodLink | null;
 }
 
 export type Il2cppTypeReference = {
@@ -67,7 +69,10 @@ export type Il2cppTypeReference = {
 export type Il2cppBinaryReadOptions = Pick<
   Il2cppMetadataReadOptions,
   "beforeText" | "onRow"
->;
+> & {
+  /** Also link genericMethodTable rows; unrequested paths read no generic table. */
+  readonly genericInstances?: boolean;
+};
 
 /**
  * Link metadata methods to native code addresses without executing the image.
@@ -81,6 +86,8 @@ export function* linkIl2cppBinarySteps(
   options: Il2cppBinaryReadOptions = {},
 ): Generator<void, Il2cppBinaryLink> {
   const version = metadata.metadata_version;
+  // Refuse an undecoded version before any table is read.
+  if (options.genericInstances === true) genericMethodLayouts(version);
   yield;
   const image = yield* openImageSteps(bytes, architecture);
   const modules = yield* findModules(image, metadata);
@@ -95,6 +102,25 @@ export function* linkIl2cppBinarySteps(
         methodImage[type.method_start + method] = index;
       }
     }
+  const methodByImageAndRow = metadata.images.map(
+    () => new Map<number, number>(),
+  );
+  for (let index = 0; index < methodImage.length; index++) {
+    if (index % LINK_BATCH === 0) yield;
+    const owner = methodImage[index]!;
+    if (owner === -1) continue;
+    const token = facts.methodTokens[index]!;
+    const row = token & 0xffffff;
+    if (token >>> 24 !== 0x06 || row === 0) continue;
+    const methodsByRow = methodByImageAndRow[owner]!;
+    const earlier = methodsByRow.get(row);
+    if (earlier !== undefined)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-method-token",
+        `methods ${earlier} and ${index} in image ${metadata.images[owner]!.name} share MethodDef token 0x${token.toString(16)}`,
+      );
+    methodsByRow.set(row, index);
+  }
   yield;
   const methodAddress = (index: number): Il2cppMethodCode => {
     const owner = methodImage[index]!;
@@ -167,8 +193,13 @@ export function* linkIl2cppBinarySteps(
       );
     // 27.0/27.1 and 27.2 share header version 27 but place byref differently.
     if (version === 27) return { type, name: null };
-    const address =
-      readPointer(image, registration.types + BigInt(type * 8)) ?? 0n;
+    const address = readSlot(image, registration.types + BigInt(type * 8));
+    if (address === "unknown") return { type, name: null };
+    if (address === null)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-type",
+        `type ${type} has no mapped type-table slot`,
+      );
     if (address === 0n)
       throw new Il2cppBinaryFormatFailure(
         "invalid-type",
@@ -189,6 +220,18 @@ export function* linkIl2cppBinarySteps(
   const return_types = yield* column(facts.returnTypes);
   const field_types = yield* column(facts.fieldTypes);
   const parameter_types = yield* column(facts.parameterTypes);
+  const generic_methods =
+    options.genericInstances === true
+      ? yield* linkGenericMethodsSteps(
+          image,
+          metadata,
+          facts,
+          registration_.field,
+          // findMetadataRegistration reports typesCount, word 6.
+          registration.field - 48n,
+          options,
+        )
+      : null;
   return {
     format: image.container.format,
     architecture: image.container.architecture,
@@ -202,6 +245,7 @@ export function* linkIl2cppBinarySteps(
     return_types,
     field_types,
     parameter_types,
+    generic_methods,
   };
 }
 
@@ -231,8 +275,15 @@ export const linkIl2cppBinary = (
   metadata: Il2cppMetadataDecoded,
   facts: Il2cppMetadataLinkFacts,
   architecture?: string,
+  options: Il2cppBinaryReadOptions = {},
 ): Il2cppBinaryLink => {
-  const steps = linkIl2cppBinarySteps(bytes, metadata, facts, architecture);
+  const steps = linkIl2cppBinarySteps(
+    bytes,
+    metadata,
+    facts,
+    architecture,
+    options,
+  );
   for (;;) {
     const step = steps.next();
     if (step.done) return step.value;

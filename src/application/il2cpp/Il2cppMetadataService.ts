@@ -5,7 +5,6 @@ import type {
   Il2cppSeedWriterPort,
   Il2cppSeedReceipt,
 } from "./Il2cppSeedWriterPort.js";
-import { isAbsolute } from "node:path";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
 import {
   requireAnalysisViewRetention,
@@ -111,19 +110,6 @@ export class Il2cppMetadataService {
           cause: input.error,
         }),
       );
-    for (const field of ["path", "binary_path"] as const) {
-      const value = input.data[field];
-      if (value !== undefined && !isAbsolute(value))
-        return err(
-          new AnalysisInputError(OPERATION, undefined, [
-            {
-              path: [field],
-              reason: "invalid_format",
-              message: "Expected an absolute filesystem path on this host.",
-            },
-          ]),
-        );
-    }
     if (
       input.data.binary_architecture !== undefined &&
       input.data.binary_path === undefined
@@ -134,6 +120,19 @@ export class Il2cppMetadataService {
             path: ["binary_architecture"],
             reason: "invalid_value",
             message: "binary_architecture selects a slice of binary_path.",
+          },
+        ]),
+      );
+    if (
+      input.data.generic_instances === true &&
+      input.data.binary_path === undefined
+    )
+      return err(
+        new AnalysisInputError(OPERATION, undefined, [
+          {
+            path: ["generic_instances"],
+            reason: "invalid_value",
+            message: "generic_instances links generic methods in binary_path.",
           },
         ]),
       );
@@ -227,7 +226,7 @@ export class Il2cppMetadataService {
             Object.entries(providerInput).filter(
               ([, value]) => value !== undefined,
             ),
-          ) as Record<string, string>),
+          ) as Record<string, string | boolean>),
           ...(output === undefined
             ? {}
             : {

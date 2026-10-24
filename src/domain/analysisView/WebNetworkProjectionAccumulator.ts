@@ -13,6 +13,7 @@ import {
 } from "../webNetworkCapture.js";
 import { admitAnalysisViewData } from "./analysisViewDataAdmission.js";
 import { analysisViewInputError } from "./analysisViewErrors.js";
+import { analysisViewResultInputError } from "./analysisViewParent.js";
 import type { AnalysisViewParent } from "./analysisView.js";
 import {
   ENTRY_BYTES,
@@ -45,6 +46,14 @@ export abstract class WebNetworkProjectionAccumulator {
       return false;
     this.#temporaryBytes += bytes;
     return true;
+  }
+
+  /** Mark the retained bytes; the returned call releases what was retained since, once none of it is held. */
+  protected retainedCheckpoint(): () => void {
+    const mark = this.#retainedBytes;
+    return () => {
+      this.#retainedBytes = Math.min(this.#retainedBytes, mark);
+    };
   }
 
   /** Per-record strings and descriptors never become cumulative scratch. */
@@ -124,14 +133,7 @@ export const admitHarCaptureParent = (
   const parsed = safeParseOwnedWebNetworkCapture(parent.normalizedResult);
   if (!parsed.success)
     return err(
-      analysisViewInputError([
-        {
-          path: ["source"],
-          reason: "invalid_value",
-          message:
-            "Parent Evidence result does not match inspect_web_network_capture.",
-        },
-      ]),
+      analysisViewResultInputError(parent.normalizedResult, parsed.error),
     );
   if (parsed.data.format !== "har")
     return unsupported(

@@ -261,13 +261,6 @@ describe("rejected IL2CPP global-metadata", () => {
       ),
       "record-size-mismatch",
     );
-    // 300 generic containers widen GenericContainerIndex to two bytes.
-    rejects(
-      mutated((fixture, bytes) =>
-        bytes.writeInt32LE(300, fixture.header("genericContainers", "count")),
-      ),
-      "record-size-mismatch",
-    );
     rejects(
       mutated((fixture, bytes) =>
         bytes.writeInt32LE(2, fixture.header("nestedTypes", "count")),
@@ -287,6 +280,62 @@ describe("rejected IL2CPP global-metadata", () => {
       createIl2cppMetadataFixture({ interfaceOffsetRecordBytes: 7 }).bytes,
       "type-index-width",
     );
+  });
+});
+
+describe("IL2CPP generic-container extents", () => {
+  it("checks generic-container count against its fixed 16-byte records before resolving widths", () => {
+    // A positive count with no record bytes.
+    for (const count of [1, 300])
+      rejects(
+        mutated((fixture, bytes) =>
+          bytes.writeInt32LE(
+            count,
+            fixture.header("genericContainers", "count"),
+          ),
+        ),
+        "record-size-mismatch",
+      );
+    const oneRecord = createIl2cppMetadataFixture({
+      wide: { fillerTypes: 0, genericContainers: 1, parameters: 0 },
+    });
+    // A positive count with a partial record.
+    rejects(
+      mutated(
+        (fixture, bytes) =>
+          bytes.writeInt32LE(1, fixture.header("genericContainers", "size")),
+        oneRecord,
+      ),
+      "record-size-mismatch",
+    );
+    // Bytes without a corresponding record.
+    rejects(
+      mutated(
+        (fixture, bytes) =>
+          bytes.writeInt32LE(0, fixture.header("genericContainers", "count")),
+        oneRecord,
+      ),
+      "record-size-mismatch",
+    );
+  });
+
+  it("retains width selection for empty and complete generic-container records", () => {
+    const empty = readIl2cppMetadata(createIl2cppMetadataFixture().bytes);
+    expect(empty.index_widths.generic_container).toBe(1);
+
+    const one = readIl2cppMetadata(
+      createIl2cppMetadataFixture({
+        wide: { fillerTypes: 0, genericContainers: 1, parameters: 0 },
+      }).bytes,
+    );
+    expect(one.index_widths.generic_container).toBe(1);
+
+    const wide = readIl2cppMetadata(
+      createIl2cppMetadataFixture({
+        wide: { fillerTypes: 0, genericContainers: 300, parameters: 0 },
+      }).bytes,
+    );
+    expect(wide.index_widths.generic_container).toBe(2);
   });
 });
 
@@ -359,38 +408,42 @@ describe("rejected IL2CPP metadata references", () => {
     );
   });
 
-  it("rejects a shifted string section and names that start inside another string", () => {
-    // Pulled back, the fixture's strings would overlap the literal data.
-    for (const [delta, reason] of [
-      [-1, "section-overlap"],
-      [1, "invalid-string"],
-    ] as const)
-      rejects(
-        mutated((fixture, bytes) => {
-          const strings = fixture.section("strings");
-          bytes.writeInt32LE(
-            strings.offset + delta,
-            fixture.header("strings", "offset"),
-          );
-          // Shrink a forward shift so it stays clear of the next section.
-          bytes.writeInt32LE(
-            strings.size - Math.max(delta, 0),
-            fixture.header("strings", "size"),
-          );
-        }),
-        reason,
-      );
+  it("rejects a string section overlapping literal data", () => {
     rejects(
-      mutated((fixture, bytes) =>
+      mutated((fixture, bytes) => {
         bytes.writeInt32LE(
-          fixture.stringOffset("Update") +
-            1 -
-            fixture.section("strings").offset,
-          fixture.record("methods", 0),
-        ),
-      ),
-      "invalid-string",
+          fixture.section("strings").offset - 1,
+          fixture.header("strings", "offset"),
+        );
+      }),
+      "section-overlap",
     );
+  });
+
+  it("decodes a valid string suffix from its byte offset", () => {
+    const fixture = createIl2cppMetadataFixture({
+      typeNames: { 0: "xPlayer" },
+    });
+    const bytes = Buffer.from(fixture.bytes);
+    const originalOffset = fixture.record("typeDefinitions", 0);
+    bytes.writeInt32LE(bytes.readInt32LE(originalOffset) + 1, originalOffset);
+
+    expect(readIl2cppMetadata(bytes).types[0]?.name).toBe("Player");
+  });
+
+  it("accepts a UTF-8 code-point boundary suffix and rejects a split code point", () => {
+    const fixture = createIl2cppMetadataFixture({
+      typeNames: { 0: "xéclair" },
+    });
+    const nameOffset = fixture.record("typeDefinitions", 0);
+    const sourceOffset = fixture.bytes.readInt32LE(nameOffset);
+    const validSuffix = Buffer.from(fixture.bytes);
+    validSuffix.writeInt32LE(sourceOffset + 1, nameOffset);
+    expect(readIl2cppMetadata(validSuffix).types[0]?.name).toBe("éclair");
+
+    const splitCodePoint = Buffer.from(fixture.bytes);
+    splitCodePoint.writeInt32LE(sourceOffset + 2, nameOffset);
+    rejects(splitCodePoint, "invalid-string");
   });
 
   it("rejects nesting cycles and self-nesting", () => {
@@ -527,9 +580,7 @@ describe("IL2CPP global-metadata versions 29 and 31", () => {
       mutated(
         (target, bytes) =>
           bytes.writeInt32LE(
-            target.stringOffset("Update") +
-              1 -
-              target.section("strings").offset,
+            target.section("strings").size + 1,
             target.record("methods", 0),
           ),
         fixture,

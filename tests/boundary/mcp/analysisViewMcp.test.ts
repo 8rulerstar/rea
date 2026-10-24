@@ -1,3 +1,4 @@
+import { createMcpSchemaValidation } from "../../fixtures/mcpSchemaValidation.js";
 import { advertisedMcpToolSchemas } from "../../fixtures/advertisedMcpTool.js";
 import { API_SURFACE_EXAMPLE } from "../../../src/contracts/analysisViewApiSurfaceExample.js";
 import { ENVIRONMENT_MANIFEST_EXAMPLE } from "../../../src/contracts/analysisViewEnvironmentManifestExample.js";
@@ -14,8 +15,7 @@ import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
-import { Ajv2020 } from "ajv/dist/2020.js";
-import { expect, it, onTestFinished } from "vitest";
+import { afterAll, expect, it, onTestFinished } from "vitest";
 import { z } from "zod";
 
 import { BinaryLayoutService } from "../../../src/application/binaryDiagnostics/BinaryLayoutService.js";
@@ -46,10 +46,22 @@ import {
   environmentStateCaptureFixture,
 } from "../../fixtures/analysisView.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
+import { createLinkedIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
+import {
+  createIl2cppBinaryFixture,
+  FIXTURE_RETURN_TYPE_NAME,
+} from "../../fixtures/il2cpp/binary.js";
+import {
+  analysisViewResultSchema,
+  il2cppMetadataSummaryViewResultSchema,
+} from "../../../src/domain/analysisView/analysisView.js";
 import { BINARY_LAYOUT_TEST_PROVIDER } from "../../fixtures/binaryDiagnostics/layout.js";
 import { wasmArtifactFixture } from "../../fixtures/wasm/artifact.js";
 import { evmInterfaceFixture } from "../../fixtures/evm/interface.js";
 import type { RelationshipCoverage } from "../../../src/domain/relationshipCoverage.js";
+
+const schemaValidation = createMcpSchemaValidation();
+afterAll(() => schemaValidation.clear());
 
 const connect = async (
   binaryLayout?: BinaryLayoutService,
@@ -61,11 +73,16 @@ const connect = async (
   const server = createServer(
     { kind: "session", session },
     {
+      // These schema conformance cases exercise full nested constraints.
+      environment: { ...process.env, REA_MCP_INPUT_SCHEMA_PROFILE: "full" },
       ...(binaryLayout === undefined ? {} : { binaryLayout }),
       ...(webNetworkCapture === undefined ? {} : { webNetworkCapture }),
     },
   );
-  const client = new Client({ name: "analysis-view-mcp", version: "1" });
+  const client = new Client(
+    { name: "analysis-view-mcp", version: "1" },
+    { jsonSchemaValidator: schemaValidation },
+  );
   onTestFinished(async () => {
     await client.close();
     await server.close();
@@ -78,11 +95,121 @@ const connect = async (
   return { client, session };
 };
 
+it("selects every IL2CPP native type reference by rendered name with stable row identity", async () => {
+  const { client } = await connect();
+  const root = await createTestTempDirectory("rea-il2cpp-native-names-");
+  const path = join(root, "global-metadata.dat");
+  const binaryPath = join(root, "GameAssembly.dylib");
+  await writeFile(binaryPath, createIl2cppBinaryFixture());
+  const inspect = async (version: 27 | 31) => {
+    await writeFile(path, createLinkedIl2cppMetadataFixture({ version }).bytes);
+    const inspected = await client.callTool({
+      name: "inspect_il2cpp_metadata",
+      arguments: { path, binary_path: binaryPath },
+    });
+    expect(inspected.isError, JSON.stringify(inspected)).not.toBe(true);
+    const summary = il2cppMetadataSummaryViewResultSchema.parse(
+      parseEvidence(inspected.structuredContent).normalized_result,
+    );
+    return {
+      kind: "retained-evidence",
+      evidence_id: summary.parent_evidence_id,
+    };
+  };
+  let source = await inspect(31);
+  const select = async (
+    collection: "return_types" | "field_types" | "parameter_types",
+    filters: Record<string, unknown>,
+  ) => {
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: {
+        source,
+        view: { kind: "il2cpp-metadata", collection, ...filters },
+      },
+    });
+    expect(response.isError, JSON.stringify(response)).not.toBe(true);
+    const page = analysisViewResultSchema.parse(
+      parseEvidence(response.structuredContent).normalized_result,
+    );
+    if (page.kind !== "il2cpp-metadata")
+      throw new Error("Expected IL2CPP page");
+    return page;
+  };
+  for (const [collection, count] of [
+    ["return_types", 5],
+    ["field_types", 2],
+    ["parameter_types", 1],
+  ] as const) {
+    const names = [FIXTURE_RETURN_TYPE_NAME];
+    const expected = Array.from({ length: count }, (_, index) => ({
+      index,
+      type: 0,
+      name: FIXTURE_RETURN_TYPE_NAME,
+    }));
+    const unfiltered = await select(collection, {});
+    expect(unfiltered.items).toEqual(expected);
+    const all = await select(collection, { names });
+    expect(all.items).toEqual(expected);
+    expect(all.coverage).toMatchObject({ total: count, exhausted: true });
+    const selected = await select(collection, {
+      names,
+      indices: [count - 1, 0, count - 1],
+      offset: 1,
+      limit: 1,
+      fields: ["type"],
+    });
+    expect(selected.items).toEqual(
+      count === 1 ? [] : [{ index: count - 1, type: 0 }],
+    );
+    expect(selected.coverage).toMatchObject({
+      total: Math.min(count, 2),
+      exhausted: true,
+    });
+    for (const missing of [[], ["absent"], ["system.Größe<int>[]"]]) {
+      const empty = await select(collection, { names: missing });
+      expect(empty.items).toEqual([]);
+      expect(empty.coverage).toMatchObject({ total: 0, exhausted: true });
+    }
+  }
+  const owned = await select("parameter_types", {
+    names: [FIXTURE_RETURN_TYPE_NAME],
+    method_indices: [2],
+  });
+  expect(owned.items).toEqual([
+    { index: 0, type: 0, name: FIXTURE_RETURN_TYPE_NAME },
+  ]);
+  const otherOwner = await select("parameter_types", {
+    names: [FIXTURE_RETURN_TYPE_NAME],
+    method_indices: [0],
+  });
+  expect(otherOwner.items).toEqual([]);
+  // Version 27 intentionally retains unavailable native display names as null.
+  source = await inspect(27);
+  for (const collection of [
+    "return_types",
+    "field_types",
+    "parameter_types",
+  ] as const) {
+    const unfiltered = await select(collection, {});
+    expect(unfiltered.items.length).toBeGreaterThan(0);
+    expect(
+      unfiltered.items.every((row) => "name" in row && row.name === null),
+    ).toBe(true);
+    const unavailable = await select(collection, {
+      names: [FIXTURE_RETURN_TYPE_NAME, "null", ""],
+    });
+    expect(unavailable.items).toEqual([]);
+    expect(unavailable.coverage).toMatchObject({ total: 0, exhausted: true });
+  }
+});
+
 it("preserves native relationship coverage through inline and retained MCP views", async () => {
   const { client, session } = await connect();
   const { ajv, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const coverages: (RelationshipCoverage | undefined)[] = [
     {
@@ -154,6 +281,7 @@ it("advertises typed module references and preserves portable/retained Evidence 
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const view = {
     kind: "javascript",
@@ -260,9 +388,7 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
   const advertised = (await client.listTools()).tools.find(
     (tool) => tool.name === "inspect_analysis_view",
   );
-  expect(advertised?.description).toContain(
-    'Native function Evidence requires kind native: view: {kind: "native", facet: "procedure"}',
-  );
+  expect(advertised?.name).toBe("inspect_analysis_view");
   const provider = { id: "ghidra", name: "Ghidra", version: "12.1.4" };
   const profile = createAnalysisProfile(provider, { language: "fixture" });
   const parent = createEvidence(
@@ -292,22 +418,24 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
     const retained = session.recordEvidence(record);
     if (!retained.ok) throw retained.error;
   }
-  const unsupportedSummary = await client.callTool({
+  // The summary stays compact however large the retained pseudocode is.
+  const summary = await client.callTool({
     name: "inspect_analysis_view",
     arguments: {
       source: { kind: "retained-evidence", evidence_id: parent.evidence_id },
       view: { kind: "summary" },
     },
   });
-  expect(parseMcpToolError(unsupportedSummary).error).toMatchObject({
-    code: "invalid_request",
-    details: {
-      issues: [
-        {
-          path: ["view"],
-          message: "analyze_function Evidence requires a native view.",
-        },
-      ],
+  expect(summary.isError, JSON.stringify(summary.content)).not.toBe(true);
+  expect(
+    toolContract("inspect_analysis_view").outputSchema.parse(
+      summary.structuredContent,
+    ).normalized_result,
+  ).toMatchObject({
+    kind: "summary",
+    parent_evidence_id: parent.evidence_id,
+    summary: {
+      pseudocode: { available: true, code_units: 6 * 1024 * 1024 },
     },
   });
   const broad = await client.callTool({
@@ -318,6 +446,9 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
   expect(broadError.code).toBe("resource_constraint");
   expect(broadError.remediation?.action).toContain(
     "get_evidence_bundle and detail: summary",
+  );
+  expect(broadError.remediation?.action).toContain(
+    "REA_MCP_MAX_RESPONSE_BYTES",
   );
   const response = await client.callTool({
     name: "get_evidence_bundle",
@@ -335,9 +466,10 @@ it("discovers an oversized native dossier by exact metadata and reads its retain
   const result = toolContract("get_evidence_bundle").outputSchema.parse(
     response.structuredContent,
   ).result;
+  // Two analyze_function records plus the retained summary view.
   expect(result).toMatchObject({
     kind: "evidence-bundle-summary",
-    total_retained_records: 2,
+    total_retained_records: 3,
     matching_records: 1,
     records: [
       {
@@ -401,6 +533,7 @@ it("advertises exact schemas and projects one layout section from retained Evide
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   expect(
     ajv.validate(inputSchema, {
@@ -523,6 +656,58 @@ it("reports a tampered inline Evidence ID at its full MCP source path", async ()
       ],
     },
   });
+});
+
+it("locates malformed PCAP results within inline and retained view sources", async () => {
+  const { client, session } = await connect();
+  const cases = [
+    { result: {}, path: ["target"], reason: "missing_argument" },
+    { result: { target: false }, path: ["target"], reason: "invalid_type" },
+    {
+      result: { target: { sha256: "c".repeat(64), bytes: 24 } },
+      path: ["target", "path"],
+      reason: "missing_argument",
+    },
+  ] as const;
+  for (const { result, path, reason } of cases) {
+    // Authenticated fixture Evidence can still contain malformed operation data.
+    const evidence = createEvidence(
+      {
+        path: "/recordings/input.pcap",
+        format: "file",
+        sha256: "c".repeat(64),
+      },
+      { id: "fixture", name: "Fixture", version: "1" },
+      {
+        operation: "inspect_pcap_capture",
+        parameters: { path: "/recordings/input.pcap" },
+        result,
+        authority: "historical-reference",
+      },
+    );
+    const recorded = session.recordEvidence(evidence);
+    if (!recorded.ok) throw recorded.error;
+    for (const source of [
+      { kind: "inline", evidence },
+      { kind: "retained-evidence", evidence_id: evidence.evidence_id },
+    ]) {
+      const response = await client.callTool({
+        name: "inspect_analysis_view",
+        arguments: { source, view: { kind: "summary" } },
+      });
+      expect(parseMcpToolError(response).error).toMatchObject({
+        code: "invalid_request",
+        details: {
+          issues: expect.arrayContaining([
+            expect.objectContaining({
+              path: ["source", "normalized_result", ...path],
+              reason,
+            }),
+          ]),
+        },
+      });
+    }
+  }
 });
 
 it("rejects self-contained WASM and EVM Evidence views when the subject format differs", async () => {
@@ -700,7 +885,7 @@ it("delivers a bounded native dossier view over MCP without a Ghidra provider or
   );
   if (advertised?.outputSchema === undefined)
     throw new Error("missing view schemas");
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
+  const ajv = schemaValidation.assertions;
   const inputSchema: Record<string, unknown> = advertised.inputSchema;
   const outputSchema: Record<string, unknown> = advertised.outputSchema;
   const arguments_ = {
@@ -901,9 +1086,10 @@ it("reads successive native source pages directly from a completed-result transp
   );
   onTestFinished(() => harness.close());
   const { mcp: client, session, calls } = harness;
+  // Complete delivery of an oversized dossier fails transport and points at the retained parent.
   const failed = await client.callTool({
     name: "analyze_function",
-    arguments: { procedure: "0x401000" },
+    arguments: { procedure: "0x401000", detail: "complete" },
   });
   expect(failed.isError).toBe(true);
   const limits = z
@@ -1173,6 +1359,7 @@ it("extracts an environment state identically from retained, portable and file M
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const capture = environmentStateCaptureFixture();
   const parent = analysisViewCaptureEvidence(capture);
@@ -1246,6 +1433,7 @@ it("projects an environment manifest identically from retained, portable and fil
   const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
     client,
     "inspect_analysis_view",
+    schemaValidation.assertions,
   );
   const capture = environmentManifestCaptureFixture();
   const parent = analysisViewCaptureEvidence(capture);

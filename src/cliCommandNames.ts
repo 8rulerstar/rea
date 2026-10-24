@@ -7,6 +7,7 @@ export const CLI_COMMANDS = Object.freeze({
   matchNativeFunctions: "match-native-functions",
   compareWasmInterfaces: "compare-wasm-interfaces",
   inspectWasmArtifact: "inspect-wasm-artifact",
+  inspectApkSignature: "inspect-apk-signature",
   inspectSqliteDatabase: "inspect-sqlite-database",
   inspectEvmInterface: "inspect-evm-interface",
   inspectWebNetworkCapture: "inspect-web-network-capture",
@@ -17,6 +18,7 @@ export const CLI_COMMANDS = Object.freeze({
   analyze: "analyze",
   inspect: "inspect",
   decompile: "decompile",
+  decompileAll: "decompile-all",
   setup: "setup",
   doctor: "doctor",
   uninstall: "uninstall",
@@ -49,6 +51,7 @@ export const CLI_COMMANDS = Object.freeze({
   inspectAssetCatalog: "inspect-asset-catalog",
   inspectManagedArtifact: "inspect-managed-artifact",
   inspectRecordedCrash: "inspect-recorded-crash",
+  inspectByteEntropy: "inspect-byte-entropy",
   inspectBinaryLayout: "inspect-binary-layout",
   listCutterSessions: "list-cutter-sessions",
   cutterCommand: "cutter-command",
@@ -62,8 +65,16 @@ export const CLI_COMMANDS = Object.freeze({
   inspectGoBinary: "inspect-go-binary",
   inspectIl2cppMetadata: "inspect-il2cpp-metadata",
   inspectModelArtifact: "inspect-model-artifact",
+  inspectGpuCodeObjects: "inspect-gpu-code-objects",
   inspectRustBinary: "inspect-rust-binary",
+  inspectPythonPyc: "inspect-python-pyc",
+  inspectErlangBeam: "inspect-erlang-beam",
   inspectPeResources: "inspect-pe-resources",
+  inspectPeCertificates: "inspect-pe-certificates",
+  inspectPeImports: "inspect-pe-imports",
+  inspectNativeExports: "inspect-native-exports",
+  inspectElfNotes: "inspect-elf-notes",
+  inspectAppleIps: "inspect-apple-ips",
   inspectAnalysisView: "inspect-analysis-view",
   listFridaDevices: "list-frida-devices",
   listFridaProcesses: "list-frida-processes",
@@ -128,6 +139,7 @@ export const CLI_COMMANDS = Object.freeze({
   evidenceExport: "evidence-export",
   environmentServe: "environment-serve",
   environmentExport: "environment-export",
+  environmentCompare: "environment-compare",
   compare: "compare",
   captureProcess: "capture-process",
   compareProcessCaptures: "compare-process-captures",
@@ -165,9 +177,6 @@ export const CLI_COMMANDS = Object.freeze({
 /** Ordered primary CLI inventory; aliases are intentionally excluded. */
 export const CLI_COMMAND_NAMES = Object.freeze(Object.values(CLI_COMMANDS));
 
-/** Command aliases registered on top of the primary CLI command inventory. */
-export const CLI_COMMAND_ALIASES = Object.freeze(["compare-bundles"]);
-
 /** Canonical MCP operations reached by CLI commands with different names. */
 export const CLI_COMMAND_TOOL_ALIASES = Object.freeze({
   analyze: ["binary_overview"],
@@ -179,16 +188,9 @@ export const CLI_COMMAND_TOOL_ALIASES = Object.freeze({
   search: ["search_strings", "search_procedures"],
   "capture-process": ["capture_process_scenario"],
   "compare-bundles": ["compare_bundles"],
-  "list-cutter-sessions": ["list_cutter_sessions"],
-  "cutter-command": ["cutter_command"],
-  "inspect-with-objdump": ["inspect_with_objdump"],
   "list-objdump-architectures": ["inspect_with_objdump"],
-  "execute-rizin-command": ["execute_rizin_command"],
   "debug-with-gdb": ["gdb_console"],
   "debug-with-rizin": ["rizin_debug_command"],
-  "list-frida-devices": ["list_frida_devices"],
-  "list-frida-processes": ["list_frida_processes"],
-  "instrument-with-frida": ["instrument_with_frida"],
 });
 
 /** MCP operations without a dedicated CLI command or direct command alias. */

@@ -4,6 +4,7 @@ import { AnalysisCleanupLease } from "../artifacts/AnalysisCleanupLease.js";
 import type { RetainedResourceScope } from "../application/AnalysisProvider.js";
 import { ConfigurationError } from "../domain/configurationErrors.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+import { projectInputIssues } from "../domain/inputIssueProjection.js";
 import { err, ok, type Result } from "../domain/result.js";
 import {
   withOwnedRegularFile,
@@ -15,10 +16,25 @@ import {
   NonRegularFileReadError,
 } from "../filesystem/RegularFile.js";
 
+/** Omitted registration `timeoutMs` for each upstream IDA MCP request. */
+export const DEFAULT_IDA_REQUEST_TIMEOUT_MS = 300_000;
+/** Node timer ceiling. Larger registration values would be clamped instead of honored. */
+export const MAX_IDA_REQUEST_TIMEOUT_MS = 2_147_483_647;
+
 const common = {
+  sensitive: z
+    .strictObject({
+      headers: z.array(z.string().min(1)).default([]),
+      env: z.array(z.string().min(1)).default([]),
+    })
+    .optional(),
   mode: z.enum(["attached", "headless"]).default("attached"),
   protocol: z.literal("native").optional(),
-  timeoutMs: z.number().int().positive().max(2_147_483_647).default(300_000),
+  timeoutMs: z
+    .int()
+    .positive()
+    .max(MAX_IDA_REQUEST_TIMEOUT_MS)
+    .default(DEFAULT_IDA_REQUEST_TIMEOUT_MS),
   workspaceRoot: z
     .string()
     .refine(isAbsolute, "workspaceRoot must be absolute on the REA host")
@@ -117,17 +133,40 @@ export const readIdaConfiguration = (
       const envelope = z
         .object({ mcpServers: z.object({ "ida-pro-mcp": z.unknown() }) })
         .safeParse(input);
-      const parsed = registrationSchema.safeParse(
-        envelope.success ? envelope.data.mcpServers["ida-pro-mcp"] : input,
+      const registration = envelope.success
+        ? envelope.data.mcpServers["ida-pro-mcp"]
+        : input;
+      const parsed = registrationSchema.safeParse(registration);
+      if (parsed.success) return ok(parsed.data);
+      // Only schema-authored correction text is admitted; Zod's aggregate
+      // message can contain registration values, including credentials.
+      const constraints = projectInputIssues(
+        parsed.error.issues,
+        registration,
+      ).flatMap((issue) =>
+        issue.message === undefined
+          ? []
+          : [`${issue.path.join(".") || "registration"}: ${issue.message}`],
       );
-      return parsed.success
-        ? ok(parsed.data)
-        : err(
-            idaConfigurationError(
-              "REA_IDA_MCP_CONFIG must contain an IDA MCP command/args or local url registration; see docs/ida-provider.md.",
-              parsed.error,
-            ),
-          );
+      if (constraints.length === 0)
+        return err(
+          idaConfigurationError(
+            "REA_IDA_MCP_CONFIG must contain an IDA MCP command/args or local url registration; see docs/ida-provider.md.",
+            parsed.error,
+          ),
+        );
+      return err(
+        new ConfigurationError(
+          `REA_IDA_MCP_CONFIG: ${constraints.join("; ")}. See docs/ida-provider.md.`,
+          {
+            cause: parsed.error,
+            settings: constraints.map((constraint) => ({
+              setting: "REA_IDA_MCP_CONFIG",
+              constraint,
+            })),
+          },
+        ),
+      );
     } catch (cause: unknown) {
       if (cause instanceof ConfigurationError) return err(cause);
       if (cause instanceof NonRegularFileReadError)
@@ -210,6 +249,25 @@ const registrationTooLarge = (): ConfigurationError =>
   idaConfigurationError(
     "REA_IDA_MCP_CONFIG exceeds the 64 KiB registration size.",
   );
+
+/**
+ * Name the registration key that sets an IDA request or readiness deadline.
+ * `ceilingMs` is the parsed `timeoutMs`; a shorter effective value is the time
+ * remaining inside that ceiling.
+ */
+export const idaRegistrationTimeoutGuidance = (
+  timeoutMs: number,
+  phase: "request" | "readiness",
+  ceilingMs: number = timeoutMs,
+): { readonly userMessage: string; readonly remediationAction: string } => ({
+  userMessage:
+    phase === "readiness"
+      ? `IDA readiness reached its ${String(timeoutMs)} ms deadline while the headless worker was still busy (deadlineExpired).`
+      : ceilingMs === timeoutMs
+        ? `This IDA request reached the registration timeoutMs deadline of ${String(timeoutMs)} ms (deadlineExpired).`
+        : `This IDA request reached its ${String(timeoutMs)} ms deadline (deadlineExpired), within the registration timeoutMs ceiling of ${String(ceilingMs)} ms.`,
+  remediationAction: `Set timeoutMs in the JSON file named by REA_IDA_MCP_CONFIG to an integer from 1 to ${String(MAX_IDA_REQUEST_TIMEOUT_MS)} (omitted means ${String(DEFAULT_IDA_REQUEST_TIMEOUT_MS)}). REA applies the edited file on the next IDA connection after it re-reads the registration; an already open session keeps the timeout it connected with. Allow execution, cleanup and delivery headroom in the outer MCP client deadline. Confirm outstanding work and cleanup before retrying.`,
+});
 
 /** A REA_IDA_MCP_CONFIG rejection that names the setting it concerns. */
 export const idaConfigurationError = (

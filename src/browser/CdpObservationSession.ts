@@ -24,7 +24,12 @@ import {
   cdpStringValue,
   type UnknownRecord,
 } from "./CdpCaptureValues.js";
-import { mainFrameUrl } from "./CdpCaptureDocuments.js";
+import {
+  mainFrameUrl,
+  observeCdpFrameUrl,
+  observeMainFrameUrl,
+  classifyCdpFrameUrl,
+} from "./CdpCaptureDocuments.js";
 import { cdpFrameIdentity } from "./CdpCaptureEventHelpers.js";
 import { cdpTargetEventMatches } from "./CdpTargetEvents.js";
 
@@ -46,6 +51,7 @@ interface TimelineEntryOptions {
   readonly params: UnknownRecord;
   readonly timestamp?: number | null;
   readonly rawUrl?: string | null;
+  readonly destinationScope?: TimelineEvent["destination_scope"];
   readonly requestId?: string | null;
   readonly detail?: string | null;
 }
@@ -69,7 +75,7 @@ export const observeCdpSession = async (
   const capture = new TimelineCapture(allowedOrigins, mainFrameId, initialUrl);
   let removeListener = (): void => {};
   const removeDisconnectListener = context.connection.onDisconnect(() =>
-    capture.targetTerminated(),
+    capture.transportDisconnected(),
   );
   try {
     await context.connection.send(
@@ -107,6 +113,7 @@ export const observeCdpSession = async (
     );
     capture.assertPreArmBufferWithinLimit();
     capture.arm(armTimestamp);
+    capture.assertRequestOwnershipWithinLimit();
     await context.connection.send(
       "Page.setLifecycleEventsEnabled",
       { enabled: true },
@@ -123,10 +130,13 @@ export const observeCdpSession = async (
     let endReason = await waitForWindow(
       context.input.observation_ms,
       capture,
+      context.connection,
       context.signal,
     );
+    capture.assertRequestOwnershipWithinLimit();
     if (endReason === "window_elapsed")
       endReason = await captureFinalUrl(context, capture, allowedOrigins);
+    capture.assertRequestOwnershipWithinLimit();
     await context.progress?.report({
       phase: "browser_observation",
       completed: 2,
@@ -134,6 +144,8 @@ export const observeCdpSession = async (
       message: "Browser observation window ended",
       terminal: true,
     });
+    // Terminal progress is awaited and may admit more protocol events.
+    capture.assertRequestOwnershipWithinLimit();
     if (capture.scopeExcluded) endReason = "target_left_scope";
     return {
       browser: context.discovery.version,
@@ -151,6 +163,7 @@ export const observeCdpSession = async (
       timeline: capture.timeline,
       completeness: capture.completeness.snapshot(),
       limitations: [
+        ...(context.discovery.limitations ?? []),
         "The timeline begins after REA attaches; earlier navigation and network activity is unavailable.",
         "Only navigation metadata is retained; headers, bodies, cookies, console values, and payloads are not captured by this tool.",
         "An out-of-policy destination ends collection immediately and is recorded without its URL.",
@@ -180,6 +193,12 @@ class TimelineCapture {
   #eventsBeforeArmBytes = 0;
   #preArmBufferExceeded = false;
   #hasUnknownEventTime = false;
+  readonly #documentRequests = new Map<
+    string,
+    { frameId: string; loaderId: string | undefined }
+  >();
+  #documentRequestBytes = 0;
+  #requestOwnershipFailure: BrowserObservationError | undefined;
   readonly #listeners = new Set<(reason: EndReason) => void>();
 
   constructor(
@@ -227,17 +246,23 @@ class TimelineCapture {
         this.#sameDocument(event, params, contextOnly);
         break;
       case "Network.requestWillBeSent":
+        this.#requestStarted(params);
         this.#redirect(params, bufferedBeforeArm);
         break;
       case "Network.loadingFailed":
         this.#loadingFailed(params, bufferedBeforeArm);
         break;
+      case "Network.loadingFinished":
+        this.#forgetRequest(cdpStringValue(params.requestId));
+        break;
       case "Page.lifecycleEvent":
         this.#lifecycle(params);
         break;
       case "Inspector.targetCrashed":
-      case "Target.detachedFromTarget":
         this.targetTerminated(params);
+        break;
+      case "Target.detachedFromTarget":
+        this.sessionDetached(params);
         break;
     }
   }
@@ -306,6 +331,32 @@ class TimelineCapture {
     this.end("target_terminated");
   }
 
+  sessionDetached(params: UnknownRecord = {}): void {
+    if (this.#endReason !== undefined) return;
+    this.#add({
+      type: "session_detached",
+      params,
+      timestamp: null,
+      rawUrl: null,
+      requestId: null,
+      detail: "session_detached",
+    });
+    this.end("session_detached");
+  }
+
+  transportDisconnected(): void {
+    if (this.#endReason !== undefined) return;
+    this.#add({
+      type: "transport_disconnected",
+      params: {},
+      timestamp: null,
+      rawUrl: null,
+      requestId: null,
+      detail: "transport_disconnected",
+    });
+    this.end("transport_disconnected");
+  }
+
   setFinalUrl(rawUrl: string): void {
     if (this.#scopeExcluded) return;
     const destination = scopedUrl(rawUrl, this.allowedOrigins);
@@ -364,16 +415,20 @@ class TimelineCapture {
     if (identity.identityIssue !== null || identity.parentIssue !== null)
       this.completeness.exclude("timeline", "invalid_protocol_value");
     if (identity.selection !== "main" && !identity.isRootReplacement) return;
-    const rawUrl = cdpStringValue(frame?.url);
-    const destination = scopedUrl(rawUrl, this.allowedOrigins);
+    const observation = observeCdpFrameUrl(frame);
+    const rawUrl =
+      observation.kind === "observed" ? observation.url : undefined;
+    const destination = classifyCdpFrameUrl(observation, this.allowedOrigins);
     if (identity.isRootReplacement) {
       this.mainFrameId = identity.frameId ?? this.mainFrameId;
       this.#pendingReload = false;
       if (contextOnly) {
+        if (observation.kind !== "observed") this.invalidateFinalUrl();
         this.#stopIfOutOfScope(destination);
         return;
       }
     }
+
     this.#add({
       type:
         !identity.isRootReplacement && !contextOnly && this.#pendingReload
@@ -382,13 +437,16 @@ class TimelineCapture {
       params: { ...params, frameId: frame?.id, loaderId: frame?.loaderId },
       timestamp: null,
       rawUrl: rawUrl ?? null,
+      destinationScope:
+        destination.scope === "unknown" ? null : destination.scope,
       requestId: null,
       detail: safeDetail(frame?.transitionType),
     });
+    if (observation.kind !== "observed") this.invalidateFinalUrl();
     if (this.#stopIfOutOfScope(destination)) return;
     if (contextOnly) return;
     this.#pendingReload = false;
-    this.finalUrl = destination.url;
+    this.finalUrl = destination.url ?? null;
   }
 
   #sameDocument(
@@ -410,6 +468,7 @@ class TimelineCapture {
       requestId: null,
       detail: null,
     });
+    if (!this.#hasObservedUrl(rawUrl)) return;
     if (this.#stopIfOutOfScope(destination)) return;
     if (contextOnly) return;
     this.finalUrl = destination.url;
@@ -438,32 +497,109 @@ class TimelineCapture {
       requestId: cdpStringValue(params.requestId) ?? null,
       detail: null,
     });
-    if (this.#stopIfOutOfScope(destination)) return;
+    if (!this.#hasObservedUrl(rawUrl)) return;
+    this.#stopIfOutOfScope(destination);
+  }
+
+  invalidateFinalUrl(): void {
+    this.completeness.exclude("timeline", "invalid_protocol_value");
+    this.finalUrl = null;
+  }
+
+  /** Missing protocol identity cannot establish that the target left policy. */
+  #hasObservedUrl(rawUrl: string | undefined): boolean {
+    if (rawUrl !== undefined) return true;
+    this.invalidateFinalUrl();
+    return false;
   }
 
   #stopIfOutOfScope(destination: {
-    readonly url: string | null;
-    readonly scope: "approved" | "outside_policy" | "unsupported";
+    readonly scope: "approved" | "outside_policy" | "unsupported" | "unknown";
   }): boolean {
-    if (destination.scope === "approved") return false;
+    if (destination.scope === "approved" || destination.scope === "unknown")
+      return false;
     this.excludeTargetScope("out_of_target_scope");
     this.end("target_left_scope");
     return true;
   }
 
+  /** Request ingress owns frame/type attribution; loadingFailed has no frameId. */
+  #requestStarted(params: UnknownRecord): void {
+    const id = cdpStringValue(params.requestId);
+    const frameId = cdpStringValue(params.frameId);
+    if (id === undefined) {
+      if (
+        frameId === this.mainFrameId &&
+        cdpStringValue(params.type) === "Document"
+      )
+        this.completeness.exclude("timeline", "invalid_protocol_value");
+      return;
+    }
+    this.#forgetRequest(id);
+    if (
+      frameId !== this.mainFrameId ||
+      cdpStringValue(params.type) !== "Document"
+    )
+      return;
+    const loaderId = cdpStringValue(params.loaderId);
+    const bytes =
+      Buffer.byteLength(id) +
+      Buffer.byteLength(frameId) +
+      Buffer.byteLength(loaderId ?? "");
+    if (
+      bytes >
+      WEB_RUNTIME_LIMITS.retainedEventBytes - this.#documentRequestBytes
+    ) {
+      this.#requestOwnershipFailure = new BrowserObservationError(
+        "observe_web_session",
+        "payload_limit",
+        {
+          detail: `Active document request identities exceeded the ${WEB_RUNTIME_LIMITS.retainedEventBytes}-byte retained event allowance.`,
+        },
+      );
+      this.end("window_elapsed");
+      return;
+    }
+    this.#documentRequests.set(id, { frameId, loaderId });
+    this.#documentRequestBytes += bytes;
+  }
+
+  #forgetRequest(id: string | undefined) {
+    if (id === undefined) return undefined;
+    const request = this.#documentRequests.get(id);
+    if (request !== undefined) {
+      this.#documentRequests.delete(id);
+      this.#documentRequestBytes -=
+        Buffer.byteLength(id) +
+        Buffer.byteLength(request.frameId) +
+        Buffer.byteLength(request.loaderId ?? "");
+    }
+    return request;
+  }
+
+  assertRequestOwnershipWithinLimit(): void {
+    if (this.#requestOwnershipFailure !== undefined)
+      throw this.#requestOwnershipFailure;
+  }
+
   #loadingFailed(params: UnknownRecord, bufferedBeforeArm: boolean): void {
-    const frame = cdpStringValue(params.frameId);
-    if (frame !== undefined && frame !== this.mainFrameId) return;
+    const requestId = cdpStringValue(params.requestId);
+    const request = this.#forgetRequest(requestId);
+    if (request === undefined) return;
     const eventTime = this.#networkEventTime(params, bufferedBeforeArm);
     if (!eventTime.keep) return;
     this.#add({
       type: "load_failed",
-      params,
+      params: {
+        ...params,
+        frameId: request.frameId,
+        loaderId: request.loaderId,
+      },
       ...(eventTime.timestamp === undefined
         ? {}
         : { timestamp: eventTime.timestamp }),
       rawUrl: null,
-      requestId: cdpStringValue(params.requestId) ?? null,
+      requestId: requestId ?? null,
       detail: safeNetworkError(params.errorText),
     });
   }
@@ -543,7 +679,7 @@ class TimelineCapture {
       loader_id: boundedId(params.loaderId),
       request_id: requestId ?? null,
       url: destination?.scope === "approved" ? destination.url : null,
-      destination_scope: destination?.scope ?? null,
+      destination_scope: options.destinationScope ?? destination?.scope ?? null,
       detail,
     });
   }
@@ -565,18 +701,21 @@ const performanceTimestamp = (value: unknown): number => {
 const waitForWindow = async (
   durationMs: number,
   capture: TimelineCapture,
+  connection: CdpConnection,
   signal?: AbortSignal,
 ): Promise<EndReason> =>
   await new Promise<EndReason>((resolve, reject) => {
     const timerController = new AbortController();
     let settled = false;
     let removeEnd = (): void => {};
+    let removeProtocolFailure = (): void => {};
     const settle = (complete: () => void): void => {
       if (settled) return;
       settled = true;
       timerController.abort();
       signal?.removeEventListener("abort", onAbort);
       removeEnd();
+      removeProtocolFailure();
       complete();
     };
     const finish = (reason: EndReason): void => settle(() => resolve(reason));
@@ -591,6 +730,10 @@ const waitForWindow = async (
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted === true) onAbort();
     if (!settled) removeEnd = capture.onEnd(finish);
+    if (!settled)
+      removeProtocolFailure = connection.onProtocolFailure((error) =>
+        settle(() => reject(error)),
+      );
     if (settled) return;
     void delayWithCancellation(
       durationMs,
@@ -615,18 +758,15 @@ const captureFinalUrl = async (
     context.signal,
   );
   if (capture.scopeExcluded) return "target_left_scope";
-  const url = mainFrameUrl(result);
-  if (
-    url !== undefined &&
-    allowedSanitizedUrl(url, allowedOrigins) !== undefined
-  ) {
-    capture.setFinalUrl(url);
-    return "window_elapsed";
+  const observation = observeMainFrameUrl(result);
+  const facts = classifyCdpFrameUrl(observation, allowedOrigins);
+  if (observation.kind !== "observed") capture.invalidateFinalUrl();
+  if (facts.scope === "outside_policy" || facts.scope === "unsupported") {
+    capture.excludeTargetScope("out_of_target_scope");
+    return "target_left_scope";
   }
-  capture.excludeTargetScope(
-    url === undefined ? "invalid_protocol_value" : "out_of_target_scope",
-  );
-  return "target_left_scope";
+  if (facts.url !== undefined) capture.setFinalUrl(facts.url);
+  return "window_elapsed";
 };
 
 const frameId = (result: unknown): string | undefined =>
@@ -645,6 +785,7 @@ const isTimelineEvent = (method: string): boolean =>
   hasNoComparableProducerTimestamp(method) ||
   method === "Network.requestWillBeSent" ||
   method === "Network.loadingFailed" ||
+  method === "Network.loadingFinished" ||
   method === "Page.lifecycleEvent";
 
 const scopedUrl = (

@@ -2,17 +2,17 @@ import { createHash } from "node:crypto";
 
 import * as t from "@babel/types";
 
+import { semanticBindingAtRead } from "./javascriptSemanticMutationInitializers.js";
+import { isUnmodifiedGlobalReference } from "./javascriptSemanticAmbientWrites.js";
+
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
-import {
-  runtimeFunctionParameters,
-  semanticStaticPropertyKey,
-} from "./javascriptAstValues.js";
+import { semanticStaticPropertyKey } from "./javascriptAstValues.js";
 import { stringValue } from "./javascriptStaticAnalysisHelpers.js";
 import {
   resolveSemanticBindingState,
-  type JavaScriptSemanticAnalysisState,
+  type JavaScriptBindingIndex,
 } from "./javascriptSemanticState.js";
 
 /** Static CommonJS export names. */
@@ -32,29 +32,68 @@ export const fingerprintJavaScriptAst = (node: t.Node): string => {
   return createHash("sha256").update(JSON.stringify(tokens)).digest("hex");
 };
 
+/** Calling-convention roles established by the bundler adapter. */
+export interface JavaScriptFactoryExportBindings {
+  readonly exports: t.Identifier | undefined;
+  readonly module: t.Identifier | undefined;
+  readonly loader: t.Identifier | undefined;
+}
+
 /** Collect statically declared CommonJS/bundler export names from one factory. */
 export const collectJavaScriptExports = (
   node: t.Node,
-  bindings?: JavaScriptSemanticAnalysisState,
+  factory?: {
+    readonly roles: JavaScriptFactoryExportBindings;
+    readonly index: Pick<
+      JavaScriptBindingIndex,
+      "bindings" | "effectsForReferenceWithinActivationAt"
+    >;
+  },
 ): StaticExports => {
+  const roles = factory?.roles;
+  const index = factory?.index;
+  const bindings = index?.bindings;
   const exports = new Set<string>();
-  const parameter = t.isFunction(node)
-    ? runtimeFunctionParameters(node)[1]
-    : undefined;
-  const factoryExports =
-    bindings !== undefined && t.isFunction(node) && t.isIdentifier(parameter)
-      ? resolveSemanticBindingState(bindings, parameter, parameter.name)
+  const bindingId = (
+    reference: t.Node | null | undefined,
+  ): string | undefined =>
+    bindings !== undefined && t.isIdentifier(reference)
+      ? resolveSemanticBindingState(bindings, reference, reference.name)
           ?.bindingId
       : undefined;
-  const isExportsAlias = (reference: t.Node | null): boolean => {
-    if (!t.isIdentifier(reference)) return false;
-    if (factoryExports === undefined) return reference.name === "exports";
-    return (
-      bindings !== undefined &&
-      resolveSemanticBindingState(bindings, reference, reference.name)
-        ?.bindingId === factoryExports
-    );
+  const identity = (
+    role: keyof JavaScriptFactoryExportBindings,
+    fallback: string,
+  ) => {
+    const id = bindingId(roles?.[role]);
+    return (reference: t.Node | null): boolean => {
+      if (!t.isIdentifier(reference)) return false;
+      if (roles === undefined) return reference.name === fallback;
+      if (id === undefined || bindings === undefined) return false;
+      const binding = resolveSemanticBindingState(
+        bindings,
+        reference,
+        reference.name,
+      );
+      if (binding?.bindingId !== id) return false;
+      // The calling convention owns the parameter's entry value, not every
+      // later value assigned to the same lexical binding.
+      const read = semanticBindingAtRead(
+        binding,
+        reference,
+        bindings.parentsByNode,
+      );
+      return (
+        read.status === "ordered" &&
+        read.binding.initializers.length === 0 &&
+        read.binding.referenceInitializers.length === 0
+      );
+    };
   };
+  const isExportsAlias = identity("exports", "exports");
+  const isModuleAlias = identity("module", "module");
+  const isLoaderAlias = identity("loader", "__webpack_require__");
+  const receivers = { isExportsAlias, isModuleAlias };
   traverseJavaScriptAst(node, {
     enter: (current) => {
       if (t.isAssignmentExpression(current))
@@ -62,17 +101,42 @@ export const collectJavaScriptExports = (
           current.left,
           current.right,
           exports,
-          isExportsAlias,
+          receivers,
         );
-      if (t.isCallExpression(current))
-        collectCallExports(current, exports, isExportsAlias);
+      if (t.isCallExpression(current)) {
+        const intrinsic =
+          bindings !== undefined &&
+          isUnmodifiedGlobalReference(current.callee, bindings, [
+            "Object",
+            "defineProperty",
+          ]);
+        collectCallExports(current, exports, receivers, intrinsic, (root) => {
+          if (root === null || !isLoaderAlias(root)) return false;
+          if (index === undefined) return true;
+          const facts = index.effectsForReferenceWithinActivationAt(
+            current,
+            root,
+            ["d"],
+          );
+          return (
+            facts.memberEffectsIndexed &&
+            !facts.effects.some(
+              (effect) =>
+                effect.kind === "member-write" && effect.timing !== "after",
+            )
+          );
+        });
+      }
       return undefined;
     },
   });
-  return {
-    values: [...exports].sort(compareUnicodeCodePoints),
-  };
+  return { values: [...exports].sort(compareUnicodeCodePoints) };
 };
+
+interface ExportReceivers {
+  readonly isExportsAlias: (root: t.Node | null) => boolean;
+  readonly isModuleAlias: (root: t.Node | null) => boolean;
+}
 
 const semanticTokens = (node: t.Node): string[] => {
   const tokens = [`node:${node.type}`];
@@ -140,7 +204,7 @@ const collectAssignmentExports = (
   left: t.LVal | t.OptionalMemberExpression,
   right: t.Expression,
   output: Set<string>,
-  isExportsAlias: (root: t.Node | null) => boolean,
+  { isExportsAlias, isModuleAlias }: ExportReceivers,
 ): void => {
   const path = memberPath(left);
   if (path === null) return;
@@ -150,7 +214,7 @@ const collectAssignmentExports = (
   if (path.length === 1 && exportsAlias) return;
   const exportOffset = exportsAlias
     ? 1
-    : path[0] === "module" && path[1] === "exports"
+    : isModuleAlias(root) && path[1] === "exports"
       ? 2
       : null;
   if (exportOffset === null) return;
@@ -168,15 +232,17 @@ const collectAssignmentExports = (
 const collectCallExports = (
   call: t.CallExpression,
   output: Set<string>,
-  isExportsAlias: (root: t.Node | null) => boolean,
+  { isExportsAlias, isModuleAlias }: ExportReceivers,
+  intrinsic: boolean,
+  isLoaderAlias: (root: t.Node | null) => boolean,
 ): void => {
   const callee = memberPath(call.callee);
   if (callee === null) return;
-  const definePropertyCall =
+  const definePropertyCall = intrinsic;
+  const declarationCall =
     callee.length === 2 &&
-    callee[0] === "Object" &&
-    callee[1] === "defineProperty";
-  const declarationCall = callee.length >= 2 && callee.at(-1) === "d";
+    callee[1] === "d" &&
+    isLoaderAlias(memberRoot(call.callee));
   if (!definePropertyCall && !declarationCall) return;
   const targetNode = call.arguments[0];
   const target = memberPath(targetNode);
@@ -184,7 +250,7 @@ const collectCallExports = (
     isExportsAlias(targetNode ?? null) ||
     (target !== null &&
       target.length === 2 &&
-      target[0] === "module" &&
+      isModuleAlias(memberRoot(targetNode)) &&
       target[1] === "exports");
   if (!exportTarget) return;
   if (definePropertyCall) {

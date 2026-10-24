@@ -25,7 +25,6 @@ export const androidInputSchemas = {
     ...classTarget,
     method_name: z.string().min(1),
     overload_index: z
-      .number()
       .int()
       .nonnegative()
       .optional()
@@ -43,7 +42,6 @@ export const androidInputSchemas = {
         "Omit for class references; select ambiguous methods with overload_index",
       ),
     overload_index: z
-      .number()
       .int()
       .nonnegative()
       .optional()
@@ -96,7 +94,41 @@ export const androidRequestSchema = z.discriminatedUnion("operation", [
 const textCoverage = z.strictObject({
   status: z.enum(["complete", "partial"]),
   text: z.string(),
-  reported_total_bytes: z.number().int().nonnegative().nullable(),
+  reported_total_bytes: z.int().nonnegative().nullable(),
+});
+
+const manifestComponent = z.strictObject({
+  kind: z.enum([
+    "activity",
+    "activity-alias",
+    "service",
+    "receiver",
+    "provider",
+  ]),
+  declared_name: z.string(),
+  name: z.string(),
+  exported: z.boolean().nullable(),
+  exported_default: z.boolean().nullable(),
+  permission: z.string().nullable(),
+  permission_source: z.enum(["component", "application", "none", "unknown"]),
+  intent_filter_count: z.number().int().nonnegative(),
+  actions: z.array(z.string()),
+  categories: z.array(z.string()),
+  foreground_service_type: z.string().nullable(),
+  authorities: z.array(z.string()).nullable(),
+  target_activity: z.string().nullable(),
+});
+
+/**
+ * Static component projection of the decoded manifest. The export default is
+ * Android's documented rule for an absent android:exported when one applies;
+ * null also means the default is unknown or an explicit declaration is
+ * required. This is not a merged-manifest or runtime observation.
+ */
+const manifestComponents = z.strictObject({
+  status: z.enum(["complete", "partial", "unavailable"]),
+  items: z.array(manifestComponent),
+  limitations: z.array(z.string()),
 });
 /** A DEX prototype; hex parentheses also keep the advertised class valid in v mode. */
 export const dexDescriptorSchema = z
@@ -108,7 +140,7 @@ export const dexDescriptorSchema = z
 const method = z.strictObject({
   name: z.string(),
   reported_signature: z.string(),
-  overload_index: z.number().int().nonnegative(),
+  overload_index: z.int().nonnegative(),
   is_constructor: z.boolean(),
   dex_descriptor: dexDescriptorSchema,
 });
@@ -117,8 +149,8 @@ const engine = z.strictObject({
   version: z.string().nullable(),
   artifact_sha256: z.string().regex(/^[a-f0-9]{64}$/u),
   source_revision: z.string().nullable(),
-  worker_count: z.number().int().positive(),
-  heap_limit_mib: z.number().int().positive().nullable(),
+  worker_count: z.int().positive(),
+  heap_limit_mib: z.int().positive().nullable(),
 });
 const common = { engine };
 
@@ -133,19 +165,28 @@ export const androidResultSchemas = {
     target_sdk: z.string().nullable(),
     permissions: z.array(z.string()),
     manifest: textCoverage,
-    class_count: z.number().int().nonnegative(),
-    resource_count: z.number().int().nonnegative(),
+    // Evidence retained before the component projection existed re-parses
+    // with an explicit unavailable inventory; current results always carry it.
+    components: manifestComponents.default(() => ({
+      status: "unavailable" as const,
+      items: [],
+      limitations: [
+        "This Evidence predates the manifest component projection; run inspect_android_package again to obtain it.",
+      ],
+    })),
+    class_count: z.int().nonnegative(),
+    resource_count: z.int().nonnegative(),
     signature_verification: z.literal("not_performed"),
   }),
   search_android_classes: z.strictObject({
     ...common,
     query: z.string(),
-    total_classes: z.number().int().nonnegative(),
+    total_classes: z.int().nonnegative(),
     matches: z.array(z.string()),
     duplicate_names: z.array(
       z.strictObject({
         name: z.string(),
-        occurrences: z.number().int().min(2),
+        occurrences: z.int().min(2),
       }),
     ),
     coverage: z.literal("complete"),
@@ -163,7 +204,7 @@ export const androidResultSchemas = {
     ...common,
     class_name: z.string(),
     method: method,
-    overload_count: z.number().int().positive(),
+    overload_count: z.int().positive(),
     representation: z.enum(["java", "smali"]),
     body_status: z.enum(["available", "not_available"]),
     fell_back: z.boolean(),
@@ -174,10 +215,10 @@ export const androidResultSchemas = {
     ...common,
     class_name: z.string(),
     method_name: z.string().nullable(),
-    overload_index: z.number().int().nonnegative().nullable(),
+    overload_index: z.int().nonnegative().nullable(),
     reported_signature: z.string().nullable(),
     dex_descriptor: dexDescriptorSchema.nullable(),
-    total: z.number().int().nonnegative(),
+    total: z.int().nonnegative(),
     references: z.array(
       z.strictObject({
         kind: z.string(),
@@ -195,8 +236,8 @@ export const androidResultSchemas = {
             z.strictObject({
               dex_entry: z.string().min(1),
               source_raw_method_id: z.string().min(1),
-              dex_code_unit_offset: z.number().int().nonnegative(),
-              dex_method_index: z.number().int().nonnegative(),
+              dex_code_unit_offset: z.int().nonnegative(),
+              dex_method_index: z.int().nonnegative(),
               opcode: z.string().regex(/^INVOKE_/u),
             }),
           )
