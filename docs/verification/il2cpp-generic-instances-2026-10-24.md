@@ -122,3 +122,17 @@ Other historical contributor platform checks were not rerun. Metadata 27/29 and
 the new unreadable/negative-index cases have authored boundary coverage only.
 No authentic Unity artifact, game execution, real target dispatch or Ghidra import
 is qualified by the 12 query tasks above.
+
+## Final integration repeat
+
+Final executed source pin `7fdb5a29885ce05ec9181a609a37bf008b94e5df`
+incorporates main `98ec00f4068bab894639d0d1d83ac0bfc428bcbf` and the author's
+later cleanup `3dd803b81ccfb6b75afaa8c616693e8c4e7183d1`, preserving both authors'
+changes. All **285** selected checks pass again: 183.057 s
+elapsed, 187.472 CPU s and
+2,583.3 MiB sampled peak process-family
+RSS. Type/lint, full formatting and generated-document checks pass. This is a
+completed validation cost with primed file caches, not a speed comparison.
+The 12 paired query measurements remain pinned to the earlier source revision
+and are not re-labelled as measurements of this integration repeat. The final
+report update changes documentation only.
