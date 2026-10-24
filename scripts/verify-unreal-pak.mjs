@@ -9,7 +9,7 @@ import { toolContract } from "../dist/contracts/toolContracts.js";
 import { analysisViewResultSchema } from "../dist/domain/analysisView/analysisView.js";
 import { ArtifactResourceScope } from "../dist/artifacts/ArtifactResourceScope.js";
 import { mcpTextValue } from "./lib/mcp-verifier-results.mjs";
-import { closeVerifierResources } from "./lib/verifier-cleanup.mjs";
+import { withVerifierCleanup } from "./lib/verifier-cleanup.mjs";
 import { hashVerifierFile } from "./lib/verifier-file-resources.mjs";
 
 const args = process.argv.slice(2);
@@ -46,8 +46,19 @@ const call = async (name, input) => {
   assert.notEqual(response.isError, true, mcpTextValue(response));
   return JSON.parse(mcpTextValue(response));
 };
+const entryPage = async (evidenceId) =>
+  analysisViewResultSchema.parse(
+    (
+      await call("inspect_analysis_view", {
+        source: { kind: "retained-evidence", evidence_id: evidenceId },
+        view: { kind: "unreal-pak", collection: "entries", limit: 16 },
+      })
+    ).normalized_result,
+  );
+const firstEntries = (report) =>
+  report.entries.slice(0, 16).map((entry, index) => ({ index, ...entry }));
 const resources = new ArtifactResourceScope();
-try {
+await withVerifierCleanup(async () => {
   await client.connect(transport);
   const { tools } = await client.listTools();
   assert(tools.some((tool) => tool.name === operation));
@@ -75,9 +86,17 @@ try {
       // retained and addressable rather than truncated.
       const { error } = JSON.parse(mcpTextValue(complete));
       assert.equal(error.code, "resource_constraint");
-      assert.equal(error.details.reported_limits.boundary, "mcp-response");
+      const limits = error.details.reported_limits;
+      assert.equal(limits.boundary, "mcp-response");
+      assert.equal(limits.evidence_reference.kind, "retained-evidence");
+      assert.match(limits.evidence_reference.evidence_id, /^ev_[a-f0-9]{64}$/u);
+      // Page the refused call's own record, not a later inspection.
+      assert.deepEqual(
+        (await entryPage(limits.evidence_reference.evidence_id)).items,
+        firstEntries(report),
+      );
       console.log(
-        "[ok] MCP complete delivery refused at the stdio budget with retained Evidence",
+        "[ok] MCP complete delivery refused at the stdio budget; its retained Evidence pages like the CLI report",
       );
     } else {
       const mcp = contract.outputSchema.parse(
@@ -106,20 +125,9 @@ try {
     assert.equal(summary.summary.counts.issues, report.issues.length);
     for (const issue of report.issues)
       console.log(`[issue] ${issue.kind} at ${issue.offset}: ${issue.message}`);
-    const page = analysisViewResultSchema.parse(
-      (
-        await call("inspect_analysis_view", {
-          source: {
-            kind: "retained-evidence",
-            evidence_id: summary.parent_evidence_id,
-          },
-          view: { kind: "unreal-pak", collection: "entries", limit: 16 },
-        })
-      ).normalized_result,
-    );
     assert.deepEqual(
-      page.items,
-      report.entries.slice(0, 16).map((entry, index) => ({ index, ...entry })),
+      (await entryPage(summary.parent_evidence_id)).items,
+      firstEntries(report),
     );
     assert.deepEqual(
       await hashVerifierFile(path, resources),
@@ -130,11 +138,5 @@ try {
       `[ok] summary and page parity; pak layout ${report.footer.layout}, ${report.entries.length} entries, ${report.issues.length} issues; complete Evidence ${Buffer.byteLength(stdout)} bytes, summary ${Buffer.byteLength(JSON.stringify(summary))} bytes; CLI ${cliMs} ms`,
     );
   }
-} finally {
-  await closeVerifierResources([
-    () => client.close(),
-    () => transport.close(),
-    () => resources.close(),
-  ]);
-}
+}, [() => client.close(), () => transport.close(), () => resources.close()]);
 console.log("All asserted Unreal pak CLI/MCP checks passed");
