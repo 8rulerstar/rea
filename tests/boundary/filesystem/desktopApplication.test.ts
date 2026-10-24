@@ -402,6 +402,31 @@ it("orders member probes for Unity predefined script assemblies before every man
       );
 });
 
+it("offers member probes for predefined script assemblies in a macOS bundle's managed directory", async () => {
+  const root = await createTestTempDirectory("rea-desktop-mono-bundle-");
+  const managed = "Contents/Resources/Data/Managed";
+  await put(
+    root,
+    `${managed}/Assembly-CSharp.dll`,
+    buildManagedPeFixture({ references: ["UnityEngine.CoreModule"] }),
+  );
+  await put(
+    root,
+    `${managed}/Game.Logic.dll`,
+    buildManagedPeFixture({ references: ["System.Runtime"] }),
+  );
+  const { report } = await inspect(root);
+  const relative = new Map(
+    report.files.map((file) => [file.file_id, file.path]),
+  );
+  expect(
+    report.next_probes
+      .filter((probe) => probe.operation === "inspect_managed_members")
+      .map((probe) => relative.get(probe.file_id)),
+  ).toEqual([`${managed}/Assembly-CSharp.dll`]);
+  expect(report.next_probes[0]?.operation).toBe("inspect_managed_members");
+});
+
 it("offers no member probes when no managed directory has a Unity reference witness", async () => {
   const root = await createTestTempDirectory("rea-desktop-mono-no-witness-");
   const plain = buildManagedPeFixture({ references: ["System.Runtime"] });
