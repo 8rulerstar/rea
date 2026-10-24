@@ -304,14 +304,14 @@ export function* linkGenericMethodsSteps(
       );
       return {
         method_spec: spec,
-        method: method ?? -1,
+        method,
         name: null,
         ...unknown,
       };
     }
     // A method spec that contradicts the metadata leaves the row unknown: its
     // slot address would be reported under a definition nothing confirms.
-    const base = { method_spec: spec, method: method ?? -1 };
+    const base = { method_spec: spec, method };
     let name: string | null = null;
     if (specAt === null)
       issue(

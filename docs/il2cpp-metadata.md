@@ -329,7 +329,8 @@ counts. The result adds:
   `row` it leaves unknown, the `address` of the contradicting row, method spec
   or pointer slot record, and a `message`);
 - `generic_method_instances`: one row per table entry (row position is the
-  table index) with `method_spec`, `method` (the definition's metadata index),
+  table index) with `method_spec`, `method` (the recorded definition index,
+  including invalid values, or `null` when the index cannot be read),
   `name`, and `state`, `address` and `rva` as in `method_addresses`: `code`,
   `no-body` for a zero pointer slot, or `unknown` exactly when an issue names
   the row.

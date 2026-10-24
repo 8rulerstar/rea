@@ -503,8 +503,11 @@ const selection = (view: Request, report: Report) => {
       (!("namespace" in row) || !namespaces.has(row.namespace))
     )
       return false;
-    if (methods !== undefined && !methods.has(parameterOwner(row, index) ?? -1))
-      return false;
+    if (methods !== undefined) {
+      const method = parameterOwner(row, index);
+      if (method === null || method === undefined || !methods.has(method))
+        return false;
+    }
     if (imageIndices === undefined) return true;
     let lower = 0;
     let upper = ranges.length;

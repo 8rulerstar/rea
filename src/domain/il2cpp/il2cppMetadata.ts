@@ -263,8 +263,8 @@ export const il2cppGenericMethodInstanceSchema =
   il2cppMethodAddressSchema.extend({
     /** Il2CppMethodSpec index. */
     method_spec: count,
-    /** Metadata method index of the generic definition; may be out of range when an issue names it. */
-    method: z.number().int(),
+    /** Recorded definition index, including invalid values; null when unreadable. */
+    method: z.number().int().nullable(),
     /** Il2CppDumper-style name; null only on an unknown row whose method spec an issue names. */
     name: z.string().nullable(),
   });
@@ -555,7 +555,9 @@ const validateMetadataFacts = (
       });
     if (
       row.name !== null &&
-      (row.method < 0 || row.method >= report.methods.length)
+      (row.method === null ||
+        row.method < 0 ||
+        row.method >= report.methods.length)
     )
       context.addIssue({
         code: "custom",

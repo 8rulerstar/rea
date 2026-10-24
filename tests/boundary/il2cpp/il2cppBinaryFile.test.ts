@@ -994,6 +994,28 @@ it("reports entries past the 64-bit address space at their table row", () => {
   });
 });
 
+it("keeps unreadable method-definition indexes unknown instead of inventing -1", () => {
+  const generic = linkGeneric({
+    methodSpecs: 0xffffffffffffffffn,
+  }).generic_methods!;
+  expect(generic.instances.map((row) => row.method)).toEqual([
+    null,
+    null,
+    null,
+  ]);
+  expect(generic.instances.every((row) => row.state === "unknown")).toBe(true);
+});
+
+it("retains a recorded negative method-definition index as source evidence", () => {
+  const generic = linkGeneric({ firstSpecMethod: -1 }).generic_methods!;
+  expect(generic.instances[0]).toMatchObject({
+    method: -1,
+    state: "unknown",
+    name: null,
+  });
+  expect(generic.issues[0]?.message).toContain("method -1");
+});
+
 it("selects the 27.0 layout by its 12-byte rows and agreeing counts", () => {
   const linked = linkGeneric({ stride: 12 }, 27);
   expect(linked.generic_methods).toMatchObject({

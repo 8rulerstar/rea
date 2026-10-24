@@ -1405,3 +1405,65 @@ cliTest.skipIf(process.platform === "win32")(
     expect(await readFile(parent, "utf8")).toBe("unchanged");
   },
 );
+
+cliTest(
+  "preserves unreadable and recorded-invalid generic method identities through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-method-identity-");
+    const path = join(root, "global-metadata.dat");
+    await writeFile(
+      path,
+      createIl2cppMetadataFixture({ version: 31, genericOwners: true }).bytes,
+    );
+    const { call } = await connectLocalToolsMcp();
+    for (const entry of [
+      {
+        name: "unreadable",
+        options: { methodSpecs: 0xffffffffffffffffn },
+        methods: [null, null, null],
+      },
+      {
+        name: "recorded-negative",
+        options: { firstSpecMethod: -1 },
+        methods: [-1, 2, 4],
+      },
+    ] as const) {
+      const binaryPath = join(root, entry.name + ".so");
+      await writeFile(
+        binaryPath,
+        createElfFixture(
+          createIl2cppBinaryFixture({ genericMethods: entry.options }),
+        ),
+      );
+      const result = await cli.run({
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--generic-instances",
+          "--json",
+        ],
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(
+        parseCliMetadata(result.json).generic_method_instances?.map(
+          (row) => row.method,
+        ),
+      ).toEqual(entry.methods);
+      const response = await call("inspect_il2cpp_metadata", {
+        path,
+        binary_path: binaryPath,
+        generic_instances: true,
+        detail: "complete",
+      });
+      expect(response.isError, JSON.stringify(response.content)).not.toBe(true);
+      expect(
+        parseCliMetadata(
+          response.structuredContent,
+        ).generic_method_instances?.map((row) => row.method),
+      ).toEqual(entry.methods);
+    }
+  },
+  60000,
+);

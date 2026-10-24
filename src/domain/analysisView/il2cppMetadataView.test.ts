@@ -703,6 +703,39 @@ it("keeps generic method issues out of summaries and pages them", () => {
   ).toMatchObject({ summary: { counts: { generic_method_issues: null } } });
 });
 
+it("retains an unreadable generic definition identity without matching a method selector", () => {
+  const linked = genericLinked();
+  linked.generic_method_instances![2]!.method = null;
+  expect(il2cppMetadataParentSchema.safeParse(linked).success).toBe(true);
+  const source = parent(freezeJsonSnapshot(linked), true);
+  const page = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "generic_method_instances",
+    indices: [2],
+    offset: 0,
+    limit: 1,
+  });
+  expect(page.ok && "items" in page.value ? page.value.items : null).toEqual([
+    { index: 2, ...linked.generic_method_instances![2] },
+  ]);
+  const filtered = projectIl2cppMetadataView(source, {
+    kind: "il2cpp-metadata",
+    collection: "generic_method_instances",
+    method_indices: [2],
+    offset: 0,
+    limit: 1,
+  });
+  expect(
+    filtered.ok && "items" in filtered.value ? filtered.value.items : null,
+  ).toEqual([]);
+});
+
+it("rejects a named generic instance whose method definition is unreadable", () => {
+  const linked = genericLinked();
+  linked.generic_method_instances![0]!.method = null;
+  expect(il2cppMetadataParentSchema.safeParse(linked).success).toBe(false);
+});
+
 it("keeps unrequested generic instances unknown and refuses their page", () => {
   const source = parent(freezeJsonSnapshot(linkedReport()), true);
   expect(summarize(source)).toMatchObject({
