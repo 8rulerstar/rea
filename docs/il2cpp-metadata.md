@@ -447,7 +447,7 @@ The builds checked are listed after the module search rules above.
 | `metadata-registration-not-found`       | input error | No single MetadataRegistration or code-loaded type-table candidate was resolved.                             |
 | `invalid-type`                          | input error | A type index or `Il2CppType` record is out of range, unmapped or malformed.                                  |
 | `unsupported-type-kind`                 | unsupported | A valid type kind has no implemented rendering.                                                              |
-| `generic-methods-unsupported`           | unsupported | Generic instances were requested for version 24 or 39, or without both static registrations.                 |
+| `generic-methods-unsupported`           | unsupported | Generic instances were requested for metadata version 24 or 39, or a build lacks either static registration. |
 | `generic-method-registration-not-found` | input error | No CodeRegistration layout bounds every genericMethodTable row, or the generic tables are unreadable.        |
 | `ambiguous-generic-method-registration` | input error | More than one CodeRegistration layout bounds every genericMethodTable row.                                   |
 
