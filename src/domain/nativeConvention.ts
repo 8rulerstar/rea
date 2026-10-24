@@ -57,8 +57,10 @@ export const isSwiftRuntimeLibrary = (path: string): boolean =>
 const UNITY_IL2CPP_BACKUP_SUFFIX =
   "_backupthisfolder_butdontshipitwithyourgame";
 
-/** Parse desktop layout conventions once while preserving original path segments. */
-/** `rootName` is the admitted root directory name; `.` denotes that root in returned directories. */
+/**
+ * Parse desktop layout conventions once while preserving original path segments.
+ * `rootName` is the admitted root directory name; `.` denotes that root in returned directories.
+ */
 export const desktopPathConventions = (path: string, rootName?: string) => {
   const segments = path.split("/");
   const folded = segments.map(foldSegment);
