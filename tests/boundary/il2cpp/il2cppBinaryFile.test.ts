@@ -50,6 +50,14 @@ const expectedAddress = (value: bigint | "no-body" | "unknown") =>
 const expectedAddresses = FIXTURE_METHOD_ADDRESSES.map(expectedAddress);
 const link = (bytes: Buffer, architecture?: string) =>
   linkIl2cppBinary(bytes, metadata, facts, architecture);
+// A type-table fallback needs the metadata to reference most of the table, as
+// real builds do; referencing type 3 requires all four fixture entries.
+const wholeTable = {
+  ...facts,
+  returnTypes: Int32Array.from(facts.returnTypes, () => 3),
+};
+const linkWholeTable = (bytes: Buffer) =>
+  linkIl2cppBinary(bytes, metadata, wholeTable);
 const failure = (bytes: Buffer, architecture?: string) => {
   try {
     link(bytes, architecture);
@@ -468,13 +476,13 @@ it.each([
 );
 
 it("finds an arm64 type table through the ADRP+ADD pair that loads it", () => {
-  const linked = link(
+  const linked = linkWholeTable(
     createIl2cppBinaryFixture({
       metadataRegistration: false,
       adrpAdd: [[0xc20, 0x900]],
     }),
   );
-  const reference = link(createIl2cppBinaryFixture());
+  const reference = linkWholeTable(createIl2cppBinaryFixture());
   expect(linked.types_field).toBeNull();
   expect(linked.types_count).toBe(4);
   expect(linked.return_types).toEqual(reference.return_types);
@@ -487,12 +495,13 @@ it("finds an x86-64 type table through the instruction that loads it", () => {
   // lea rcx, [rip + disp32] at 0xc40, loading the type table at 0x900.
   image.set([0x48, 0x8d, 0x0d], 0xc40);
   image.writeInt32LE(0x900 - (0xc40 + 7), 0xc43);
-  const linked = link(createElfFixture(image, { machine: 62 }));
+  const linked = linkWholeTable(createElfFixture(image, { machine: 62 }));
   expect(linked.types_field).toBeNull();
   expect(linked.types_count).toBe(4);
   expect(linked.return_types).toEqual(
-    link(createElfFixture(createIl2cppBinaryFixture(), { machine: 62 }))
-      .return_types,
+    linkWholeTable(
+      createElfFixture(createIl2cppBinaryFixture(), { machine: 62 }),
+    ).return_types,
   );
 });
 
@@ -562,6 +571,63 @@ it.each([
 );
 
 it.each([
+  [
+    // The real table is unloaded; a copy elsewhere is loaded instead.
+    "only a second long-enough run is loaded",
+    { metadataRegistration: false, adrpAdd: [[0xc20, 0xb00]] },
+    (bytes: Buffer) => bytes.copy(bytes, 0xb00, 0x900, 0x920),
+  ],
+  [
+    "a static MetadataRegistration matches its counts but not its type table",
+    { adrpAdd: [[0xc20, 0x900]] },
+    (bytes: Buffer) =>
+      bytes.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0xdead0000n, 0x800 + 56),
+  ],
+  [
+    "the loaded run reaches the end of its mapping",
+    {
+      metadataRegistration: false,
+      adrpAdd: [[0xc20, 0x900]],
+      splitSegmentAt: 0x920,
+    },
+    () => undefined,
+  ],
+  [
+    "a record's kind is an unassigned Il2CppTypeEnum value",
+    { metadataRegistration: false, adrpAdd: [[0xc20, 0x900]] },
+    (bytes: Buffer) => bytes.writeUInt32LE(0x17 << 16, 0x980 + 16 + 8),
+  ],
+] as const)(
+  "keeps metadata-registration-not-found when %s, with the whole table referenced",
+  (_, options, patch) => {
+    const bytes = createIl2cppBinaryFixture(options);
+    patch(bytes);
+    let reason: string | undefined;
+    try {
+      linkWholeTable(bytes);
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      reason = cause.reason;
+    }
+    expect(reason).toBe("metadata-registration-not-found");
+  },
+);
+
+it("keeps metadata-registration-not-found when x86-64 code loads an address inside the run", () => {
+  const image = createIl2cppBinaryFixture({ metadataRegistration: false });
+  image.set([0x48, 0x8d, 0x0d], 0xc40);
+  image.writeInt32LE(0x908 - (0xc40 + 7), 0xc43);
+  let reason: string | undefined;
+  try {
+    linkWholeTable(createElfFixture(image, { machine: 62 }));
+  } catch (cause) {
+    if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+    reason = cause.reason;
+  }
+  expect(reason).toBe("metadata-registration-not-found");
+});
+
+it.each([
   ["a later page", { pages: 2, code: 0xc00, array: 0x1500 }],
   ["an earlier page", { pages: 3, code: 0x2c00, array: 0x500 }],
 ] as const)(
@@ -585,7 +651,7 @@ it.each([
 );
 
 it("follows a negative arm64 ADRP page delta to the type table", () => {
-  const linked = link(
+  const linked = linkWholeTable(
     createIl2cppBinaryFixture({
       metadataRegistration: false,
       pages: 3,
@@ -1280,14 +1346,20 @@ it.each<
 
 it("refuses generic linking when the type table was inferred", () => {
   // Without a static MetadataRegistration, genericMethodTable has no anchor.
+  const decoded = genericFacts(31);
   expect(() =>
-    linkGeneric(
-      {},
-      31,
+    linkIl2cppBinary(
       createIl2cppBinaryFixture({
         metadataRegistration: false,
         adrpAdd: [[0xc20, 0x900]],
       }),
+      decoded.metadata,
+      {
+        ...decoded.link,
+        returnTypes: Int32Array.from(decoded.link.returnTypes, () => 3),
+      },
+      undefined,
+      { genericInstances: true },
     ),
   ).toThrow(
     expect.objectContaining({

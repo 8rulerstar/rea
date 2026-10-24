@@ -299,20 +299,25 @@ The result adds:
 `Il2CppMetadataRegistration.typesCount` and its value. That record is found as
 the single place whose `fieldOffsetsCount` and `typeDefinitionsSizesCount` both
 equal the metadata type-definition count and whose type table is file mapped.
-Linking reads only that table. When no such record matches on x86-64 or arm64,
-the reader collects maximal runs of pointers to Il2CppType-shaped records (a
-kind from 0x01 to 0x1e; class and value-type data below the type-definition
-count) that are long enough for every type index the metadata references, and
-requires exactly one run start to be loaded by the same instruction forms as the
-module-array fallback. `types_field` is then `null`, `types_count` is that run's
-length rather than an observed `typesCount`, and Evidence is **inferred**. The
-run length is an upper bound: adjacent type-shaped pointers would extend it past
-the real table, and only the type indices the metadata references are read. A
-run that a type-shaped neighbour extends before the loaded address, or that
-spans two mappings, is not accepted. When the metadata references few type
-indices, short pointer runs elsewhere can exceed the 64-candidate bound and the
-result is `native-index-capacity`. Otherwise the result is
-`metadata-registration-not-found`. Il2CppDumper's `SectionHelper` and Cpp2IL's
+Linking reads only that table. When no record on x86-64 or arm64 has both of
+those counts, the reader collects maximal runs of pointers to Il2CppType-shaped
+records (an assigned Il2CppTypeEnum kind from 0x01 to 0x1e; class and
+value-type data below the type-definition count) that are long enough for every
+type index the metadata references. Exactly one such run may exist in the
+image, it must end inside its mapping, and its start must be loaded by the same
+instruction forms as the module-array fallback. `types_field` is then `null`,
+`types_count` is that run's length rather than an observed `typesCount`, and
+Evidence is **inferred**. The run length is at least every referenced type
+index but can differ from `typesCount`: a type-shaped pointer after the table
+would lengthen it, and an unreadable slot (such as an unresolved relocation)
+would end it early. Only the type indices the metadata references are read. A
+second long-enough run anywhere, a run that a type-shaped neighbour extends
+before the loaded address, a run that reaches the end of its mapping, and a
+record whose two counts match but whose other fields are unusable all leave
+`metadata-registration-not-found` rather than a guess. Real builds reference
+most of their type table, so the length requirement excludes other pointer
+tables; when the metadata references few type indices, short pointer runs can
+exceed the 64-candidate bound and the result is `native-index-capacity`. Il2CppDumper's `SectionHelper` and Cpp2IL's
 `FindMetadataRegistrationPost24_5` find MetadataRegistration from its count
 words in data, as the static search above does, so they need the record to
 exist; StrippedCodeRegSupport restores only the module list.

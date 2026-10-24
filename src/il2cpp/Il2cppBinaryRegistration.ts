@@ -1,5 +1,6 @@
 import {
   BinaryFormatFailure,
+  createFileMappingIndex,
   mappedFileOffset,
 } from "../native/metadata/BinaryContainer.js";
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
@@ -403,6 +404,9 @@ export function* findMetadataRegistration(
 > {
   const matches: { field: bigint; count: number; types: bigint }[] = [];
   const matchedFields = new Set<bigint>();
+  // A record whose two counts match is static evidence even when its other
+  // fields are unusable; code is then not asked to stand in for it.
+  let countsMatched = false;
   const low = (offset: number) => image.bytes.readUInt32LE(offset);
   for (const mapping of image.container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
@@ -417,6 +421,7 @@ export function* findMetadataRegistration(
       if (!hasPointerArrayCoverage(image, address, 16)) continue;
       if (readUInt32(image, address + 80n) !== typeDefinitions) continue;
       if (readUInt32(image, address + 96n) !== typeDefinitions) continue;
+      countsMatched = true;
       const count = readUInt32(image, address + 48n);
       const types = readPointer(image, address + 56n);
       const fieldOffsets = readPointer(image, address + 88n);
@@ -451,7 +456,7 @@ export function* findMetadataRegistration(
   }
   const architecture = image.container.architecture;
   if (
-    matches.length === 0 &&
+    !countsMatched &&
     requiredTypes > 0 &&
     (architecture === "amd64" || architecture === "arm64")
   ) {
@@ -473,13 +478,19 @@ export function* findMetadataRegistration(
 /**
  * An inlined MetadataRegistration leaves the Il2CppType pointer table loaded
  * directly by code. Candidates are maximal runs of pointers to Il2CppType-shaped
- * records (a kind byte from 0x01 to 0x1e; class and value-type data below the
+ * records (a defined Il2CppTypeEnum kind; class and value-type data below the
  * metadata type-definition count) long enough for every type index the
- * metadata references. Exactly one run start must be loaded by the same
- * instruction forms as the module-array fallback. The run length becomes the
- * count: an upper bound on the table, never below what the metadata needs.
+ * metadata references. Exactly one such run may exist in the image, it must
+ * end inside its mapping, and code must load its start with the same
+ * instruction forms as the module-array fallback; anything else fails closed.
+ * The run length becomes the count: never below what the metadata needs, but
+ * not an observed typesCount.
  */
 const TYPE_TABLE_CANDIDATES = 64;
+
+/** Il2CppTypeEnum values 0x01 to 0x1e; 0x17 and 0x1a are unassigned. */
+const isDefinedTypeKind = (kind: number) =>
+  kind >= 1 && kind <= IL2CPP_TYPE_KIND_MAX && kind !== 0x17 && kind !== 0x1a;
 
 function* findTypeTableByCode(
   image: NativeImage,
@@ -487,14 +498,27 @@ function* findTypeTableByCode(
   requiredTypes: number,
 ): Generator<void, { readonly count: number; readonly types: bigint } | null> {
   const { bytes, container } = image;
+  // One indexed lookup per word, so many mappings cannot multiply the scan.
+  const lookup = createFileMappingIndex(
+    container.mappings,
+    container.zero_fills,
+  );
+  let low = 2n ** 64n;
+  let high = 0n;
+  for (const mapping of container.mappings) {
+    if (mapping.address < low) low = mapping.address;
+    const end = mapping.address + BigInt(mapping.size);
+    if (end > high) high = end;
+  }
   const recordOffset = (address: bigint) => {
-    for (const mapping of container.mappings)
-      if (
-        address >= mapping.address &&
-        address + 12n <= mapping.address + BigInt(mapping.size)
-      )
-        return mapping.offset + Number(address - mapping.address);
-    return -1;
+    if (address < low || address + 12n > high) return -1;
+    try {
+      return lookup.offset(address, 12);
+    } catch (cause) {
+      // Unmapped, zero-filled or ambiguously mapped records are not types.
+      if (cause instanceof BinaryFormatFailure) return -1;
+      throw cause;
+    }
   };
   const isType = (address: bigint) => {
     // Records hold an 8-byte pointer first; zero and unaligned words are not types.
@@ -502,11 +526,13 @@ function* findTypeTableByCode(
     const offset = recordOffset(address);
     if (offset < 0) return false;
     const kind = il2cppTypeKind(bytes.readUInt32LE(offset + 8));
-    if (kind === 0 || kind > IL2CPP_TYPE_KIND_MAX) return false;
+    if (!isDefinedTypeKind(kind)) return false;
     if (!isDefinitionTypeKind(kind)) return true;
     return bytes.readBigUInt64LE(offset) < BigInt(typeDefinitions);
   };
-  const runs = new Map<bigint, number>();
+  // A run that reaches its mapping end may continue in the next one, so its
+  // length is unknown; it is kept as a candidate but cannot be chosen.
+  const runs = new Map<bigint, number | null>();
   for (const mapping of container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
     let runStart = -1;
@@ -520,7 +546,10 @@ function* findTypeTableByCode(
         continue;
       }
       if (runStart >= 0 && (at - runStart) / 8 >= requiredTypes) {
-        runs.set(mapping.address + BigInt(runStart), (at - runStart) / 8);
+        runs.set(
+          mapping.address + BigInt(runStart),
+          at + 8 > mapping.size ? null : (at - runStart) / 8,
+        );
         if (runs.size > TYPE_TABLE_CANDIDATES)
           throw new Il2cppBinaryFormatFailure(
             "native-index-capacity",
@@ -530,13 +559,16 @@ function* findTypeTableByCode(
       runStart = -1;
     }
   }
-  if (runs.size === 0) return null;
-  const starts = new Set(runs.keys());
+  // Another long-enough run could be the real table while code loads only
+  // this one, so a second candidate fails closed instead of being outvoted.
+  if (runs.size !== 1) return null;
+  const [start, count] = [...runs][0]!;
+  if (count === null) return null;
+  const starts = new Set([start]);
   const referenced =
     container.architecture === "arm64"
       ? yield* arm64PageReferences(image, starts)
       : yield* ripRelativeReferences(image, starts);
-  if (referenced.size !== 1) return null;
-  const types = [...referenced][0]!;
-  return { count: runs.get(types)!, types };
+  if (!referenced.has(start)) return null;
+  return { count, types: start };
 }

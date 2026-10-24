@@ -697,7 +697,12 @@ it("states that an inferred type table's count is a run length", async () => {
   const root = await createTestTempDirectory("rea-il2cpp-inferred-types-");
   const path = join(root, "global-metadata.dat"),
     binary_path = join(root, "GameAssembly.dylib");
-  await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
+  // A field typed as type 3 makes the metadata reference the whole
+  // four-entry table, as real builds reference most of theirs.
+  const fixture = createLinkedIl2cppMetadataFixture();
+  const metadata = Buffer.from(fixture.bytes);
+  metadata.writeUInt8(3, fixture.section("fields").offset + 4);
+  await writeFile(path, metadata);
   await writeFile(
     binary_path,
     createIl2cppBinaryFixture({
@@ -715,7 +720,9 @@ it("states that an inferred type table's count is a run length", async () => {
       code_gen_modules_field: expect.any(String),
     });
     const inferred = result.value.limitations.filter((line) =>
-      line.includes("No static MetadataRegistration matched"),
+      line.includes(
+        "No static MetadataRegistration had the type-definition counts",
+      ),
     );
     expect(inferred).toHaveLength(1);
     expect(inferred[0]).toContain("ADRP+ADD");
