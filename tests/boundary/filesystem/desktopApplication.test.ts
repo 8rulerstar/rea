@@ -427,6 +427,22 @@ it("offers member probes for predefined script assemblies in a macOS bundle's ma
   expect(report.next_probes[0]?.operation).toBe("inspect_managed_members");
 });
 
+it.each(["Game_Data", "Game_Data/Managed"])(
+  "offers no member probe when the root is %s itself",
+  async (rootDirectory) => {
+    const root = await createTestTempDirectory("rea-desktop-mono-data-root-");
+    await put(
+      root,
+      "Game_Data/Managed/Assembly-CSharp.dll",
+      buildManagedPeFixture({ references: ["UnityEngine.CoreModule"] }),
+    );
+    const { report } = await inspect(join(root, rootDirectory));
+    expect(report.next_probes.map((probe) => probe.operation)).not.toContain(
+      "inspect_managed_members",
+    );
+  },
+);
+
 it("offers no member probes when no managed directory has a Unity reference witness", async () => {
   const root = await createTestTempDirectory("rea-desktop-mono-no-witness-");
   const plain = buildManagedPeFixture({ references: ["System.Runtime"] });
