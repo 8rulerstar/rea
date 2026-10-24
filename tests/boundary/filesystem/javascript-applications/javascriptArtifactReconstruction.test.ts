@@ -1,5 +1,5 @@
 import {
-  primitiveCandidateExpansionSource,
+  primitiveCandidateExpansionExpression,
   primitiveByteExpansionSource,
 } from "../../../fixtures/javascriptPrimitiveExpansion.js";
 import { createHash } from "node:crypto";
@@ -8,6 +8,8 @@ import { join } from "node:path";
 
 import { createPackageWithOptions } from "@electron/asar";
 import { expect, it } from "vitest";
+import { AnalysisError } from "../../../../src/domain/analysisErrorBase.js";
+import { projectAnalysisError } from "../../../../src/domain/analysisErrorProjection.js";
 
 import { createTestTempDirectory } from "../../../fixtures/temporaryDirectory.js";
 
@@ -17,7 +19,7 @@ import {
 } from "../../../support/javascriptApplicationScope.js";
 import {
   analyzeJavaScriptArtifactFiles,
-  analyzeAndProjectJavaScriptArtifactFiles,
+  analyzeAndAdoptJavaScriptArtifactFiles,
 } from "../../../../src/application/javascript/JavaScriptArtifactAnalysis.js";
 import { buildJavaScriptArtifactGraph } from "../../../../src/application/javascript/JavaScriptArtifactGraphBuilder.js";
 import {
@@ -38,6 +40,7 @@ import {
 } from "../../../../src/javascript/analysis/JavaScriptAnalysisTransfer.js";
 import { javaScriptWorkerStaticAnalysisSchema } from "../../../../src/javascript/analysis/JavaScriptAnalysisWorkerSchemas.js";
 import { createJavaScriptArtifactReader } from "../../../../src/artifacts/javascript/JavaScriptArtifactReader.js";
+import { createJavaScriptSourceAnalysis } from "../../../../src/artifacts/javascript/JavaScriptSourceAnalysis.js";
 import {
   scanCanonicalArtifactInventory,
   scanArtifactInventory,
@@ -47,8 +50,9 @@ import { javascriptApplicationAnalysisResultSchema } from "../../../../src/domai
 import {
   createJavaScriptSemanticGraph,
   isValidatedImmutableJavaScriptSemanticGraph,
+  javaScriptSemanticGraphSchema,
+  type JavaScriptSemanticGraph,
 } from "../../../../src/domain/javascript/javascriptSemanticGraph.js";
-import { parseJavaScriptSemanticGraph } from "../../../../src/domain/javascript/javascriptSemanticGraphSerialization.js";
 import { writeJavaScriptArtifactFixture } from "../../../fixtures/javascriptArtifactApplication.js";
 import { writeFixtureFiles } from "../../../support/javascriptApplicationFixture.js";
 
@@ -522,25 +526,39 @@ it("keeps excluded non-JavaScript files out of both semantic construction paths"
 it("reports file progress and honors cancellation before the next source", async () => {
   const root = await fixtureDirectory();
   const controller = new AbortController();
+  const reason = { request: "cancel before the next source" };
   const progress: string[] = [];
-  await expect(
-    reconstructJavaScriptArtifact({ input_path: root }, controller.signal, {
+  const failure = await reconstructJavaScriptArtifact(
+    { input_path: root },
+    controller.signal,
+    {
       report: async (event) => {
         if (event.phase === "parse_javascript_source") {
           progress.push(event.message);
-          if (progress.length === 2) controller.abort();
+          if (progress.length === 2) controller.abort(reason);
         }
       },
-    }),
-  ).rejects.toMatchObject({
-    _tag: "AnalysisCancelledError",
-    partialObservation: { operation: "analyze_javascript_application" },
+    },
+  ).then(
+    () => {
+      throw new Error("Expected cancellation before the next source");
+    },
+    (cause: unknown) => cause,
+  );
+  if (!(failure instanceof AnalysisError)) throw failure;
+  expect(failure.cause).toBe(reason);
+  expect(projectAnalysisError(failure)).toMatchObject({
+    code: "cancelled",
+    category: "cancelled",
+    details: {
+      partial_observation: { operation: "analyze_javascript_application" },
+    },
   });
   expect(progress).toHaveLength(2);
   expect(progress[0]).not.toBe(progress[1]);
 });
 
-it("preserves graph commitments and export shapes when consuming file-local IR", async () => {
+it("preserves graph commitments and export shapes through worker adoption", async () => {
   const root = await fixtureDirectory();
   await writeFile(
     join(root, "exports.mjs"),
@@ -558,10 +576,27 @@ it("preserves graph commitments and export shapes when consuming file-local IR",
     const files = await readJavaScriptArtifactFiles(reader, snapshot);
     const full = analyzeJavaScriptArtifactFiles(files);
     const projection = createJavaScriptSemanticGraphProjection();
-    const compact = await analyzeAndProjectJavaScriptArtifactFiles(
-      files,
-      projection.projectFile,
+    const worker = await createJavaScriptSourceAnalysis(
+      { heapMb: 512, timeoutMs: 30_000 },
+      files.files.filter(
+        (file) => file.kind === "javascript" && file.text.included,
+      ).length,
     );
+    let outcome: Awaited<
+      ReturnType<typeof analyzeAndAdoptJavaScriptArtifactFiles>
+    >;
+    try {
+      outcome = await analyzeAndAdoptJavaScriptArtifactFiles(
+        files,
+        worker,
+        projection,
+        async () => {},
+      );
+    } finally {
+      await worker.close();
+    }
+    if (outcome.interruption !== null) throw outcome.interruption;
+    const compact = outcome.analysis;
     const graph = buildJavaScriptArtifactGraph(snapshot, files, full);
     expect(buildJavaScriptArtifactGraph(snapshot, files, compact)).toEqual(
       graph,
@@ -591,7 +626,7 @@ it("preserves graph commitments and export shapes when consuming file-local IR",
         .find(({ file }) => file.path === "exports.mjs")
         ?.semantic?.ir.callables.map(({ name }) => name),
     ).toContain("unexported");
-    expect(parseJavaScriptSemanticGraph(semantic)).toEqual(semantic);
+    expect(javaScriptSemanticGraphSchema.parse(semantic)).toEqual(semantic);
     const transferred = createJavaScriptSemanticGraphProjection();
     const wireRoot = await createTestTempDirectory("rea-javascript-transfer-");
     const decodedModules = new Map<string, JavaScriptModuleSemanticIr>();
@@ -709,7 +744,10 @@ const rejectInvalidTransfer = async (
 
 it("reports semantic value resource limits in application graph coverage", async () => {
   const root = await createTestTempDirectory("rea-javascript-semantic-limit-");
-  await writeFile(join(root, "app.js"), primitiveCandidateExpansionSource());
+  await writeFile(
+    join(root, "app.js"),
+    `const answer = { nested: ${primitiveCandidateExpansionExpression()} };`,
+  );
   await writeFile(join(root, "growth.js"), primitiveByteExpansionSource());
   const snapshot = await scanCanonicalArtifactInventory(root, {});
   const reader = createJavaScriptArtifactReader(root, "directory");
@@ -773,7 +811,9 @@ it("reconstructs package, Electron roles, Webpack/Rspack modules, and cross-laye
     input_path: root,
   });
   const graph = parseJavaScriptApplicationGraph(result.graph);
-  const semanticGraph = parseJavaScriptSemanticGraph(result.semantic_graph);
+  const semanticGraph = javaScriptSemanticGraphSchema.parse(
+    result.semantic_graph,
+  );
 
   expect(Reflect.get(globalThis, "__rea_bundle_executed")).toBeUndefined();
   expect(result.input_path).toBe(root);
@@ -1082,7 +1122,7 @@ it("recurses into filesystem-backed ASAR containers without losing container-rel
 const assertSemanticLinks = (
   result: Awaited<ReturnType<typeof reconstructJavaScriptArtifact>>,
   graph: ReturnType<typeof parseJavaScriptApplicationGraph>,
-  semanticGraph: ReturnType<typeof parseJavaScriptSemanticGraph>,
+  semanticGraph: JavaScriptSemanticGraph,
 ) => {
   expect(semanticGraph.application_graph_id).toBe(graph.graph_id);
   const { graph_id: _semanticGraphId, ...semanticGraphInput } = semanticGraph;

@@ -1,11 +1,6 @@
 import type { Il2cppMethodAddress } from "../domain/il2cpp/il2cppMetadata.js";
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
-import {
-  openImageSteps,
-  readPointer,
-  readSlot,
-  isExecutable,
-} from "./Il2cppBinaryImage.js";
+import { openImageSteps, readSlot, isExecutable } from "./Il2cppBinaryImage.js";
 import {
   findModules,
   findCodeRegistration,
@@ -90,6 +85,25 @@ export function* linkIl2cppBinarySteps(
         methodImage[type.method_start + method] = index;
       }
     }
+  const methodByImageAndRow = metadata.images.map(
+    () => new Map<number, number>(),
+  );
+  for (let index = 0; index < methodImage.length; index++) {
+    if (index % LINK_BATCH === 0) yield;
+    const owner = methodImage[index]!;
+    if (owner === -1) continue;
+    const token = facts.methodTokens[index]!;
+    const row = token & 0xffffff;
+    if (token >>> 24 !== 0x06 || row === 0) continue;
+    const methodsByRow = methodByImageAndRow[owner]!;
+    const earlier = methodsByRow.get(row);
+    if (earlier !== undefined)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-method-token",
+        `methods ${earlier} and ${index} in image ${metadata.images[owner]!.name} share MethodDef token 0x${token.toString(16)}`,
+      );
+    methodsByRow.set(row, index);
+  }
   yield;
   const methodAddress = (index: number): Il2cppMethodCode => {
     const owner = methodImage[index]!;
@@ -161,8 +175,13 @@ export function* linkIl2cppBinarySteps(
       );
     // 27.0/27.1 and 27.2 share header version 27 but place byref differently.
     if (version === 27) return { type, name: null };
-    const address =
-      readPointer(image, registration.types + BigInt(type * 8)) ?? 0n;
+    const address = readSlot(image, registration.types + BigInt(type * 8));
+    if (address === "unknown") return { type, name: null };
+    if (address === null)
+      throw new Il2cppBinaryFormatFailure(
+        "invalid-type",
+        `type ${type} has no mapped type-table slot`,
+      );
     if (address === 0n)
       throw new Il2cppBinaryFormatFailure(
         "invalid-type",

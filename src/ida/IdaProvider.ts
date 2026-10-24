@@ -7,6 +7,7 @@ import {
 } from "../domain/binaryTargetTypes.js";
 import { err, ok } from "../domain/result.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import type {
   AnalysisClient,
   AnalysisProviderBoundClientFactory,
@@ -20,10 +21,9 @@ import type {
 } from "../application/AnalysisProvider.js";
 import type { AppConfig } from "../config/types.js";
 import type { ConfigurationError } from "../domain/configurationErrors.js";
-import { createHash } from "node:crypto";
+import { idaRegistrationDigest } from "./IdaRegistrationIdentity.js";
 import { isDeepStrictEqual } from "node:util";
 import { analysisProfilesEqual } from "../domain/analysisProfile.js";
-import canonicalize from "canonicalize";
 import type { Result } from "../domain/result.js";
 import {
   readIdaConfiguration,
@@ -171,7 +171,31 @@ export class IdaProvider implements AnalysisProviderCandidate {
           config.value.protocol === "native",
         )
       : this.capabilities();
-    if (config.ok && config.value.mode === "headless") {
+    const registrationDiagnostics = {
+      configured: this.config.idaMcpConfigPath !== undefined,
+      registration_path: this.config.idaMcpConfigPath ?? null,
+      live_connection_probed: false,
+    };
+    if (!config.ok) {
+      const failure = projectAnalysisError(config.error);
+      return {
+        availability: {
+          status: "unavailable",
+          code:
+            this.config.idaMcpConfigPath === undefined
+              ? "not_configured"
+              : "open_options_invalid",
+          reason: failure.message,
+          diagnostics: {
+            ...registrationDiagnostics,
+            configuration_details: failure.details ?? null,
+            configuration_remediation: failure.remediation.action,
+          },
+        },
+        capabilities,
+      };
+    }
+    if (config.value.mode === "headless") {
       const privacy = privateRuntimeRootCapability();
       if (!privacy.available)
         return {
@@ -180,9 +204,8 @@ export class IdaProvider implements AnalysisProviderCandidate {
             code: privacy.code,
             reason: privacy.reason,
             diagnostics: {
-              configured: true,
+              ...registrationDiagnostics,
               mode: "headless",
-              live_connection_probed: false,
               private_workspace_available: false,
               windows_native_failure: {
                 stage: privacy.failureStage,
@@ -193,28 +216,19 @@ export class IdaProvider implements AnalysisProviderCandidate {
           capabilities,
         };
     }
-    const availability: ProviderAvailability = config.ok
-      ? {
-          status: "available" as const,
-          code: null,
-          reason: null,
-          diagnostics: {
-            configured: true,
-            mode: config.value.mode,
-            transport: "command" in config.value ? "stdio" : "http",
-            live_connection_probed: false,
-          },
-        }
-      : {
-          status: "unavailable" as const,
-          code:
-            this.config.idaMcpConfigPath === undefined
-              ? "not_configured"
-              : "open_options_invalid",
-          reason: config.error.message,
-          diagnostics: { configured: false, live_connection_probed: false },
-        };
-    return { availability, capabilities };
+    return {
+      availability: {
+        status: "available" as const,
+        code: null,
+        reason: null,
+        diagnostics: {
+          ...registrationDiagnostics,
+          mode: config.value.mode,
+          transport: "command" in config.value ? "stdio" : "http",
+        },
+      },
+      capabilities,
+    };
   }
   inspectTargetSupport(target: BinaryTarget): ProviderTargetSupport {
     const diagnostics = {
@@ -238,6 +252,13 @@ export class IdaProvider implements AnalysisProviderCandidate {
                 ? "PowerPC"
                 : "Hexagon"
         } lane. Select a supported Ghidra profile instead.`,
+        diagnostics,
+      };
+    if (target.kind === "executable" && target.architecture === "arm64_32")
+      return {
+        status: "unsupported",
+        code: "architecture_unsupported",
+        reason: "REA's IDA adapter has no verified arm64_32 lane.",
         diagnostics,
       };
     if (target.kind !== "executable")
@@ -323,9 +344,7 @@ export class IdaProvider implements AnalysisProviderCandidate {
             : "database-supervisor",
       database_revision: null,
       cache_policy: "live",
-      registration_digest: createHash("sha256")
-        .update(canonicalize(config.value) ?? "")
-        .digest("hex"),
+      registration_digest: idaRegistrationDigest(config.value),
     });
     if (options?.scope !== undefined)
       this.#registrationByScope.delete(options.scope);

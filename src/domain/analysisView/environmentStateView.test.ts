@@ -3,6 +3,8 @@ import {
   analysisViewCaptureEvidence,
   environmentManifestCaptureFixture,
   environmentStateCaptureFixture,
+  timedCaptureEvidence,
+  type TimedCaptureRow,
 } from "../../../tests/fixtures/analysisView.js";
 import {
   SCENARIO_EXCHANGES,
@@ -11,12 +13,21 @@ import {
 } from "../../../tests/fixtures/browserScenarioCapture.js";
 import type { Evidence } from "../evidence.js";
 import type { JsonValue } from "../jsonValue.js";
+import { webNetworkCaptureSchema } from "../webNetworkCapture.js";
 import {
   projectAnalysisView,
   type AnalysisViewParent,
   type AnalysisViewResult,
 } from "./analysisView.js";
 import { EnvironmentStateAccumulator } from "./EnvironmentStateAccumulator.js";
+import {
+  at,
+  identityCandidates,
+  replaceAt,
+  renderStateList,
+  type JsonObject,
+} from "./environmentStateRules.js";
+import { environmentStateFields } from "./environmentStateView.js";
 
 type State = Extract<AnalysisViewResult, { kind: "environment-state" }>;
 const ALL_RULES = [
@@ -48,35 +59,8 @@ const stateOf = (parent: AnalysisViewParent = parentOf()): State => {
   return result.value;
 };
 
-type Row = readonly [
-  method: string,
-  path: string,
-  body?: JsonValue,
-  status?: number,
-];
-
-/** HAR entries one second apart on one origin; a string body is recorded as written. */
-const captureOf = (rows: readonly Row[]): AnalysisViewParent =>
-  parentOf(
-    analysisViewCaptureEvidence(
-      environmentManifestCaptureFixture(
-        rows.map(([method, path, body = null, status = 200], index) => ({
-          startedDateTime: new Date(
-            Date.parse("2026-10-17T18:00:00.000Z") + index * 1000,
-          ).toISOString(),
-          time: 5,
-          request: { method, url: `http://app.example${path}` },
-          response: {
-            status,
-            content: {
-              mimeType: "application/json",
-              text: typeof body === "string" ? body : JSON.stringify(body),
-            },
-          },
-        })),
-      ),
-    ),
-  );
+const captureOf = (rows: readonly TimedCaptureRow[]): AnalysisViewParent =>
+  parentOf(timedCaptureEvidence(rows));
 
 const viewOf = (state: State, tool: string) =>
   state.views.find((view) => view.tool === tool);
@@ -137,7 +121,23 @@ it("extracts the state the Grafana-shaped capture's reads observed", () => {
     shape: "recorded",
     reason: "no-init-recording",
   });
-  expect(state.documents).toEqual([]);
+  // The one team member listed proves no suffix-named identity, so the list is a document of its path.
+  expect(
+    state.documents.map((document) => [document.tool, document.path]),
+  ).toEqual([
+    [
+      "get_datasources_health_by_uid",
+      "/api/datasources/uid/dg1jo96tern5sb/health",
+    ],
+    ["get_org", "/api/org"],
+    ["get_teams_members_by_id", "/api/teams/1/members"],
+    ["get_user", "/api/user"],
+  ]);
+  expect(viewOf(state, "get_plugins_settings_by_plugin_id")).toEqual({
+    tool: "get_plugins_settings_by_plugin_id",
+    shape: "recorded",
+    reason: "path-varies",
+  });
   expect(state.unknowns.map((unknown) => unknown.kind)).toEqual([
     "authorization-model",
     "response-semantics",
@@ -148,6 +148,18 @@ it("extracts the state the Grafana-shaped capture's reads observed", () => {
       limitation.startsWith("Body shapes"),
     ),
   ).toEqual([]);
+});
+
+it("keeps collections with repeated path separators distinct", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/books", [{ id: 1, title: "Single separator" }]],
+      ["GET", "/api//books", [{ id: 2, title: "Repeated separator" }]],
+    ]),
+  );
+  expect(state.types.map((type) => type.collection_template)).toEqual(
+    expect.arrayContaining(["/api/books", "/api//books"]),
+  );
 });
 
 it("ends a type's state at the first write under its root, not at unrelated writes", () => {
@@ -278,7 +290,7 @@ it("does not list the whole collection when a counter exceeds the number listed"
 });
 
 it("lists the whole collection with its counter only when every recording did", () => {
-  const rows: Row[] = [
+  const rows: TimedCaptureRow[] = [
     [
       "GET",
       "/api/items",
@@ -322,6 +334,25 @@ it("lists the whole collection with its counter only when every recording did", 
   );
 });
 
+it.each([1, "1", "001"])(
+  "retains item count representation %j in extracted list plans",
+  (total) => {
+    const body = { total, items: [{ id: 1, title: "One" }] };
+    const state = stateOf(captureOf([["GET", "/api/items", body]]));
+    const view = state.views.find((candidate) => candidate.shape === "list");
+    if (view?.shape !== "list") throw new Error("Expected an item list view");
+    expect(view.counters).toEqual(["total"]);
+    expect(renderStateList(view, body, body.items)).toEqual(body);
+    const added = renderStateList(view, body, [
+      ...body.items,
+      { id: 2, title: "Two" },
+    ]);
+    expect(added).toMatchObject({
+      total: typeof total === "string" ? "2".padStart(total.length, "0") : 2,
+    });
+  },
+);
+
 it("leaves recorded the views it cannot reproduce, with the reason", () => {
   const state = stateOf(
     captureOf([
@@ -352,6 +383,23 @@ it("leaves recorded the views it cannot reproduce, with the reason", () => {
   expect(state.entities).toEqual([]);
 });
 
+it("leaves a body too deep for the state's own nesting recorded instead of failing to seal", () => {
+  let deep: JsonValue = { theme: "dark" };
+  for (let level = 0; level < 995; level += 1) deep = { nested: deep };
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/settings", deep],
+      ["PUT", "/api/settings", { theme: "light" }],
+    ]),
+  );
+  expect(state.documents).toEqual([]);
+  expect(viewOf(state, "get_settings")).toEqual({
+    tool: "get_settings",
+    shape: "recorded",
+    reason: "body-unusable",
+  });
+});
+
 it("holds a written path's non-entity read as a document", () => {
   const state = stateOf(
     captureOf([
@@ -375,22 +423,317 @@ it("holds a written path's non-entity read as a document", () => {
   });
 });
 
-it.each([
-  ["/api/files/123", "PUT", "get_files_by_id"],
-  ["/api/settings", "DELETE", "get_settings"],
-] as const)(
-  "leaves a deferred document path recorded (%s, %s)",
-  (path, method, tool) => {
-    const state = stateOf(
-      captureOf([
-        ["GET", path, { text: "initial document" }],
-        [method, path, null],
-      ]),
-    );
-    expect(state.documents).toEqual([]);
-    expect(viewOf(state, tool)).toMatchObject({ shape: "recorded" });
-  },
-);
+it("holds a read-only non-entity read as a document unless it varies by request line", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/config", { theme: "dark", locale: "en-GB" }],
+      [
+        "GET",
+        "/api/rates",
+        [
+          { currency: "EUR", rate: 1.1 },
+          { currency: "EUR", rate: 1.2 },
+        ],
+      ],
+      ["GET", "/api/stats?range=day", { visits: 3 }],
+      ["GET", "/api/stats?range=week", { visits: 9 }],
+    ]),
+  );
+  expect(state.documents).toEqual([
+    {
+      tool: "get_config",
+      path: "/api/config",
+      value: { theme: "dark", locale: "en-GB" },
+      record_ordinal: 0,
+    },
+    {
+      tool: "get_rates",
+      path: "/api/rates",
+      value: [
+        { currency: "EUR", rate: 1.1 },
+        { currency: "EUR", rate: 1.2 },
+      ],
+      record_ordinal: 1,
+    },
+  ]);
+  expect(viewOf(state, "get_stats")).toEqual({
+    tool: "get_stats",
+    shape: "recorded",
+    reason: "query-varies",
+  });
+  expect(state.types).toEqual([]);
+});
+
+it("leaves a document recorded when rendering it exceeds the body limit", () => {
+  const small = stateOf(
+    captureOf([["GET", "/api/config", '{"values":[1e3]}']]),
+  );
+  expect(viewOf(small, "get_config")).toMatchObject({ shape: "document" });
+  expect(small.documents[0]?.value).toEqual({ values: [1000] });
+  // 60,000 `1e3` tokens are 240,012 recorded bytes and 300,012 once rendered as `1000`.
+  const values = Array.from({ length: 60_000 }, () => "1e3").join(",");
+  const body = `{"values":[${values}]}`;
+  expect(Buffer.byteLength(body, "utf8")).toBe(240_012);
+  const state = stateOf(captureOf([["GET", "/api/config", body]]));
+  expect(state.documents).toEqual([]);
+  expect(viewOf(state, "get_config")).toEqual({
+    tool: "get_config",
+    shape: "recorded",
+    reason: "rendered-oversize",
+  });
+});
+
+it("infers a suffix-named identity only when no identity name identifies the listed items", () => {
+  const state = stateOf(
+    captureOf([
+      [
+        "GET",
+        "/api/memberships",
+        [
+          { orgId: 7, userId: 1, role: "Admin" },
+          { orgId: 8, userId: 1, role: "Viewer" },
+        ],
+      ],
+      [
+        "GET",
+        "/api/seats",
+        {
+          total: 2,
+          seats: [
+            { parentId: 1, seat_id: "s-1" },
+            { parentId: 1, seat_id: "s-2" },
+          ],
+        },
+      ],
+      [
+        "GET",
+        "/api/projects",
+        [
+          { projectId: "a", id: 2 },
+          { projectId: "b", id: 3 },
+        ],
+      ],
+      [
+        "GET",
+        "/api/grants",
+        [
+          { userId: 1, orgId: 7 },
+          { userId: 2, orgId: 8 },
+        ],
+      ],
+      ["GET", "/api/members", []],
+      ["GET", "/api/members", [{ memberId: "m-1" }, { memberId: "m-2" }]],
+      ["GET", "/api/comments", [{ postId: 9, authorId: 3, text: "hi" }]],
+    ]),
+  );
+  expect(
+    state.types.map(({ collection_template, id_field, id_basis }) => [
+      collection_template,
+      id_field,
+      id_basis,
+    ]),
+  ).toEqual([
+    // Both identify the grants; the earlier key in item order wins.
+    ["/api/grants", "userId", "field-name"],
+    // The empty first recording constrains no field.
+    ["/api/members", "memberId", "field-name"],
+    ["/api/memberships", "orgId", "field-name"],
+    ["/api/projects", "id", "field-name"],
+    ["/api/seats", "seat_id", "field-name"],
+  ]);
+  expect(viewOf(state, "get_seats")).toMatchObject({
+    shape: "list",
+    pointer: "/seats",
+    membership: "all",
+    counters: ["total"],
+  });
+  expect(viewOf(state, "get_members")).toMatchObject({ shape: "list" });
+  expect(
+    state.entities
+      .filter((entity) => entity.type === "/api/memberships")
+      .map((entity) => entity.id),
+  ).toEqual(["7", "8"]);
+  // One listed item shows no field distinct, so its foreign keys identify nothing.
+  expect(viewOf(state, "get_comments")).toMatchObject({ shape: "document" });
+});
+
+it("chooses an envelope's array by identity name, then by a suffix-named field", () => {
+  const state = stateOf(
+    captureOf([
+      [
+        "GET",
+        "/api/board",
+        {
+          labels: [{ text: "urgent" }, { text: "later" }],
+          cards: [
+            { cardId: 1, text: "Granite Ledger" },
+            { cardId: 2, text: "Blue Heron" },
+          ],
+        },
+      ],
+      [
+        "GET",
+        "/api/directory",
+        {
+          owners: [{ orgId: 1 }, { orgId: 2 }],
+          teams: [
+            { id: 1, orgId: 1 },
+            { id: 2, orgId: 1 },
+          ],
+        },
+      ],
+    ]),
+  );
+  expect(
+    state.types.map(({ collection_template, id_field }) => [
+      collection_template,
+      id_field,
+    ]),
+  ).toEqual([
+    ["/api/board", "cardId"],
+    ["/api/directory", "id"],
+  ]);
+  expect(viewOf(state, "get_board")).toMatchObject({
+    shape: "list",
+    pointer: "/cards",
+  });
+  expect(viewOf(state, "get_directory")).toMatchObject({
+    shape: "list",
+    pointer: "/teams",
+  });
+});
+
+it("locates an item entity wrapped in a one-element array and merges it with the list view", () => {
+  const first = "6ad47b5c1023b500010873e3";
+  const second = "6ad47b5c1023b500010873e4";
+  const state = stateOf(
+    captureOf([
+      [
+        "GET",
+        "/ghost/api/admin/posts/",
+        {
+          posts: [
+            { id: first, title: "Granite Ledger", status: "draft" },
+            { id: second, title: "Blue Heron", status: "published" },
+          ],
+          meta: { pagination: { page: 1, pages: 1 } },
+        },
+      ],
+      [
+        "GET",
+        `/ghost/api/admin/posts/${first}/`,
+        {
+          posts: [
+            {
+              id: first,
+              title: "Granite Ledger",
+              status: "draft",
+              html: "<p>Quarry count</p>",
+            },
+          ],
+        },
+      ],
+      ["GET", "/api/depots/5", [{ id: 5, name: "Saltmarsh Depot" }]],
+      ["GET", "/api/rosters/9", [{ id: 31, roster: 9, name: "Ada Finch" }]],
+    ]),
+  );
+  expect(viewOf(state, "get_rosters_by_id")).toEqual({
+    tool: "get_rosters_by_id",
+    shape: "recorded",
+    reason: "no-identity",
+  });
+  const posts = "/ghost/api/admin/posts";
+  expect(state.types).toContainEqual({
+    collection_template: posts,
+    id_field: "id",
+    id_basis: "path-parameter",
+    init_before_ordinal: null,
+    volatile_fields: [],
+  });
+  expect(state.views).toContainEqual(
+    expect.objectContaining({
+      shape: "item",
+      type: posts,
+      pointer: "/posts/0",
+      fields: ["id", "title", "status", "html"],
+      checked_record_ordinals: [1],
+    }),
+  );
+  expect(state.views).toContainEqual(
+    expect.objectContaining({
+      shape: "list",
+      type: posts,
+      pointer: "/posts",
+      membership: "all",
+    }),
+  );
+  expect(state.views).toContainEqual(
+    expect.objectContaining({
+      shape: "item",
+      type: "/api/depots",
+      pointer: "/0",
+    }),
+  );
+  expect(state.entities.filter((entity) => entity.type === posts)).toEqual([
+    {
+      type: posts,
+      collection: posts,
+      id: first,
+      fields: {
+        id: first,
+        title: "Granite Ledger",
+        status: "draft",
+        html: "<p>Quarry count</p>",
+      },
+      view_fields: [],
+      record_ordinals: [0, 1],
+    },
+    expect.objectContaining({ id: second, record_ordinals: [0] }),
+  ]);
+});
+
+it("reads and replaces only the root, one member or the element of a one-element array", () => {
+  const body = { posts: [{ id: 1 }], meta: { posts: 1 } };
+  expect(at(body, "/posts/0")).toEqual({ id: 1 });
+  expect(replaceAt(body, "/posts/0", null)).toEqual({
+    posts: [null],
+    meta: { posts: 1 },
+  });
+  expect(at([{ id: 1 }], "/0")).toEqual({ id: 1 });
+  expect(replaceAt([{ id: 1 }], "/0", { id: 2 })).toEqual([{ id: 2 }]);
+  for (const pointer of ["/posts/1", "/meta/posts", "/posts/0/id"])
+    expect(at(body, pointer)).toBeUndefined();
+  expect(at({ posts: [{ id: 1 }, { id: 2 }] }, "/posts/0")).toBeUndefined();
+  expect(replaceAt(body, "/meta/posts", null)).toBe(body);
+});
+
+it("leaves an item path's non-entity read recorded", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/files/123", { text: "initial document" }],
+      ["PUT", "/api/files/123", null],
+    ]),
+  );
+  expect(state.documents).toEqual([]);
+  expect(viewOf(state, "get_files_by_id")).toMatchObject({ shape: "recorded" });
+});
+
+it("holds a deleted path's initial non-entity read as a document", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/settings", { text: "initial document" }],
+      ["DELETE", "/api/settings", null],
+    ]),
+  );
+  expect(state.documents).toEqual([
+    {
+      tool: "get_settings",
+      path: "/api/settings",
+      value: { text: "initial document" },
+      record_ordinal: 0,
+    },
+  ]);
+});
 
 it("orders a scenario capture by request order and needs its response bodies", () => {
   const state = stateOf(parentOf(scenarioCaptureEvidence()));
@@ -467,11 +810,11 @@ it("ends every type's state at a write whose URL was redacted, and says so", () 
   );
 });
 
-it("infers no identity for a list whose recordings held no items", () => {
+it("infers no identity for a list whose recordings held no items and holds it as a document", () => {
   const state = stateOf(captureOf([["GET", "/api/widgets", []]]));
   expect(state.types).toEqual([]);
   expect(state.views).toEqual([
-    { tool: "get_widgets", shape: "recorded", reason: "no-identity" },
+    { tool: "get_widgets", shape: "document", checked_record_ordinals: [0] },
   ]);
 });
 
@@ -522,8 +865,9 @@ it("does not take a later recording that is itself an entity as the list", () =>
       ],
     ]),
   );
+  // Without one list across its recordings, the read is held as a document, not entities.
   expect(state.views).toContainEqual(
-    expect.objectContaining({ tool: "get_items", shape: "recorded" }),
+    expect.objectContaining({ tool: "get_items", shape: "document" }),
   );
   expect(state.entities).toEqual([]);
 });
@@ -624,6 +968,66 @@ it("chooses the earliest related write in timeline order, across ancestor and de
   expect(state.entities).toMatchObject([{ fields: { title: "initial" } }]);
 });
 
+it.each<{
+  spelling: string;
+  starts: readonly [string, string, string];
+}>([
+  {
+    spelling: "minute-only offset timestamps",
+    starts: ["2026-10-20T09:00Z", "2026-10-20T09:02Z", "2026-10-20T09:01Z"],
+  },
+  {
+    spelling: "ten-digit fractional timestamps",
+    starts: [
+      "2026-10-20T09:00:00.0000000001Z",
+      "2026-10-20T09:00:00.0000000003Z",
+      "2026-10-20T09:00:00.0000000002Z",
+    ],
+  },
+])(
+  "keeps the pre-write document when $spelling put the write before an earlier ordinal",
+  ({ starts }) => {
+    const entries = starts.map((startedDateTime, ordinal) => ({
+      startedDateTime,
+      // Zero-duration requests isolate start ordering from interval precision.
+      time: 0,
+      request: {
+        method: ordinal === 2 ? "PATCH" : "GET",
+        url: "http://app.example/api/settings",
+        ...(ordinal === 2
+          ? {
+              postData: {
+                mimeType: "application/json",
+                text: '{"theme":"dark"}',
+              },
+            }
+          : {}),
+      },
+      response: {
+        status: 200,
+        content: {
+          mimeType: "application/json",
+          text: ordinal === 0 ? '{"theme":"light"}' : '{"theme":"dark"}',
+        },
+      },
+    }));
+    const capture = webNetworkCaptureSchema.parse(
+      environmentManifestCaptureFixture(entries),
+    );
+    expect(capture.records.map((record) => record.reported)).toEqual(entries);
+    const state = stateOf(parentOf(analysisViewCaptureEvidence(capture)));
+    expect(state.documents).toEqual([
+      {
+        tool: "get_settings",
+        path: "/api/settings",
+        value: { theme: "light" },
+        record_ordinal: 0,
+      },
+    ]);
+    expect(state.timeline).toBe("recorded-start-time");
+  },
+);
+
 it("bounds a parameterized namespace by concrete writes before publishing new items", () => {
   const result = projectAnalysisView(
     captureOf([
@@ -699,6 +1103,78 @@ it("accepts stable membership across another root's write and changes confined b
   expect(state.entities.map((entity) => entity.id)).toEqual(["1"]);
 });
 
+it.each(["offset", "start", "_start"])(
+  "does not let an empty ?%s=1 page prove membership all",
+  (name) => {
+    const state = stateOf(
+      captureOf([
+        ["GET", "/api/orgs/1/books/1", { id: 1, name: "Alpha" }],
+        ["GET", `/api/orgs/2/books?${name}=1`, []],
+      ]),
+    );
+    expect(viewOf(state, "get_orgs_books_by_id")).toMatchObject({
+      shape: "list",
+      membership: "recorded",
+    });
+  },
+);
+
+it("does not let an empty ?page=2 page prove membership all", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/orgs/1/books/1", { id: 1, name: "Alpha" }],
+      ["GET", "/api/orgs/2/books?page=2", []],
+    ]),
+  );
+  expect(viewOf(state, "get_orgs_books_by_id")).toMatchObject({
+    shape: "list",
+    membership: "recorded",
+  });
+});
+
+it("does not let ?page=2&per_page=1 prove membership all when it lists the collection", () => {
+  const state = stateOf(
+    captureOf([
+      [
+        "GET",
+        "/api/orgs/1/books?page=2&per_page=1",
+        [{ id: 1, name: "Alpha" }],
+      ],
+      ["GET", "/api/orgs/1/books/1", { id: 1, name: "Alpha" }],
+    ]),
+  );
+  expect(viewOf(state, "get_orgs_books_by_id")).toMatchObject({
+    shape: "list",
+    membership: "recorded",
+  });
+});
+
+it("keeps page 1 membership recorded because the page base is unproven", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/orgs/1/books?page=1", [{ id: 1, name: "Alpha" }]],
+      ["GET", "/api/orgs/1/books/1", { id: 1, name: "Alpha" }],
+    ]),
+  );
+  expect(viewOf(state, "get_orgs_books_by_id")).toMatchObject({
+    shape: "list",
+    membership: "recorded",
+  });
+});
+
+it("keeps membership all when a zero offset lists the collection", () => {
+  const state = stateOf(
+    captureOf([
+      ["GET", "/api/orgs/1/books?offset=0", [{ id: 1, name: "Alpha" }]],
+      ["GET", "/api/orgs/1/books/1", { id: 1, name: "Alpha" }],
+    ]),
+  );
+  expect(viewOf(state, "get_orgs_books_by_id")).toMatchObject({
+    shape: "list",
+    membership: "all",
+  });
+});
+
 it("keeps membership checks specific to the full request line", () => {
   const state = stateOf(
     captureOf([
@@ -771,3 +1247,87 @@ it("reads only item totals and next-page markers as signs of a partial list", ()
     ["recorded", []],
   ]);
 });
+
+it("reads a sparse list once per candidate field when inferring identity", () => {
+  const fields = 2_000;
+  const wide: JsonObject = Object.fromEntries(
+    Array.from({ length: fields }, (_, index) => [
+      `f${String(index)}Id`,
+      index,
+    ]),
+  );
+  let reads = 0;
+  const sparse = Array.from(
+    { length: 5_000 },
+    () =>
+      new Proxy<JsonObject>(
+        {},
+        {
+          get: (target, key, receiver) => {
+            reads += 1;
+            return Reflect.get(target, key, receiver) as unknown;
+          },
+        },
+      ),
+  );
+  expect(identityCandidates([wide, ...sparse])).toEqual([]);
+  // Each identity name and suffix field stops at the first sparse item.
+  expect(reads).toBeLessThanOrEqual(fields + 20);
+});
+
+it("keeps a document out of the state when its value changed across a write under another root", () => {
+  const changed = stateOf(
+    captureOf([
+      ["GET", "/api/me", { credits: 10, plan: "free" }],
+      ["POST", "/api/orders", { id: "o1" }],
+      ["GET", "/api/me", { credits: 9, plan: "free" }],
+    ]),
+  );
+  expect(changed.documents).toEqual([]);
+  expect(changed.views).toContainEqual({
+    tool: "get_me",
+    shape: "recorded",
+    reason: "fields-differ",
+  });
+  // A value the write left unchanged is still one initial state.
+  const unchanged = stateOf(
+    captureOf([
+      ["GET", "/api/me", { credits: 10, plan: "free" }],
+      ["POST", "/api/orders", { id: "o1" }],
+      ["GET", "/api/me", { credits: 10, plan: "free" }],
+    ]),
+  );
+  expect(unchanged.documents).toMatchObject([
+    { tool: "get_me", value: { credits: 10, plan: "free" }, record_ordinal: 2 },
+  ]);
+});
+
+it("refuses a view clock spelling wider than nine fraction digits", () => {
+  const item = stateOf().views.find((view) => view.shape === "item")!;
+  const spelled = (fraction: number) => [
+    {
+      ...item,
+      clock_formats: {
+        created: { kind: "iso", separator: "T", fraction, zone: "Z" },
+      },
+    },
+  ];
+  expect(environmentStateFields.views.safeParse(spelled(9)).success).toBe(true);
+  expect(environmentStateFields.views.safeParse(spelled(10)).success).toBe(
+    false,
+  );
+});
+
+it.each(["+00:60", "+24:00", "+99:99"])(
+  "refuses a view clock spelling with invalid zone %s",
+  (zone) => {
+    const item = stateOf().views.find((view) => view.shape === "item")!;
+    const view = {
+      ...item,
+      clock_formats: {
+        created: { kind: "iso", separator: "T", fraction: 0, zone },
+      },
+    };
+    expect(environmentStateFields.views.safeParse([view]).success).toBe(false);
+  },
+);

@@ -1,8 +1,9 @@
+import { err, ok, type Result } from "../domain/result.js";
 import {
+  admitRecords,
   isHttpUrl,
   numberValue,
   recordValue,
-  recordsValue,
   cdpStringValue,
   type UnknownRecord,
 } from "./CdpCaptureValues.js";
@@ -75,6 +76,18 @@ const parentFacts = (
     : { parentRelation: "child", parentId, parentIssue: null };
 };
 
+/** Parse a frame record's identity without inferring its selected-target role. */
+export const cdpFrameRecordIdentity = (
+  frame: UnknownRecord | undefined,
+): Pick<
+  CdpFrameIdentity,
+  "frameId" | "identityIssue" | "parentRelation" | "parentId" | "parentIssue"
+> => ({
+  frameId: nonEmptyString(frame?.id) ?? null,
+  identityIssue: identityIssueFor(true, frame, frame?.id),
+  ...parentFacts(true, frame),
+});
+
 /** Parse required frame identity separately from the optional parent fact. */
 export const cdpFrameIdentity = (
   event: CdpEvent,
@@ -107,49 +120,72 @@ export const cdpFrameIdentity = (
       parentId: null,
       parentIssue: null,
     };
-  const frame = navigated ? recordValue(params.frame) : undefined;
-  const rawId = navigated ? frame?.id : params.frameId;
-  const frameId = nonEmptyString(rawId);
+  const identity = navigated
+    ? cdpFrameRecordIdentity(recordValue(params.frame))
+    : {
+        frameId: nonEmptyString(params.frameId) ?? null,
+        identityIssue: identityIssueFor(false, undefined, params.frameId),
+        ...parentFacts(false, undefined),
+      };
   const selection =
-    frameId === undefined
+    identity.frameId === null
       ? "unknown"
-      : frameId === mainFrameId
+      : identity.frameId === mainFrameId
         ? "main"
         : "other";
-  const identityIssue = identityIssueFor(navigated, frame, rawId);
-  const parent = parentFacts(navigated, frame);
   return {
     applicability: "applicable",
     selection,
     isRootReplacement:
-      selection === "other" && parent.parentRelation === "root",
-    frameId: frameId ?? null,
-    identityIssue,
-    parentRelation: parent.parentRelation,
-    parentId: parent.parentId,
+      selection === "other" && identity.parentRelation === "root",
+    ...identity,
     parentIssue:
       selection === "main" &&
-      (parent.parentRelation === "child" ||
-        parent.parentIssue === "self_parent")
+      (identity.parentRelation === "child" ||
+        identity.parentIssue === "self_parent")
         ? "main_frame_has_parent"
-        : parent.parentIssue,
+        : identity.parentIssue,
   };
 };
 
-export const firstCallFrame = (
-  value: UnknownRecord | undefined,
-): UnknownRecord | undefined => recordsValue(value?.callFrames)[0];
+export interface MalformedCdpCallFrame {
+  readonly _tag: "MalformedCdpCallFrame";
+}
+
+const malformedCallFrame: MalformedCdpCallFrame = {
+  _tag: "MalformedCdpCallFrame",
+};
+
+/**
+ * The call site is the frame at position zero. An omitted stack has no call
+ * site; a malformed stack or top frame stays unknown rather than promoting a
+ * caller to the call site.
+ */
+export const topCallFrame = (
+  value: unknown,
+): Result<UnknownRecord | undefined, MalformedCdpCallFrame> => {
+  if (value === undefined) return ok(undefined);
+  const stack = recordValue(value);
+  if (stack === undefined) return err(malformedCallFrame);
+  const frames = admitRecords(stack.callFrames);
+  if (frames === undefined) return err(malformedCallFrame);
+  if (frames.length === 0) return ok(undefined);
+  const frame = recordValue(frames[0]);
+  return frame === undefined ? err(malformedCallFrame) : ok(frame);
+};
 
 export const initiatorLocation = (
   initiator: UnknownRecord | undefined,
-): UnknownRecord | undefined => {
-  let stack = recordValue(initiator?.stack);
+): Result<UnknownRecord | undefined, MalformedCdpCallFrame> => {
+  let stack = initiator?.stack;
   for (let depth = 0; depth < 32 && stack !== undefined; depth += 1) {
-    const frame = firstCallFrame(stack);
-    if (frame !== undefined) return frame;
-    stack = recordValue(stack.parent);
+    const frame = topCallFrame(stack);
+    if (!frame.ok || frame.value !== undefined) return frame;
+    stack = recordValue(stack)?.parent;
   }
-  return cdpStringValue(initiator?.url) === undefined ? undefined : initiator;
+  return ok(
+    cdpStringValue(initiator?.url) === undefined ? undefined : initiator,
+  );
 };
 
 export const exclusionReasonForUrl = (
@@ -218,6 +254,12 @@ export const consolePrimitive = (
         : undefined;
     case "undefined":
       return { type, text: "undefined" };
+    case "object":
+      // The protocol delivers `null` as an object with a `null` subtype. Its
+      // sentinel is already in the event, unlike an unexpanded remote object.
+      return cdpStringValue(value.subtype) === "null"
+        ? { type, text: "null" }
+        : undefined;
     default:
       return undefined;
   }

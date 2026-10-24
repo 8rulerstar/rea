@@ -1,15 +1,14 @@
-import { isAbsolute } from "node:path";
+import { binaryMetadataArchitecture } from "../../domain/binaryMetadataArchitecture.js";
+import { metadataReportSubjectFormat } from "../../domain/apple/machoTargetSelection.js";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
 import type { GoBinaryPort } from "./GoBinaryPort.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import {
   AnalysisCancelledError,
-  AnalysisInputError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
 import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import {
-  goArchitectureForSubject,
   goBinarySchema,
   inspectGoBinaryInputSchema,
 } from "../../domain/go/goBinary.js";
@@ -53,16 +52,6 @@ export class GoBinaryService {
           cause: input.error,
         }),
       );
-    if (!isAbsolute(input.data.path))
-      return err(
-        new AnalysisInputError(OPERATION, undefined, [
-          {
-            path: ["path"],
-            reason: "invalid_format",
-            message: "Expected an absolute filesystem path on this host.",
-          },
-        ]),
-      );
     const { detail, ...providerInput } = input.data;
     if (detail === "summary") {
       const ready = requireAnalysisViewRetention(OPERATION, retention);
@@ -79,13 +68,13 @@ export class GoBinaryService {
         ),
       );
     const value = report.data;
-    const architecture = goArchitectureForSubject(value.architecture);
+    const architecture = binaryMetadataArchitecture(value.architecture);
     const completed = completeProviderEvidence(
       createEvidence(
         {
           path: value.artifact.path,
           sha256: value.artifact.sha256,
-          format: value.format === "macho" ? "mach-o" : value.format,
+          format: metadataReportSubjectFormat(value),
           ...(architecture === undefined ? {} : { architecture }),
         },
         this.provider.identity,

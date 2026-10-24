@@ -1,8 +1,13 @@
+import {
+  BinaryFormatFailure,
+  mappedFileOffset,
+} from "../native/metadata/BinaryContainer.js";
 import { Il2cppBinaryFormatFailure } from "./Il2cppBinaryFormat.js";
 import {
   isMapped,
   hasPointerArrayCoverage,
   readPointer,
+  readUInt32,
   type NativeImage,
 } from "./Il2cppBinaryImage.js";
 import type { Il2cppMetadataDecoded } from "./Il2cppMetadataFile.js";
@@ -131,14 +136,40 @@ export function* findModules(
       const target = image.bytes.readBigUInt64LE(offset);
       const indices = names.get(target);
       if (indices === undefined) continue;
+      const address = mapping.address + BigInt(at);
+      // Matching stored bytes nominate a candidate, not a resolved pointer.
+      if (readPointer(image, address) !== target) continue;
+      let recordOffset: number;
+      try {
+        recordOffset = mappedFileOffset(
+          image.container.mappings,
+          address,
+          24,
+          image.container.zero_fills,
+        );
+      } catch (cause) {
+        if (cause instanceof BinaryFormatFailure)
+          throw new Il2cppBinaryFormatFailure(
+            "malformed-container",
+            cause.message,
+          );
+        throw cause;
+      }
+      if (recordOffset !== offset)
+        throw new Il2cppBinaryFormatFailure(
+          "malformed-container",
+          "code generation module record disagrees with its load mapping",
+        );
       let work = 0;
       for (const index of indices) {
         if (++work % 256 === 0) yield;
-        const count = image.bytes.readUInt32LE(offset + 8);
+        const count = readUInt32(image, address + 8n);
         if (count !== counts[index]) continue;
-        const pointers = image.bytes.readBigUInt64LE(offset + 16);
+        const pointers = readPointer(image, address + 16n);
+        if (pointers === null) continue;
         if (!hasPointerArrayCoverage(image, pointers, count)) continue;
         const list = candidates.get(index) ?? [];
+        if (list.some((candidate) => candidate.address === address)) continue;
         if (list.length !== 0)
           throw new Il2cppBinaryFormatFailure(
             "ambiguous-code-gen-module",
@@ -146,7 +177,7 @@ export function* findModules(
           );
         list.push({
           image: index,
-          address: mapping.address + BigInt(at),
+          address,
           method_pointer_count: count,
           method_pointers: pointers,
         });
@@ -180,16 +211,20 @@ export function* findCodeRegistration(
   modules: readonly Il2cppCodeGenModule[],
 ): Generator<void, { readonly field: bigint | null; readonly array: bigint }> {
   const expected = new Set(modules.map((module) => module.address));
-  const total = BigInt(modules.length);
   const matches: { field: bigint; array: bigint }[] = [];
+  const matchedFields = new Set<bigint>();
   for (const mapping of image.container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
     for (let at = start; at + 16 <= mapping.size; at += 8) {
       if ((at & 0xffff) < 8) yield;
       const offset = mapping.offset + at;
-      if (image.bytes.readBigUInt64LE(offset) !== total) continue;
-      const array = image.bytes.readBigUInt64LE(offset + 8);
-      if (!isMapped(image, array, modules.length * 8)) continue;
+      // The count owns four bytes; the following four only align its pointer.
+      if (image.bytes.readUInt32LE(offset) !== modules.length) continue;
+      const field = mapping.address + BigInt(at);
+      if (readUInt32(image, field) !== modules.length) continue;
+      const array = readPointer(image, field + 8n);
+      if (array === null || !isMapped(image, array, modules.length * 8))
+        continue;
       const seen = new Set<bigint>();
       for (let slot = 0; slot < modules.length; slot++) {
         if (slot % 256 === 0) yield;
@@ -198,12 +233,15 @@ export function* findCodeRegistration(
         seen.add(pointer);
       }
       if (seen.size === modules.length) {
+        // Exact load aliases can visit one virtual registration field twice.
+        if (matchedFields.has(field)) continue;
+        matchedFields.add(field);
         if (matches.length !== 0)
           throw new Il2cppBinaryFormatFailure(
             "code-registration-not-found",
             "multiple CodeRegistration module tables match",
           );
-        matches.push({ field: mapping.address + BigInt(at), array });
+        matches.push({ field, array });
       }
     }
   }
@@ -240,8 +278,11 @@ function* findModuleArrayByCode(
     const lastPosition = new Map<bigint, number>();
     for (let at = start; at + 8 <= mapping.size; at += 8) {
       if ((at & 0xffff) < 8) yield;
-      const value = image.bytes.readBigUInt64LE(mapping.offset + at);
-      if (!expected.has(value)) {
+      const raw = image.bytes.readBigUInt64LE(mapping.offset + at);
+      const value = expected.has(raw)
+        ? readPointer(image, mapping.address + BigInt(at))
+        : null;
+      if (value === null || !expected.has(value)) {
         runStart = at + 8;
         lastPosition.clear();
         continue;
@@ -299,32 +340,48 @@ export function* findMetadataRegistration(
   }
 > {
   const matches: { field: bigint; count: number; types: bigint }[] = [];
+  const matchedFields = new Set<bigint>();
   const low = (offset: number) => image.bytes.readUInt32LE(offset);
-  const word = (offset: number) => image.bytes.readBigUInt64LE(offset);
   for (const mapping of image.container.mappings) {
     const start = Number((8n - (mapping.address % 8n)) % 8n);
-    for (let at = start; at + 128 <= mapping.size; at += 8) {
+    // The fields used below end at byte 112. The full 128-byte registration
+    // must still have loader coverage, including any declared zero-fill tail.
+    for (let at = start; at + 112 <= mapping.size; at += 8) {
       if ((at & 0xffff) < 8) yield;
       const base = mapping.offset + at;
       if (low(base + 80) !== typeDefinitions) continue;
       if (low(base + 96) !== typeDefinitions) continue;
-      const count = low(base + 48);
-      const types = word(base + 56);
+      const address = mapping.address + BigInt(at);
+      if (!hasPointerArrayCoverage(image, address, 16)) continue;
+      if (readUInt32(image, address + 80n) !== typeDefinitions) continue;
+      if (readUInt32(image, address + 96n) !== typeDefinitions) continue;
+      const count = readUInt32(image, address + 48n);
+      const types = readPointer(image, address + 56n);
+      const fieldOffsets = readPointer(image, address + 88n);
+      const typeSizes = readPointer(image, address + 104n);
       if (
+        typeof count !== "number" ||
         count === 0 ||
         count > 0x7fffffff ||
-        !isMapped(image, word(base + 88), 8) ||
-        !isMapped(image, word(base + 104), 8) ||
+        types === null ||
+        fieldOffsets === null ||
+        typeSizes === null ||
+        !isMapped(image, fieldOffsets, 8) ||
+        !isMapped(image, typeSizes, 8) ||
         !isMapped(image, types, count * 8)
       )
         continue;
+      const field = mapping.address + BigInt(at + 48);
+      // Exact load aliases can visit one virtual registration field twice.
+      if (matchedFields.has(field)) continue;
+      matchedFields.add(field);
       if (matches.length !== 0)
         throw new Il2cppBinaryFormatFailure(
           "metadata-registration-not-found",
           "multiple MetadataRegistration candidates match",
         );
       matches.push({
-        field: mapping.address + BigInt(at + 48),
+        field,
         count,
         types,
       });

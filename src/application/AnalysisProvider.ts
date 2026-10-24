@@ -1,3 +1,4 @@
+import type { AnalysisObservation } from "../domain/analysisObservation.js";
 import type { ProviderInspectionScope } from "../providers/ProviderInspectionScope.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { OfficialToolName } from "../contracts/officialToolContracts.js";
@@ -9,13 +10,11 @@ import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import type { AnalysisProfileCommitment } from "../domain/analysisProfile.js";
 import type { JsonValue } from "../domain/jsonValue.js";
 import type { Result } from "../domain/result.js";
-import {
-  createEvidence,
-  type Evidence,
-  type EvidenceLocation,
-  type EvidenceSubjectTarget,
+import type {
+  EvidenceLocation,
+  EvidenceSubjectTarget,
 } from "../domain/evidence.js";
-import { jsonObjectSchema, jsonValueSchema } from "../domain/jsonValue.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
 import type { ProgressReporter } from "./ProgressReporter.js";
 import type { ProviderRejectionCode } from "../contracts/providerSelection.js";
 import type { ProcessLineageObservation } from "../process/ProcessOwnership.js";
@@ -50,16 +49,10 @@ export type AnalysisOperation =
   | "health";
 
 /** Atomic successful provider observation with exact producing provenance. */
-export interface AnalysisExecution {
-  readonly result: JsonValue;
-  readonly rawResult: JsonValue | null;
+export interface AnalysisExecution extends AnalysisObservation {
   readonly provider: ProviderIdentity;
-  readonly analysisProfile?: AnalysisProfileCommitment;
   /** Result-specific veto of snapshot replay; Evidence remains retainable. */
   readonly cachePolicy?: "live";
-  readonly limitations: readonly string[];
-  /** Provider-owned completeness assessment for caller/callee observations. */
-  readonly relationshipCoverage?: RelationshipCoverage;
   /**
    * Whether the provider capped an `xrefs` read: true when it reported a
    * truncation, false when it explicitly reported none. Absent when it reports
@@ -67,12 +60,6 @@ export interface AnalysisExecution {
    * output.
    */
   readonly referencesTruncated?: boolean;
-  readonly locations: readonly EvidenceLocation[];
-  /**
-   * Missing means the selected operation's default subject should be bound by
-   * its caller. Explicit null means the observation has no file subject.
-   */
-  readonly subject?: EvidenceSubjectTarget | null;
 }
 
 interface CreateAnalysisExecutionOptions {
@@ -137,40 +124,10 @@ export function createAnalysisExecution(
   };
 }
 
-/**
- * Compose one completed provider execution into its caller-visible Evidence,
- * so success and a late cancellation that retains it carry identical facts.
- */
-export const createAnalysisExecutionEvidence = (
-  operation: string,
-  input: unknown,
-  execution: AnalysisExecution,
-  confidence: "observed" | "derived",
-): Evidence =>
-  createEvidence(
-    execution.subject === undefined
-      ? undefined
-      : (execution.subject ?? undefined),
-    execution.provider,
-    {
-      operation,
-      parameters: jsonObjectSchema.parse(input),
-      result: execution.result,
-      rawResult: execution.rawResult,
-      limitations: execution.limitations,
-      ...(execution.analysisProfile === undefined
-        ? {}
-        : { analysisProfile: execution.analysisProfile }),
-      ...(execution.relationshipCoverage === undefined
-        ? {}
-        : { relationshipCoverage: execution.relationshipCoverage }),
-      locations: execution.locations,
-      confidence,
-    },
-  );
-
 /** Provider-neutral application capability for one analysis operation. */
 export interface AnalysisOperationPort {
+  /** The session retains workflow resources whose final cleanup failed. */
+  readonly resourceScope?: RetainedResourceScope | undefined;
   execute(
     operation: AnalysisOperation,
     parameters: Readonly<Record<string, JsonValue>>,

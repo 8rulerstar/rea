@@ -1,3 +1,4 @@
+import { WorkerFrameSignal } from "../../process/WorkerFrameSignal.js";
 import type { JavaScriptSemanticProjectionCapacity } from "../../domain/javascript/javascriptSemanticFileProjection.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -22,13 +23,15 @@ import {
   AnalysisTimeoutError,
   AnalysisOutputError,
   AnalysisResourceConstraintError,
-  AnalysisCapabilityUnavailableError,
 } from "../../domain/analysisErrorCore.js";
 import { ProviderAdapterError } from "../../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
 import { ok, err, type Result } from "../../domain/result.js";
 import { javaScriptRuntime } from "../../domain/runtimeVersion.js";
-import { PrivateRuntimeRootUnavailableError } from "../../process/PrivateRuntimeRootUnavailableError.js";
+import {
+  RuntimeControlUnavailableError,
+  runtimeControlCapabilityError,
+} from "../../process/RuntimeControlUnavailableError.js";
 import { javaScriptWorkerMemoryLimitBytes } from "../../process/JavaScriptWorkerMemoryLimit.js";
 import {
   spawnOwnedProviderProcess,
@@ -47,11 +50,21 @@ import {
 import {
   readJavaScriptAnalysisTransfer,
   JAVASCRIPT_ANALYSIS_TRANSFER_RECORD_BYTES,
+  javaScriptForwardedTransferRemediation,
   javaScriptTransferRetentionBytes,
 } from "./JavaScriptAnalysisTransfer.js";
+import {
+  JAVASCRIPT_PARENT_CHECKPOINT_HEAP_REMEDIATION,
+  JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION,
+  JAVASCRIPT_WORKER_HEAP_MIB_MAXIMUM,
+  JAVASCRIPT_WORKER_HEAP_MIB_MINIMUM,
+  javaScriptWorkerHeapExhaustionRecovery,
+  javaScriptWorkerHeapRemediation,
+} from "../../domain/javascript/javascriptAnalysisResourceControls.js";
 import { javaScriptWorkerStaticAnalysisSchema } from "./JavaScriptAnalysisWorkerSchemas.js";
 import {
   JAVASCRIPT_ANALYSIS_WORKER_DEFAULTS as DEFAULTS,
+  javaScriptCheckpointCeilingRemediation,
   javaScriptWorkerMessageSchema,
   javaScriptWorkerRequestSchema,
   javaScriptWorkerAdmissionSchema,
@@ -90,7 +103,7 @@ export class JavaScriptAnalysisWorker {
   #ready = false;
   #heapLimitBytes = 0;
   #frames: JavaScriptWorkerMessage[] = [];
-  #frameWaiters = new Set<(outcome: "frame" | "failure") => void>();
+  readonly #frameSignal = new WorkerFrameSignal();
   #pending = "";
   #decoder = new StringDecoder("utf8");
   #primaryFailure: WorkerPrimaryFailure | undefined;
@@ -105,7 +118,7 @@ export class JavaScriptAnalysisWorker {
   #parentCapacityExhausted = false;
   #sourcesRemaining: number | undefined;
   #deadline: ProviderStartupDeadline | undefined;
-  readonly #resultBudgetBytes: number;
+  #resultBudgetBytes = 0;
   /** Null when the runtime enforces the V8 heap flags instead. */
   readonly #processMemoryLimitBytes: number | null;
   readonly #onStdout = (chunk: Buffer | string): void => {
@@ -131,7 +144,7 @@ export class JavaScriptAnalysisWorker {
         const frame = javaScriptWorkerMessageSchema.parse(raw);
         this.#frames.push(frame);
         this.#observeJobFrame(frame);
-        this.#wakeFrameWaiters("frame");
+        this.#frameSignal.wake("frame");
       }
       if (Buffer.byteLength(this.#pending) > DEFAULTS.protocolBytes)
         this.#latchOutputFailure(
@@ -159,8 +172,8 @@ export class JavaScriptAnalysisWorker {
     });
     if (
       !Number.isSafeInteger(limits.heapMb) ||
-      limits.heapMb < 128 ||
-      limits.heapMb > 16_384 ||
+      limits.heapMb < JAVASCRIPT_WORKER_HEAP_MIB_MINIMUM ||
+      limits.heapMb > JAVASCRIPT_WORKER_HEAP_MIB_MAXIMUM ||
       !Number.isSafeInteger(limits.timeoutMs) ||
       limits.timeoutMs <= 0 ||
       limits.timeoutMs > 2_147_483_647
@@ -179,13 +192,60 @@ export class JavaScriptAnalysisWorker {
     this.#processMemoryLimitBytes = javaScriptWorkerMemoryLimitBytes(
       limits.heapMb,
     );
-    // Reserve host-side control, schema/Evidence work and a maximum record's
-    // transient copies. Admission also accounts for retained earlier files.
+    this.#refreshResultBudget();
+  }
+
+  /**
+   * Whether this idle process can analyze another application. A failed,
+   * cancelled, or still-open job must not be reused.
+   */
+  canReuse(): boolean {
+    return (
+      this.#ready &&
+      this.#activeJobId === undefined &&
+      this.#primaryFailure === undefined &&
+      this.#lastFailure === undefined &&
+      this.#frames.length === 0 &&
+      this.#pending === "" &&
+      this.#runtime.inputFailure === undefined &&
+      !this.#runtime.hasPendingCleanup &&
+      this.#runtime.supervisor !== undefined
+    );
+  }
+
+  /**
+   * Reset per-analysis admission for one idle process. The worker heap limit
+   * stays the one selected at launch; callers must not reuse across limits.
+   */
+  prepareForAnotherAnalysis(sourceCount: number): boolean {
+    if (!this.canReuse()) return false;
+    if (!Number.isSafeInteger(sourceCount) || sourceCount < 0)
+      throw new RangeError(
+        "JavaScript worker source count must be a nonnegative safe integer",
+      );
+    this.#sourcesRemaining = sourceCount;
+    this.#estimatedRetainedBytes = 0;
+    this.#parentCapacityExhausted = false;
+    this.#applicationProjectionFailure = undefined;
+    this.#refreshResultBudget();
+    return true;
+  }
+
+  /** Keep the limit and usage in one V8 observation for every admission path. */
+  #remainingParentHeapBytes(): number {
+    const { heap_size_limit, used_heap_size } = getHeapStatistics();
+    return heap_size_limit - used_heap_size;
+  }
+
+  /**
+   * Reserve host-side control, schema/Evidence work, and a maximum record's
+   * transient copies. Admission also accounts for retained earlier files.
+   */
+  #refreshResultBudget(): void {
     this.#resultBudgetBytes = Math.max(
       0,
       Math.floor(
-        (getHeapStatistics().heap_size_limit -
-          process.memoryUsage().heapUsed -
+        (this.#remainingParentHeapBytes() -
           24 * JAVASCRIPT_ANALYSIS_TRANSFER_RECORD_BYTES) /
           2,
       ),
@@ -197,6 +257,7 @@ export class JavaScriptAnalysisWorker {
     file: JavaScriptArtifactFile,
     capacity: JavaScriptSemanticProjectionCapacity,
     signal?: AbortSignal,
+    onPhase?: (phase: string) => Promise<void>,
   ): Promise<
     Result<JavaScriptAnalyzedSource, JavaScriptSourceAnalysisFailure>
   > {
@@ -256,8 +317,11 @@ export class JavaScriptAnalysisWorker {
         throw new AnalysisResourceConstraintError(
           OPERATION,
           "transport",
-          `Source identity for ${file.path} exceeds the worker request byte budget`,
+          `Source identity for ${file.path} exceeds the ${String(DEFAULTS.protocolBytes)}-byte worker request ceiling. This release has no runtime override.`,
           { worker_request_bytes: DEFAULTS.protocolBytes },
+          {
+            remediationAction: `This release has no runtime override for the ${String(DEFAULTS.protocolBytes)}-byte JavaScript worker request ceiling. Raising max_heap_mb does not raise it. Repeating the unchanged request fails the same way.`,
+          },
         );
       const stdin = supervisor.launch.process.stdin;
       if (stdin === undefined || stdin === null)
@@ -280,6 +344,7 @@ export class JavaScriptAnalysisWorker {
           );
         if (response.kind === "phase") {
           this.#phase = response.phase;
+          await onPhase?.(response.phase);
           continue;
         }
         if (response.kind === "static") {
@@ -298,6 +363,9 @@ export class JavaScriptAnalysisWorker {
                 ...this.#limits(),
                 parent_result_budget_bytes: this.#resultBudgetBytes,
                 parent_result_budget_exhausted: true,
+              },
+              {
+                remediationAction: JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION,
               },
             );
           offeredResultBudget =
@@ -375,8 +443,7 @@ export class JavaScriptAnalysisWorker {
                 module_retention_estimate_bytes: moduleEstimate,
               },
               {
-                remediationAction:
-                  "Use the retained static facts or analyze fewer source files. This limit belongs to the parent result budget; increasing the worker heap alone does not increase it.",
+                remediationAction: `Use the retained static facts or analyze fewer source files. ${JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION}`,
               },
             ),
           });
@@ -415,8 +482,7 @@ export class JavaScriptAnalysisWorker {
                   graph_records: descriptor.graph_records,
                 },
                 {
-                  remediationAction:
-                    "Use the retained static and module facts or analyze fewer source files. This limit belongs to the parent result budget; increasing the worker heap alone does not increase it.",
+                  remediationAction: `Use the retained static and module facts or analyze fewer source files. ${JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION}`,
                 },
               ),
             });
@@ -473,7 +539,7 @@ export class JavaScriptAnalysisWorker {
         this.#runtime.retainForCleanup();
         const error = this.#cleanupError(message(cause));
         this.#runtime.bindCleanupFailure(error);
-        return err({
+        result = err({
           javascript,
           module,
           projection,
@@ -632,17 +698,15 @@ export class JavaScriptAnalysisWorker {
         OPERATION,
         "JavaScript static checkpoint byte count exceeds or differs from its declared budget",
       );
-    if (
-      bytes * 16 + 4 * MIB >
-      getHeapStatistics().heap_size_limit -
-        process.memoryUsage().heapUsed -
-        64 * MIB
-    )
+    if (bytes * 16 + 4 * MIB > this.#remainingParentHeapBytes() - 64 * MIB)
       throw new AnalysisResourceConstraintError(
         OPERATION,
         "memory",
         "The parent's remaining heap cannot safely decode the completed JavaScript static checkpoint",
         { ...this.#limits(), checkpoint_bytes: bytes },
+        {
+          remediationAction: JAVASCRIPT_PARENT_CHECKPOINT_HEAP_REMEDIATION,
+        },
       );
     const text = await readFile(path, "utf8");
     if (
@@ -678,8 +742,7 @@ export class JavaScriptAnalysisWorker {
           application_projection_required_bytes: expandedBytes,
         },
         {
-          remediationAction:
-            "Read the complete static facts on the file node or analyze fewer source files. Expanded application relationships exceed the parent result budget; increasing the worker heap alone does not increase it.",
+          remediationAction: `Read the complete static facts on the file node or analyze fewer source files. Expanded application relationships exceed the parent result budget. ${JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION}`,
         },
       );
     return facts;
@@ -711,9 +774,12 @@ export class JavaScriptAnalysisWorker {
     return new AnalysisResourceConstraintError(
       OPERATION,
       "memory",
-      `Owned JavaScript worker reached its ${this.#processMemoryLimitBytes === null ? "" : `${String(this.#processMemoryLimitBytes)}-byte `}process memory limit while analyzing ${path} during ${this.#phase}`,
+      `Owned JavaScript worker reached its ${this.#processMemoryLimitBytes === null ? "" : `${String(this.#processMemoryLimitBytes)}-byte `}process memory limit while analyzing ${path} during ${this.#phase}. That limit is max_heap_mb ${String(this.limits.heapMb)} MiB plus a 512 MiB Bun runtime reserve`,
       this.#limits(),
-      { capturedOutput: this.#captured() },
+      {
+        capturedOutput: this.#captured(),
+        remediationAction: javaScriptWorkerHeapRemediation(this.limits.heapMb),
+      },
     );
   }
   #remainingResultBudget(): number {
@@ -736,8 +802,7 @@ export class JavaScriptAnalysisWorker {
       0,
       Math.min(
         this.#resultBudgetBytes - this.#estimatedRetainedBytes,
-        getHeapStatistics().heap_size_limit -
-          process.memoryUsage().heapUsed -
+        this.#remainingParentHeapBytes() -
           24 * JAVASCRIPT_ANALYSIS_TRANSFER_RECORD_BYTES,
       ),
     );
@@ -780,7 +845,7 @@ export class JavaScriptAnalysisWorker {
       )
     ) {
       this.#primaryFailure = { ...this.#primaryFailure, heapExhaustion: true };
-      this.#wakeFrameWaiters("failure");
+      this.#frameSignal.wake("failure");
     }
     if (event.type === "exit" && (event.code !== 0 || event.signal !== null)) {
       if (this.#primaryFailure === undefined)
@@ -803,7 +868,7 @@ export class JavaScriptAnalysisWorker {
           ...this.#primaryFailure,
           heapExhaustion: true,
         };
-        this.#wakeFrameWaiters("failure");
+        this.#frameSignal.wake("failure");
       }
     }
   }
@@ -823,7 +888,7 @@ export class JavaScriptAnalysisWorker {
         this.#primaryFailure?.kind === "memory" ||
         this.#primaryFailure?.kind === "exit"
       )
-        this.#wakeFrameWaiters("failure");
+        this.#frameSignal.wake("failure");
     }
   }
   #observeJobFrame(frame: JavaScriptWorkerMessage): void {
@@ -849,7 +914,7 @@ export class JavaScriptAnalysisWorker {
             kind: "output",
             reason: "JavaScript worker completed before a static checkpoint",
           };
-        this.#wakeFrameWaiters("failure");
+        this.#frameSignal.wake("failure");
         return;
       }
       this.#terminalResponseId = frame.id;
@@ -868,48 +933,20 @@ export class JavaScriptAnalysisWorker {
     if (this.#deadline?.interruption !== undefined) return;
     if (this.#primaryFailure === undefined)
       this.#primaryFailure = { kind: "output", reason };
-    this.#wakeFrameWaiters("failure");
+    this.#frameSignal.wake("failure");
   }
   #latchInputFailure(cause: Error): void {
     if (this.#deadline?.interruption !== undefined) return;
     if (this.#primaryFailure === undefined)
       this.#primaryFailure = { kind: "input", cause };
-    this.#wakeFrameWaiters("failure");
+    this.#frameSignal.wake("failure");
   }
   async #waitForFrameOrOutputClose(
     supervisor: ProviderProcessSupervisor,
     deadline: ProviderStartupDeadline,
   ): Promise<"frame" | "failure" | "closed" | "interrupted"> {
     if (this.#frames.length !== 0) return "frame";
-    let wakeFrame!: (outcome: "frame" | "failure") => void;
-    const frameArrival = new Promise<"frame" | "failure">((resolve) => {
-      wakeFrame = resolve;
-      this.#frameWaiters.add(wakeFrame);
-    });
-    const outputCloseController = new AbortController();
-    const interruptOutputClose = () =>
-      outputCloseController.abort(deadline.signal.reason);
-    if (deadline.signal.aborted) interruptOutputClose();
-    else
-      deadline.signal.addEventListener("abort", interruptOutputClose, {
-        once: true,
-      });
-    try {
-      const outputClose = supervisor
-        .waitForOutputClose(undefined, outputCloseController.signal)
-        .then((closed): "closed" | "interrupted" =>
-          closed ? "closed" : "interrupted",
-        );
-      return await Promise.race([frameArrival, outputClose]);
-    } finally {
-      outputCloseController.abort();
-      deadline.signal.removeEventListener("abort", interruptOutputClose);
-      this.#frameWaiters.delete(wakeFrame);
-    }
-  }
-  #wakeFrameWaiters(outcome: "frame" | "failure"): void {
-    for (const wake of this.#frameWaiters) wake(outcome);
-    this.#frameWaiters.clear();
+    return this.#frameSignal.waitForOutputClose(supervisor, deadline.signal);
   }
   #selectedWorkerFailure(path: string): AnalysisError {
     if (this.#primaryFailure !== undefined)
@@ -949,14 +986,24 @@ export class JavaScriptAnalysisWorker {
     path: string,
     failure: Extract<WorkerPrimaryFailure, { kind: "exit" }>,
   ): AnalysisError {
-    if (failure.heapExhaustion)
+    if (failure.heapExhaustion) {
+      const recovery = javaScriptWorkerHeapExhaustionRecovery({
+        heapFlagsEnforced: WORKER_HEAP_FLAGS_ENFORCED,
+        heapMb: this.limits.heapMb,
+        path,
+        phase: this.#phase,
+      });
       return new AnalysisResourceConstraintError(
         OPERATION,
         "memory",
-        `Owned JavaScript worker exhausted its heap while analyzing ${path} during ${this.#phase}`,
+        recovery.reason,
         this.#limits(),
-        { capturedOutput: this.#captured() },
+        {
+          capturedOutput: this.#captured(),
+          remediationAction: recovery.remediationAction,
+        },
       );
+    }
     return new ProviderAdapterError(PROVIDER, OPERATION, {
       capturedOutput: this.#captured(),
       diagnostics: {
@@ -990,13 +1037,46 @@ export class JavaScriptAnalysisWorker {
     response: Extract<JavaScriptWorkerMessage, { kind: "failure" }>,
     phase: string,
   ): AnalysisError {
-    if (response.reason === "resource")
+    if (response.reason === "io")
+      return new ProviderAdapterError(PROVIDER, OPERATION, {
+        capturedOutput: this.#captured(),
+        userMessage: `Owned JavaScript worker storage failed for ${path} during ${phase}. Retained observations and cleanup status are reported separately.`,
+        remediationAction:
+          "Check the availability and permissions of REA's private temporary storage, correct the reported I/O failure, and retry. Changing the selected source is not required by this storage failure.",
+        diagnostics: {
+          source_path: path,
+          phase,
+          worker_failure_reason: response.reason,
+          message: response.message,
+        },
+      });
+    if (response.reason === "resource") {
+      const reported = response.limits;
+      const limits = { ...this.#limits(), ...reported };
+      const transferRemediation =
+        javaScriptForwardedTransferRemediation(reported);
+      const checkpointBytes = reported?.checkpoint_limit_bytes;
+      const checkpointRemediation =
+        typeof checkpointBytes === "number"
+          ? javaScriptCheckpointCeilingRemediation(checkpointBytes)
+          : undefined;
+      const parentBudget =
+        reported?.semantic_result_budget_bytes !== undefined ||
+        reported?.parent_result_budget_bytes !== undefined;
+      const remediationAction =
+        transferRemediation ??
+        checkpointRemediation ??
+        (parentBudget
+          ? JAVASCRIPT_PARENT_RESULT_BUDGET_REMEDIATION
+          : undefined);
       return new AnalysisResourceConstraintError(
         OPERATION,
         response.resource ?? "memory",
         response.message,
-        { ...this.#limits(), ...response.limits },
+        limits,
+        remediationAction === undefined ? undefined : { remediationAction },
       );
+    }
     return new AnalysisOutputError(
       OPERATION,
       `${path} during ${phase}: ${response.message}`,
@@ -1070,13 +1150,8 @@ export class JavaScriptAnalysisWorker {
         `${path} during ${this.#phase}: ${message(cause)}`,
         { cause, capturedOutput: this.#captured() },
       );
-    return cause instanceof PrivateRuntimeRootUnavailableError
-      ? new AnalysisCapabilityUnavailableError(
-          PROVIDER,
-          OPERATION,
-          cause.message,
-          { cause, retryable: cause.retryable },
-        )
+    return cause instanceof RuntimeControlUnavailableError
+      ? runtimeControlCapabilityError(PROVIDER, OPERATION, cause)
       : new ProviderAdapterError(PROVIDER, OPERATION, {
           cause,
           capturedOutput: this.#captured(),
@@ -1119,6 +1194,7 @@ export class JavaScriptAnalysisWorker {
       },
       {
         operation: OPERATION,
+        ...(original === undefined ? {} : { cleanupPrimary: original }),
         cause: new Error(
           reason,
           original === undefined ? undefined : { cause: original },
@@ -1144,7 +1220,7 @@ export class JavaScriptAnalysisWorker {
   #resetState(): void {
     this.#ready = false;
     this.#frames = [];
-    this.#frameWaiters.clear();
+    this.#frameSignal.clear();
     this.#pending = "";
     this.#decoder = new StringDecoder("utf8");
     this.#primaryFailure = undefined;
