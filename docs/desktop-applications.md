@@ -116,6 +116,8 @@ first; project-named asmdef assemblies keep only the ordinary managed probes.
 The same probe is offered for those names in `Managed/` of a
 `<Product>_BackUpThisFolder_ButDontShipItWithYourGame` folder (or when that
 folder is the root); whether its IL matches the shipped IL2CPP code is unknown.
+Point the scan at the game folder: a root that is the `<Product>_Data` or
+`Managed` folder itself has no Mono witness path and gets no member probe.
 
 Candidates are derived or inferred from these facts and do not prove loading or
 execution. BepInEx, MelonLoader, Easy Anti-Cheat and BattlEye labels identify
