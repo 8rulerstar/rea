@@ -26,6 +26,7 @@ import {
   AnalysisResourceConstraintError,
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
+import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -117,7 +118,7 @@ const failureForPrimary = (
           maximum_output_bytes: outputBytes,
           maximum_path_utf16_units: outputBytes,
         },
-        { cause },
+        { cause, ...reportAllowance(outputBytes) },
       );
     if (cause.kind === "resource")
       return new AnalysisResourceConstraintError(
@@ -125,7 +126,18 @@ const failureForPrimary = (
         "file-size",
         cause.message,
         { maximum_region_bytes: REGION_BYTES, maximum_entries: ENTRIES },
-        { cause },
+        {
+          cause,
+          ...(cause.reason === "too-many-entries"
+            ? fixedAllowanceOptions(
+                `The Unreal pak entry allowance of ${String(ENTRIES)} entries (this release has no runtime override)`,
+                "count",
+              )
+            : fixedAllowanceOptions(
+                `The Unreal pak index-region allowance of ${String(REGION_BYTES)} bytes (this release has no runtime override)`,
+                "bytes",
+              )),
+        },
       );
     return new AnalysisInputError(OPERATION, { cause }, [
       {
@@ -201,12 +213,20 @@ const failureFor = (
   return error;
 };
 
+/** Path text and issues are report text, so all three share this allowance. */
+const reportAllowance = (maximumBytes: number) =>
+  fixedAllowanceOptions(
+    `The Unreal pak complete-report allowance of ${String(maximumBytes)} bytes (this release has no runtime override)`,
+    "report",
+  );
+
 const outputLimit = (path: string, maximumBytes: number) =>
   new AnalysisResourceConstraintError(
     OPERATION,
     "transport",
     `Complete pak index for ${path} exceeds the inline output budget; no partial success is returned.`,
     { maximum_output_bytes: maximumBytes },
+    reportAllowance(maximumBytes),
   );
 
 type PakArtifact = UnrealPak["artifact"];

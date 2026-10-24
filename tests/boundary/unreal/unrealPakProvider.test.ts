@@ -1,4 +1,5 @@
 import { symlink, writeFile } from "node:fs/promises";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { UnrealPakService } from "../../../src/application/unreal/UnrealPakService.js";
@@ -226,6 +227,17 @@ it("reports the path budget, not a file size, when path text exceeds it", async 
         reportedLimits: {
           maximum_output_bytes: 2048,
           maximum_path_utf16_units: 2048,
+        },
+      });
+    // An early refusal leaves no Evidence, and complete CLI JSON uses the same
+    // allowance, so the recovery names the fixed value instead of either.
+    if (!result.ok)
+      expect(projectAnalysisError(result.error)).toMatchObject({
+        retryable: false,
+        remediation: {
+          action: expect.stringContaining(
+            "The Unreal pak complete-report allowance of 2048 bytes (this release has no runtime override) is a fixed report allowance. This refusal does not leave a completed report or Evidence record to retrieve",
+          ),
         },
       });
   } finally {
