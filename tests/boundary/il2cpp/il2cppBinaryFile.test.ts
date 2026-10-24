@@ -593,9 +593,28 @@ it.each([
     () => undefined,
   ],
   [
-    "a record's kind is an unassigned Il2CppTypeEnum value",
+    "a record's kind is the unassigned Il2CppTypeEnum value 0x17",
     { metadataRegistration: false, adrpAdd: [[0xc20, 0x900]] },
     (bytes: Buffer) => bytes.writeUInt32LE(0x17 << 16, 0x980 + 16 + 8),
+  ],
+  [
+    "a record's kind is the unassigned Il2CppTypeEnum value 0x1a",
+    { metadataRegistration: false, adrpAdd: [[0xc20, 0x900]] },
+    (bytes: Buffer) => bytes.writeUInt32LE(0x1a << 16, 0x980 + 16 + 8),
+  ],
+  [
+    // Three entries, one short of the four that type 3 needs.
+    "the loaded run is one entry short",
+    { metadataRegistration: false, adrpAdd: [[0xc20, 0x900]] },
+    (bytes: Buffer) => bytes.writeBigUInt64LE(0n, 0x918),
+  ],
+  [
+    "the ADRP+ADD pair uses register 31",
+    { metadataRegistration: false, adrpAdd: [[0xc20, 0x900]] },
+    (bytes: Buffer) => {
+      bytes.writeUInt32LE((bytes.readUInt32LE(0xc20) | 0x1f) >>> 0, 0xc20);
+      bytes.writeUInt32LE((bytes.readUInt32LE(0xc24) | 0x3ff) >>> 0, 0xc24);
+    },
   ],
 ] as const)(
   "keeps metadata-registration-not-found when %s, with the whole table referenced",
@@ -612,6 +631,47 @@ it.each([
     expect(reason).toBe("metadata-registration-not-found");
   },
 );
+
+it("does not choose a run that starts at its mapping start, where the table may continue backwards", () => {
+  // The table spans 0x900..0x920; the split puts its first entry in the
+  // previous mapping, and code loads 0x908, the first entry of the next.
+  const bytes = createIl2cppBinaryFixture({
+    metadataRegistration: false,
+    splitSegmentAt: 0x908,
+    adrpAdd: [[0xc20, 0x908]],
+  });
+  let reason: string | undefined;
+  try {
+    linkIl2cppBinary(bytes, metadata, {
+      ...facts,
+      returnTypes: Int32Array.from(facts.returnTypes, () => 1),
+    });
+  } catch (cause) {
+    if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+    reason = cause.reason;
+  }
+  expect(reason).toBe("metadata-registration-not-found");
+});
+
+it("says why no MetadataRegistration or inferred type table was accepted", () => {
+  const message = (bytes: Buffer) => {
+    try {
+      linkWholeTable(bytes);
+    } catch (cause) {
+      if (!(cause instanceof Il2cppBinaryFormatFailure)) throw cause;
+      return cause.message;
+    }
+    throw new Error("expected a link failure");
+  };
+  const unusable = createIl2cppBinaryFixture({ adrpAdd: [[0xc20, 0x900]] });
+  unusable.writeBigUInt64LE(FIXTURE_BINARY_BASE + 0xdead0000n, 0x800 + 56);
+  expect(message(unusable)).toContain(
+    "a MetadataRegistration counts 4 type definitions, but its type table",
+  );
+  expect(
+    message(createIl2cppBinaryFixture({ metadataRegistration: false })),
+  ).toContain("no single code-loaded run of Il2CppType pointers");
+});
 
 it("keeps metadata-registration-not-found when x86-64 code loads an address inside the run", () => {
   const image = createIl2cppBinaryFixture({ metadataRegistration: false });
@@ -679,7 +739,7 @@ it.each([
   },
 );
 
-it("bounds type-table candidates when the metadata references few type indices", () => {
+it("fails closed at the second type-table candidate when the metadata references few type indices", () => {
   const bytes = createIl2cppBinaryFixture({
     metadataRegistration: false,
     pages: 2,
@@ -697,8 +757,8 @@ it("bounds type-table candidates when the metadata references few type indices",
     }
   };
   // Fixture methods reference only type 0, so every isolated pointer is a
-  // candidate run, and the bound fails before the loaded run is chosen.
-  expect(outcome(facts)).toBe("native-index-capacity");
+  // candidate run, and the second one ends the search.
+  expect(outcome(facts)).toBe("metadata-registration-not-found");
   // Referencing type 3 requires four entries; the isolated pointers drop out.
   expect(
     outcome({

@@ -241,7 +241,7 @@ record addresses remain distinct candidates, and conflicting file mappings
 remain malformed.
 
 Module records establish names through their declared NUL-terminated string pointers. NUL/0xFF padding, spaces, Unicode and suffix-shared storage are supported. A pointer to a longer string does not match just its suffix; a pointer directly into a shared suffix may name it. Exact reversed UTF-8 matching avoids rescanning the file for every name and retains duplicate-name owners until module records resolve them. A contributor investigated a Linux
-`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. Cpp2IL's StrippedCodeRegSupport plugin (2023) first recovered the module list of an inlined CodeRegistration by walking from module names to the list; this fallback applies the same idea and additionally requires the exact located module set and a single code reference. A Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol; its type table is then inferred as described below.
+`GameAssembly.so` from Unity 2023.2.13f1 whose static registration was not located. When no static pair is resolved on x86-64 or arm64, the reader searches executable ranges for bytes consistent with a reference to a module-array candidate: RIP-relative LEA/MOV on x86-64, an adjacent `adrp`/`add` pair on arm64. Exactly one referenced array candidate must remain. `code_gen_modules_field` is then `null`, and Evidence is **inferred**: instruction boundaries, the absence of a static registration elsewhere, and runtime use were not verified. The module records and slots themselves remain file observations. Static-table associations are **derived**. Otherwise the result is `code-registration-not-found`. Cpp2IL's StrippedCodeRegSupport plugin also recovers the module list of an inlined CodeRegistration from the module names; this fallback additionally requires the exact located module set and a single code reference. A Unity 2022.3.62f3 macOS Master build checked by a contributor keeps neither registration symbol; its type table is then inferred as described below.
 
 The binary/metadata pair is caller-selected. Name/count/token agreement is structural evidence, not a cryptographic same-build proof. File-offset locations refer to the primary metadata artifact; linked virtual addresses refer to `binary.artifact`. Both SHA-256 identities remain available in compact native pages as `artifact` and `binary_source`.
 
@@ -304,7 +304,8 @@ those counts, the reader collects maximal runs of pointers to Il2CppType-shaped
 records (an assigned Il2CppTypeEnum kind from 0x01 to 0x1e; class and
 value-type data below the type-definition count) that are long enough for every
 type index the metadata references. Exactly one such run may exist in the
-image, it must end inside its mapping, and its start must be loaded by the same
+image, it must start and end inside its mapping (a run touching either end may
+continue in a neighbouring mapping), and its start must be loaded by the same
 instruction forms as the module-array fallback. `types_field` is then `null`,
 `types_count` is that run's length rather than an observed `typesCount`, and
 Evidence is **inferred**. The run length is at least every referenced type
@@ -312,15 +313,14 @@ index but can differ from `typesCount`: a type-shaped pointer after the table
 would lengthen it, and an unreadable slot (such as an unresolved relocation)
 would end it early. Only the type indices the metadata references are read. A
 second long-enough run anywhere, a run that a type-shaped neighbour extends
-before the loaded address, a run that reaches the end of its mapping, and a
-record whose two counts match but whose other fields are unusable all leave
-`metadata-registration-not-found` rather than a guess. Real builds reference
-most of their type table, so the length requirement excludes other pointer
-tables; when the metadata references few type indices, short pointer runs can
-exceed the 64-candidate bound and the result is `native-index-capacity`. Il2CppDumper's `SectionHelper` and Cpp2IL's
-`FindMetadataRegistrationPost24_5` find MetadataRegistration from its count
-words in data, as the static search above does, so they need the record to
-exist; StrippedCodeRegSupport restores only the module list.
+before the loaded address, a run touching a mapping end, and a covered
+128-byte record whose two counts match but whose other fields are unusable all
+leave `metadata-registration-not-found` rather than a guess; the search stops
+at the second run. The length requirement only separates the type table from
+other pointer runs when the metadata references most of it: on the one Master
+build checked, the highest referenced index is 6,031 of 6,576 entries. A
+metadata referencing few type indices usually
+leaves several short runs and fails closed.
 
 Counts use their declared 32-bit width independently of alignment padding.
 The complete 128-byte registration must have unambiguous loader coverage. Its
@@ -452,7 +452,7 @@ The builds checked are listed after the module search rules above.
 
 Format and selection failures name `binary_path`; capacity refusals remain typed resource errors. Failed linking preserves the metadata source identity, validated counts, selected binary path/architecture and its SHA-256 when observed, plus prior producer observations. It never publishes an incomplete native table as complete. The binary input is bounded to 1 GiB.
 
-Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to 65,536 entries/nodes and fallback module-array and type-table candidates each to 64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a 64 MiB UTF-8 cache-workspace guard, separate from the 64 MiB encoded-report admission, and 64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
+Scans yield cooperatively in bounded batches. Name-address retention and reverse-trie construction are each limited to 65,536 entries/nodes and fallback module-array candidates to 64 (`native-index-capacity`); exceeding capacity does not prove absence. Rendered type text has a 64 MiB UTF-8 cache-workspace guard, separate from the 64 MiB encoded-report admission, and 64 nested rendering frames (`native-type-text-capacity` / `type-nesting-capacity`). Genuine cycles are malformed; unsupported type kinds are explicit coverage failures. Native row/text admission runs before allocation or retention. Unused generic parameter names are read on demand from the same stable metadata snapshot. There is no cross-inspection file cache; validated immutable Evidence is reused for session views.
 
 ELF RELATIVE writes into zero-fill are kept as a private virtual-pointer overlay. Unresolved supported-width symbol relocations, including RELA PLT entries, remain unknown only for the bytes their ELF ABI relocation type covers; an adjacent 32-bit relocation does not make a separate 64-bit method slot unknown. Stored zeros never establish no-body. COPY, TLS descriptor, REL, packed APS2 and other unsupported relocation encodings fail closed. Input bytes are unchanged.
 
