@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -47,6 +48,85 @@ cliTest(
               }),
             }),
           ],
+        },
+      });
+    }
+  },
+);
+
+cliTest(
+  "managed CLI inspects malformed MethodSpecs used by isolated non-call instructions",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory(
+      "rea-managed-methodspec-operands-",
+    );
+    for (const [opcode, name, operandKind] of [
+      [0x71, "ldobj", "type"],
+      [0x7e, "ldsfld", "field"],
+      [0xd0, "ldtoken", "method"],
+    ] as const) {
+      const path = join(root, `${name}.dll`);
+      // Each body has one token operand; no call can trigger MethodSpec
+      // inspection on behalf of the non-call instruction under observation.
+      const il = Buffer.from([opcode, 1, 0, 0, 0x2b, 0x2a]);
+      await writeFile(
+        path,
+        buildManagedPeFixture({
+          memberRefName: "NotAMethod",
+          memberRefSignature: Buffer.from([0x06, 0x0e]),
+          methodSpecMethods: [(1 << 1) | 1],
+          ilBody: Buffer.concat([Buffer.from([(il.length << 2) | 2]), il]),
+        }),
+      );
+      const result = await cli.run({
+        arguments: ["inspect-managed-members", path, "--json"],
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(result.json).toMatchObject({
+        operation: "inspect_managed_members",
+        subject: { local_path: path },
+        normalized_result: {
+          methods: [
+            expect.objectContaining({
+              body: expect.objectContaining({
+                status: "present",
+                il_sha256: createHash("sha256").update(il).digest("hex"),
+                normalized_il_sha256: expect.any(String),
+                anchors: [
+                  expect.objectContaining({
+                    opcode: name,
+                    operand_kind: operandKind,
+                    operand: "0x2b000001",
+                  }),
+                  expect.objectContaining({ opcode: "ret", operand: null }),
+                ],
+                issue: null,
+              }),
+            }),
+          ],
+          call_edges: [],
+          field_accesses:
+            name === "ldsfld"
+              ? [
+                  expect.objectContaining({
+                    opcode: "ldsfld",
+                    field_token: "0x2b000001",
+                    field_name: null,
+                    field_declaring_type: null,
+                  }),
+                ]
+              : [],
+          coverage: {
+            state: "partial",
+            issues: expect.arrayContaining([
+              expect.objectContaining({
+                code: "invalid-row",
+                scope: "metadata.MethodSpec:0x2b000001",
+                detail:
+                  "MethodSpec method does not have a decodable method signature",
+              }),
+            ]),
+          },
         },
       });
     }
@@ -166,6 +246,70 @@ cliTest(
         },
       });
     }
+
+    const hintedPath = join(root, "ready-to-run-with-runtime-hints.dll");
+    const hintedTarget = ".NETFramework,Version=v4.8";
+    await writeFile(
+      hintedPath,
+      buildManagedPeFixture({
+        readyToRun: true,
+        targetFramework: hintedTarget,
+        references: ["UnityEngine.CoreModule"],
+      }),
+    );
+    const hinted = await cli.run({
+      arguments: ["inspect-managed-artifact", hintedPath, "--json"],
+    });
+    expect(hinted.exitCode).toBe(0);
+    expect(hinted.json).toMatchObject({
+      normalized_result: {
+        classification: {
+          runtime_family: "modern-dotnet",
+          implementation: "cil-and-ready-to-run",
+          evidence: expect.arrayContaining([
+            expect.objectContaining({
+              code: "ready-to-run-signature-observed",
+            }),
+            expect.objectContaining({ code: "unity-reference-observed" }),
+            expect.objectContaining({ code: "target-framework-observed" }),
+          ]),
+        },
+        target_frameworks: [hintedTarget],
+      },
+    });
+  },
+);
+
+cliTest(
+  "managed CLI qualifies a local nested custom-attribute type name",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-managed-nested-attribute-");
+    const path = join(root, "nested-attribute.dll");
+    await writeFile(
+      path,
+      buildManagedPeFixture({
+        additionalEmptyTypes: 1,
+        customAttributeTypeRaw: (1 << 3) | 2,
+        nestedTypes: [[2, 1]],
+        typeName: "InnerAttribute",
+        typeNamespace: "",
+      }),
+    );
+
+    const result = await cli.run({
+      arguments: ["inspect-managed-artifact", path, "--json"],
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.json).toMatchObject({
+      normalized_result: {
+        attributes: [
+          expect.objectContaining({
+            type_name: "Empty0+InnerAttribute",
+          }),
+        ],
+        coverage: { state: "complete", issues: [] },
+      },
+    });
   },
 );
 
@@ -240,7 +384,8 @@ cliTest(
       arguments: [...argv, "--filter-output", "toString", "--token-count"],
     });
     expect(omittedCount.exitCode).toBe(0);
-    expect(omittedCount.stdout).toBe("0\n");
+    // A missing JSON selection delivers an empty object, which costs one token.
+    expect(omittedCount.stdout).toBe("1\n");
     const jsonl = await cli.run({
       arguments: [
         "inspect-managed-members",
@@ -251,8 +396,15 @@ cliTest(
         "operation",
       ],
     });
-    expect(jsonl.exitCode).toBe(0);
-    expect(jsonl.json).toBe("inspect_managed_members");
+    expect(jsonl.exitCode).toBe(1);
+    expect(jsonl.json).toMatchObject({
+      $rea: "jsonl/v1",
+      type: "error",
+      result: {
+        code: "unreadable_output",
+        remediation: { action: expect.stringContaining("--format json") },
+      },
+    });
   },
 );
 
@@ -452,6 +604,34 @@ cliTest(
           },
         });
       }
+    }
+  },
+);
+
+cliTest(
+  "managed CLI retains target frameworks with multi-byte SerString lengths",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-managed-serstring-");
+    for (const length of [0x80, 0x4000]) {
+      const targetFramework = "A".repeat(length);
+      const path = join(root, `framework-${length}.dll`);
+      await writeFile(path, buildManagedPeFixture({ targetFramework }));
+
+      const result = await cli.run({
+        arguments: ["inspect-managed-artifact", path, "--json"],
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json).toMatchObject({
+        operation: "inspect_managed_artifact",
+        normalized_result: {
+          target_frameworks: [targetFramework],
+          attributes: [
+            expect.objectContaining({ decoded_fixed_string: targetFramework }),
+          ],
+          coverage: { state: "complete", issues: [] },
+        },
+      });
     }
   },
 );

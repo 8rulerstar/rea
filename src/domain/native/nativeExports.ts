@@ -4,6 +4,9 @@ import { absoluteLocalPathStringSchema } from "../localPath.js";
 
 const uint = z.number().int().min(0).max(0xffffffff);
 const address = z.string().regex(/^0x[0-9a-f]+$/u);
+// PE ordinals are the DWORD OrdinalBase plus an index into the DWORD-sized
+// export address table. The last valid index is one less than its entry count.
+const MAX_PE_EXPORT_ORDINAL = 0xffffffff + 0xfffffffe;
 
 /** Hard ceiling on the caller-selected input read budget. */
 export const MAX_INSPECT_NATIVE_EXPORTS_FILE_BYTES = 536870912;
@@ -33,7 +36,7 @@ export type InspectNativeExportsInput = z.infer<
  */
 const peExportSchema = z.strictObject({
   name: z.string().min(1).nullable(),
-  ordinal: z.number().int().min(0).max(0xffff),
+  ordinal: z.number().int().min(0).max(MAX_PE_EXPORT_ORDINAL),
   address: address.nullable(),
   forwarder: z.string().min(1).nullable(),
 });
@@ -46,6 +49,10 @@ const peExportSchema = z.strictObject({
  */
 const elfExportSchema = z.strictObject({
   name: z.string().min(1),
+  /** Exact non-ASCII name bytes; ELF string tables do not declare text encoding. */
+  name_bytes_base64: z.string().nullable().default(null),
+  /** Whether `name` was decoded as UTF-8; null means this field was not recorded in older Evidence. */
+  name_utf8_decodable: z.boolean().nullable().default(null),
   /** `st_value` as stored; on 32-bit ARM, bit 0 of a function marks Thumb code. */
   value: address,
   size: z.string().regex(/^[0-9]+$/u),
@@ -57,6 +64,10 @@ const elfExportSchema = z.strictObject({
     z.strictObject({
       index: z.number().int().min(2).max(0x7fff),
       name: z.string().min(1).nullable(),
+      /** Exact non-ASCII version-name bytes; ELF strings do not declare encoding. */
+      name_bytes_base64: z.string().nullable().default(null),
+      /** Null means older Evidence did not retain version-name encoding facts. */
+      name_utf8_decodable: z.boolean().nullable().default(null),
       hidden: z.boolean(),
     }),
   ]),
@@ -89,39 +100,50 @@ const coverageSchema = z.strictObject({
 });
 
 /** Static export inventory of one PE or ELF image, read without execution. */
-export const nativeExportsSchema = z.discriminatedUnion("format", [
-  z.strictObject({
-    artifact: artifactSchema,
-    format: z.literal("pe"),
-    architecture: z.string().min(1),
-    bits: z.union([z.literal(32), z.literal(64)]),
-    /** Null when the image declares no export directory. */
-    export_directory: z
-      .strictObject({
-        rva: uint,
-        size: uint,
-        dll_name: z.string().nullable(),
-        ordinal_base: uint,
-        timestamp: uint,
-      })
-      .nullable(),
-    exports: z.array(peExportSchema).max(MAX_NATIVE_EXPORT_ROWS),
-    coverage: coverageSchema,
-    issues: z.array(nativeExportIssueSchema),
-    limitations: z.array(z.string().min(1)),
-  }),
-  z.strictObject({
-    artifact: artifactSchema,
-    format: z.literal("elf"),
-    architecture: z.string().min(1),
-    bits: z.union([z.literal(32), z.literal(64)]),
-    byte_order: z.enum(["little", "big"]),
-    exports: z.array(elfExportSchema).max(MAX_NATIVE_EXPORT_ROWS),
-    coverage: coverageSchema,
-    issues: z.array(nativeExportIssueSchema),
-    limitations: z.array(z.string().min(1)),
-  }),
-]);
+export const peNativeExportsSchema = z.strictObject({
+  artifact: artifactSchema,
+  format: z.literal("pe"),
+  architecture: z.string().min(1),
+  bits: z.union([z.literal(32), z.literal(64)]),
+  /** Null when the image declares no export directory. */
+  export_directory: z
+    .strictObject({
+      rva: uint,
+      size: uint,
+      dll_name: z.string().nullable(),
+      ordinal_base: uint,
+      timestamp: uint,
+    })
+    .nullable(),
+  exports: z.array(peExportSchema).max(MAX_NATIVE_EXPORT_ROWS),
+  coverage: coverageSchema,
+  issues: z.array(nativeExportIssueSchema),
+  limitations: z.array(z.string().min(1)),
+});
+
+export const elfNativeExportsSchema = z.strictObject({
+  artifact: artifactSchema,
+  format: z.literal("elf"),
+  architecture: z.string().min(1),
+  bits: z.union([z.literal(32), z.literal(64)]),
+  byte_order: z.enum(["little", "big"]),
+  exports: z.array(elfExportSchema).max(MAX_NATIVE_EXPORT_ROWS),
+  coverage: coverageSchema,
+  issues: z.array(nativeExportIssueSchema),
+  limitations: z.array(z.string().min(1)),
+});
+
+export const nativeExportsSchema = z
+  .discriminatedUnion("format", [peNativeExportsSchema, elfNativeExportsSchema])
+  .superRefine((value, context) => {
+    if (value.coverage.exports !== value.exports.length)
+      context.addIssue({
+        code: "custom",
+        path: ["coverage", "exports"],
+        message:
+          "Export coverage count must equal the retained export row count.",
+      });
+  });
 export type NativeExports = z.infer<typeof nativeExportsSchema>;
 export type PeExport = z.infer<typeof peExportSchema>;
 export type ElfExport = z.infer<typeof elfExportSchema>;

@@ -128,26 +128,48 @@ const accessDeniedError = (
   cause: unknown,
   path: string,
   diagnostics?: Readonly<Record<string, JsonValue>>,
-): AnalysisAccessDeniedError | undefined => {
+  access: "read" | "write" = "read",
+): AnalysisAccessDeniedError | AnalysisOutputError | undefined => {
   const seen = new Set<Error>();
   let current = cause;
   while (current instanceof Error && !seen.has(current)) {
     seen.add(current);
+    if (current instanceof BundleFileHostFailure)
+      access = current.operation === "reading" ? "read" : "write";
     const code = systemCode(current);
     if (code === "EACCES" || code === "EPERM") {
-      const error = new AnalysisAccessDeniedError(
-        ENVIRONMENT_EXPORT_OPERATION,
-        path,
-        code,
-        {
-          cause,
-          ...(diagnostics === undefined ? {} : { diagnostics }),
-          ...(cause instanceof ArtifactReaderFailure &&
-          cause.cleanup !== undefined
-            ? { cleanup: cause.cleanup }
-            : {}),
-        },
-      );
+      const options = {
+        cause,
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+        ...(cause instanceof ArtifactReaderFailure &&
+        cause.cleanup !== undefined
+          ? { cleanup: cause.cleanup }
+          : {}),
+      };
+      const error =
+        access === "read"
+          ? new AnalysisAccessDeniedError(
+              ENVIRONMENT_EXPORT_OPERATION,
+              path,
+              code,
+              options,
+            )
+          : new AnalysisOutputError(
+              ENVIRONMENT_EXPORT_OPERATION,
+              `Host filesystem permissions denied write access: ${path}`,
+              {
+                ...options,
+                userMessage: `Host filesystem permissions denied writing the environment bundle at ${path}.`,
+                remediationAction:
+                  "Check write access or select a writable destination. Inspect the output directory for partial output before retrying; export refuses a non-empty directory.",
+                diagnostics: {
+                  ...diagnostics,
+                  path,
+                  system_code: code,
+                  boundary: "filesystem-write",
+                },
+              },
+            );
       bindArtifactFileCleanup(cause, error);
       return error;
     }
@@ -169,11 +191,6 @@ const hostFailurePath = (cause: unknown): string | undefined => {
     current = current.cause;
   }
   return undefined;
-};
-
-/** Host permission failures retain their typed cause; unexpected failures propagate. */
-const rethrowUnlessDenied = (cause: unknown, path: string): never => {
-  throw accessDeniedError(cause, path) ?? cause;
 };
 
 /** A path that is not a readable regular file, including inline JSON text offered as one. */
@@ -278,7 +295,9 @@ const readInput = async (
           `${path} could not be read as the ${role} file.`,
         ),
       );
-    return rethrowUnlessDenied(cause, path);
+    const denied = accessDeniedError(cause, path);
+    if (denied !== undefined) return err(denied);
+    throw cause;
   }
   let parsed: ReturnType<typeof parseUtf8Json>;
   try {
@@ -354,6 +373,9 @@ export const exportEnvironmentBundle = async (
       cause,
       hostFailurePath(cause) ?? input.directory,
       { output_directory: input.directory },
+      cause instanceof BundleFileHostFailure && cause.operation === "reading"
+        ? "read"
+        : "write",
     );
     if (denied !== undefined) return err(denied);
     if (cause instanceof RegularFileChangedError)

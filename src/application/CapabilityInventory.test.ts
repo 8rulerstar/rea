@@ -1,3 +1,4 @@
+import { pcapCaptureHostSupported } from "../domain/pcap/pcapAnalysis.js";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -412,6 +413,22 @@ describe("compact tool availability", () => {
 });
 
 describe("partial navigation availability", () => {
+  it("requires a target before diagnosing navigation provider modes", () => {
+    expect(entry("get_navigation_context", status())).toMatchObject({
+      available: false,
+      reason: "target_required",
+      default_mode_available: false,
+      modes: [
+        { name: "current_selection", available: false },
+        { name: "explicit_document", available: false },
+      ],
+    });
+    expect(
+      TOOL_CONTRACTS.find((tool) => tool.name === "get_navigation_context"),
+    ).toMatchObject({
+      requiresActiveTarget: true,
+    });
+  });
   it("allows explicit documents when the provider has no current-document getter", () => {
     const capabilities = [
       "current_document",
@@ -813,5 +830,58 @@ describe("host-restricted integrations", () => {
         reason: "available",
       });
     },
+  );
+});
+
+it.each(["darwin", "linux", "win32"])(
+  "distinguishes pcap capture host support from its target-free client probe on %s",
+  (platform) => {
+    const tools = buildCapabilityInventory(
+      { open: false, capabilities: [] },
+      {
+        processCaptureEnabled: true,
+        hostUnsupported: { pcapCapture: !pcapCaptureHostSupported(platform) },
+      },
+    );
+    expect(
+      tools.find(({ name }) => name === "inspect_pcap_client"),
+    ).toMatchObject({ available: true, reason: "available" });
+    expect(
+      tools.find(({ name }) => name === "inspect_pcap_capture"),
+    ).toMatchObject(
+      platform === "darwin"
+        ? {
+            available: false,
+            reason: "unsupported_host",
+            remediation: expect.stringContaining("native memory bound"),
+          }
+        : { available: true, reason: "available" },
+    );
+  },
+);
+
+it("keeps independent native sessions discoverable without an unrelated binary target", () => {
+  const entries = buildCapabilityInventory(status(), enabledPolicy);
+  for (const name of [
+    "list_cutter_sessions",
+    "cutter_command",
+    "start_gdb_session",
+    "gdb_console",
+    "gdb_session_status",
+    "close_gdb_session",
+    "start_rizin_debug_session",
+    "rizin_debug_command",
+    "rizin_debug_session_status",
+    "close_rizin_debug_session",
+    "inspect_with_objdump",
+    "execute_rizin_command",
+  ]) {
+    expect(
+      entries.find((entry) => entry.name === name),
+      name,
+    ).toMatchObject({ available: true });
+  }
+  expect(entries.find((entry) => entry.name === "inspect_macho")).toMatchObject(
+    { available: false, reason: "target_required" },
   );
 });

@@ -1,3 +1,5 @@
+import { deflateSync } from "node:zlib";
+
 const concat = (...parts: Buffer[]): Buffer => Buffer.concat(parts);
 
 const alignTo = (value: number, alignment: number): number =>
@@ -205,6 +207,151 @@ export const elfNoteFixture = (options: ElfNoteImageOptions = {}): Buffer => {
   }
   notes.copy(bytes, noteOff);
   return bytes;
+};
+
+/** A non-allocated SHT_NOTE whose stored bytes include an ELF compression header. */
+export const compressedElfNoteSectionFixture = (
+  bits: 32 | 64 = 64,
+  little = true,
+): Buffer => {
+  const notes = concat(
+    gnuBuildIdNote(undefined, little),
+    gnuAbiTagNote(little),
+  );
+  const header = Buffer.alloc(bits === 64 ? 24 : 12);
+  write32(header, 0, 1, little); // ELFCOMPRESS_ZLIB
+  writeWord(header, bits === 64 ? 8 : 4, notes.length, bits, little);
+  writeWord(header, bits === 64 ? 16 : 8, 4, bits, little);
+  const bytes = elfNoteFixture({
+    bits,
+    little,
+    type: 1,
+    ownership: "section",
+    sectionName: ".debug.notes",
+    alignment: bits === 64 ? 8 : 4,
+    notes: concat(header, deflateSync(notes)),
+  });
+  const noteSection = (bits === 64 ? 64 : 52) + (bits === 64 ? 64 : 40);
+  writeWord(bytes, noteSection + 8, 0x800, bits, little);
+  return bytes;
+};
+
+/** Valid ELF64 section count stored in section header zero per the gABI. */
+export const elfExtendedSectionCountFixture = (): Buffer => {
+  const count = 0xff00;
+  const sectionOffset = 0x200;
+  const noteOffset = 0x100;
+  const namesOffset = 0x180;
+  const note = gnuBuildIdNote("12345678");
+  const names = Buffer.from("\0.note.gnu.build-id\0.shstrtab\0", "latin1");
+  const bytes = Buffer.alloc(sectionOffset + count * 64);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  bytes.writeUInt16LE(1, 16);
+  bytes.writeUInt16LE(62, 18);
+  bytes.writeUInt32LE(1, 20);
+  bytes.writeBigUInt64LE(BigInt(sectionOffset), 40);
+  bytes.writeUInt16LE(64, 52);
+  bytes.writeUInt16LE(56, 54);
+  bytes.writeUInt16LE(64, 58);
+  bytes.writeUInt16LE(0, 60);
+  bytes.writeUInt16LE(2, 62);
+  bytes.writeBigUInt64LE(BigInt(count), sectionOffset + 32);
+
+  const noteSection = sectionOffset + 64;
+  bytes.writeUInt32LE(1, noteSection);
+  bytes.writeUInt32LE(7, noteSection + 4);
+  bytes.writeBigUInt64LE(BigInt(noteOffset), noteSection + 24);
+  bytes.writeBigUInt64LE(BigInt(note.length), noteSection + 32);
+  bytes.writeBigUInt64LE(4n, noteSection + 48);
+
+  const namesSection = sectionOffset + 2 * 64;
+  bytes.writeUInt32LE(20, namesSection);
+  bytes.writeUInt32LE(3, namesSection + 4);
+  bytes.writeBigUInt64LE(BigInt(namesOffset), namesSection + 24);
+  bytes.writeBigUInt64LE(BigInt(names.length), namesSection + 32);
+  bytes.writeBigUInt64LE(1n, namesSection + 48);
+
+  note.copy(bytes, noteOffset);
+  names.copy(bytes, namesOffset);
+  return bytes;
+};
+
+/** ELF note fixture with a zlib-compressed section-name string table. */
+export const compressedElfNoteFixture = (
+  bits: 32 | 64 = 64,
+  little = true,
+  compressionType = 1,
+  sectionName = ".note.gnu.build-id",
+): Buffer => {
+  const image = elfNoteFixture({
+    bits,
+    little,
+    ownership: "section",
+    sectionName,
+  });
+  const wide = bits === 64;
+  const u16 = (offset: number) =>
+    little ? image.readUInt16LE(offset) : image.readUInt16BE(offset);
+  const word = (offset: number) =>
+    wide
+      ? Number(
+          little
+            ? image.readBigUInt64LE(offset)
+            : image.readBigUInt64BE(offset),
+        )
+      : little
+        ? image.readUInt32LE(offset)
+        : image.readUInt32BE(offset);
+  const shoff = word(wide ? 40 : 32);
+  const shentsize = u16(wide ? 58 : 46);
+  const namesIndex = u16(wide ? 62 : 50);
+  const namesHeader = shoff + namesIndex * shentsize;
+  const namesOffset = word(namesHeader + (wide ? 24 : 16));
+  const namesSize = word(namesHeader + (wide ? 32 : 20));
+  const names = image.subarray(namesOffset, namesOffset + namesSize);
+  const compressed = deflateSync(names);
+  const compressionHeaderBytes = wide ? 24 : 12;
+  const replacement = Buffer.alloc(compressionHeaderBytes);
+  if (little) replacement.writeUInt32LE(compressionType, 0);
+  else replacement.writeUInt32BE(compressionType, 0);
+  if (wide) {
+    if (little) {
+      replacement.writeBigUInt64LE(BigInt(names.length), 8);
+      replacement.writeBigUInt64LE(1n, 16);
+    } else {
+      replacement.writeBigUInt64BE(BigInt(names.length), 8);
+      replacement.writeBigUInt64BE(1n, 16);
+    }
+  } else {
+    if (little) {
+      replacement.writeUInt32LE(names.length, 4);
+      replacement.writeUInt32LE(1, 8);
+    } else {
+      replacement.writeUInt32BE(names.length, 4);
+      replacement.writeUInt32BE(1, 8);
+    }
+  }
+  const result = concat(
+    image.subarray(0, namesOffset),
+    replacement,
+    compressed,
+    image.subarray(namesOffset + namesSize),
+  );
+  const writeWord = (offset: number, value: number) => {
+    if (wide) {
+      if (little) result.writeBigUInt64LE(BigInt(value), offset);
+      else result.writeBigUInt64BE(BigInt(value), offset);
+    } else if (little) result.writeUInt32LE(value, offset);
+    else result.writeUInt32BE(value, offset);
+  };
+  const flagsAt = namesHeader + 8;
+  writeWord(flagsAt, word(flagsAt) | 0x800);
+  writeWord(
+    namesHeader + (wide ? 32 : 20),
+    compressionHeaderBytes + compressed.length,
+  );
+  writeWord(namesHeader + (wide ? 48 : 32), 1);
+  return result;
 };
 
 /**

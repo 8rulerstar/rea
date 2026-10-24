@@ -13,20 +13,23 @@ import {
   type ClientConfigurationDocument,
 } from "./ClientConfigurationDocument.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { ConfigurationError } from "../domain/configurationErrors.js";
 import { copyFile, lstat, realpath, rm, rmdir } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { homeDirectoryFromEnvironment } from "../config/homeDirectory.js";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { defaultKunaCacheDirectory } from "../config/kunaCacheDirectory.js";
+import { linuxHopperReleaseCacheDirectory } from "./LinuxHopperCacheDirectory.js";
 
 import { ClientConfigurationPublication } from "./ClientConfigurationPublication.js";
-import { z } from "zod";
+import { parseClientRegistrationLauncher } from "./ClientRegistration.js";
 
 import { PRODUCT_IDENTITY } from "../identity.js";
 import {
   isManagedSkillManifest,
   MANAGED_SKILL_FILES,
   readSkillFile,
-  skillDestinations,
+  skillDestinationSelection,
 } from "./SetupSkill.js";
 import { classifyClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
@@ -312,12 +315,21 @@ export const systemUninstallHost = (
         ),
       ),
     inspectSkill: async () => {
-      for (const destination of skillDestinations(
+      const selection = skillDestinationSelection(
         home,
         undefined,
         environment,
         platform,
-      )) {
+      );
+      if (selection.issues.length > 0)
+        return item(
+          "skill",
+          "failed",
+          selection.issues
+            .map(({ path, detail }) => `${detail} (${path})`)
+            .join(" "),
+        );
+      for (const destination of selection.destinations) {
         const inspected = await inspectManagedSkill(
           destination.path,
           destination.client,
@@ -338,7 +350,7 @@ export const systemUninstallHost = (
         platform,
         skillWriteBlocker,
       ),
-    purgeData: () => purgeManagedData(join(home, ".rea"), fileSystem),
+    purgeData: () => purgeSelectedData(home, environment, platform, fileSystem),
     close: async () => {
       try {
         await configurationOperations.close();
@@ -446,7 +458,8 @@ const readClientConfiguration = async (
       item(
         client.name,
         "failed",
-        cause instanceof ClientConfigurationShapeError
+        cause instanceof ClientConfigurationShapeError ||
+          cause instanceof ConfigurationError
           ? `Configuration was not changed: ${cause.message}. Repair it, then rerun uninstall.`
           : `Configuration is not valid ${client.format === "toml" || client.format === "grok" ? "TOML" : client.format === "opencode" ? "JSONC" : client.format === "hermes" || client.format === "dsh" ? "YAML" : "JSON"} and was not changed. Repair it, then rerun uninstall.`,
       ),
@@ -721,21 +734,9 @@ const resolveUninstallConfigPath = async (
 
 /** Ownership rule for persistent MCP registrations created by REA setup. */
 const isOwnedRegistration = (value: unknown, client: SetupClient): boolean => {
-  if (client.format === "opencode") {
-    const parsed = z
-      .object({ type: z.literal("local"), command: z.array(z.string()).min(1) })
-      .passthrough()
-      .safeParse(value);
-    if (!parsed.success) return false;
-    const command = parsed.data.command;
-    return (
-      classifyClientRegistrationCommand(command, CURRENT_ENTRYPOINT_PATH) ===
-      "owned"
-    );
-  }
-  const parsed = registrationSchema.safeParse(value);
-  if (!parsed.success) return false;
-  const { command, args } = parsed.data;
+  const parsed = parseClientRegistrationLauncher(value, client);
+  if (!parsed.ok) return false;
+  const { command, args } = parsed.value;
   return (
     classifyClientRegistrationCommand(
       [command, ...args],
@@ -744,11 +745,51 @@ const isOwnedRegistration = (value: unknown, client: SetupClient): boolean => {
   );
 };
 
+/** Purge the same default cache namespaces selected by their producers. */
+const purgeSelectedData = async (
+  home: string,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  platform: NodeJS.Platform,
+  fileSystem: UninstallFileSystem,
+): Promise<readonly UninstallItem[]> => {
+  const items = [
+    ...(await purgeManagedData(join(home, ".rea"), fileSystem, [
+      "cache",
+      "state",
+    ])),
+  ];
+  const directories: string[] = [];
+  if (platform === "darwin" || platform === "linux") {
+    directories.push(defaultKunaCacheDirectory(home, environment, platform));
+    const custom = environment.REA_KUNA_CACHE_DIR;
+    if (custom !== undefined && custom !== directories[0])
+      items.push(
+        item(
+          "kuna-custom-cache",
+          "retained",
+          `Caller-selected Kuna cache ${custom} was retained because purge does not establish ownership of that entire directory.`,
+        ),
+      );
+  }
+  if (platform === "linux") {
+    const hopper = linuxHopperReleaseCacheDirectory(environment, home);
+    if (hopper.ok) directories.push(hopper.value);
+    else items.push(item("hopper-releases", "failed", hopper.error.message));
+  }
+  for (const directory of directories)
+    items.push(
+      ...(await purgeManagedData(dirname(directory), fileSystem, [
+        basename(directory),
+      ])),
+    );
+  return items;
+};
+
 const purgeManagedData = async (
   root: string,
   fileSystem: UninstallFileSystem,
+  names: readonly string[],
 ): Promise<readonly UninstallItem[]> => {
-  const names = ["cache", "state"];
   try {
     const stats = await fileSystem.stat(root);
     const linked = stats.isSymbolicLink();
@@ -810,16 +851,24 @@ const removeManagedSkills = async (
   platform: NodeJS.Platform,
   writeBlocker?: (path: string) => string | undefined,
 ): Promise<UninstallItem> => {
+  const selection = skillDestinationSelection(
+    home,
+    undefined,
+    environment,
+    platform,
+  );
+  if (selection.issues.length > 0)
+    return item(
+      "skill",
+      "failed",
+      selection.issues
+        .map(({ path, detail }) => `${detail} (${path})`)
+        .join(" "),
+    );
   // Every destination shares one summary item; preserve both client and path.
   const results = await Promise.all(
-    skillDestinations(home, undefined, environment, platform).map(
-      ({ client, path }) =>
-        removeManagedSkill(
-          path,
-          `${client} (${path})`,
-          fileSystem,
-          writeBlocker,
-        ),
+    selection.destinations.map(({ client, path }) =>
+      removeManagedSkill(path, `${client} (${path})`, fileSystem, writeBlocker),
     ),
   );
   const failed = results.find(({ status }) => status === "failed");
@@ -1122,8 +1171,5 @@ const uninstallStatusPriority = (status: UninstallItem["status"]): number => {
     }
   }
 };
-const registrationSchema = z
-  .object({ command: z.string(), args: z.array(z.string()) })
-  .passthrough();
 const isMissing = (cause: unknown): boolean =>
   cause instanceof Error && "code" in cause && cause.code === "ENOENT";

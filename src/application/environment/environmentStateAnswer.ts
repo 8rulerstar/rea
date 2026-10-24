@@ -1,4 +1,7 @@
-import { environmentToolArguments } from "./environmentTools.js";
+import {
+  environmentToolArguments,
+  hasRepeatedQueryArgument,
+} from "./environmentTools.js";
 import { stateBodyJson } from "../../domain/analysisView/EnvironmentStateAccumulator.js";
 import {
   collectionMatch,
@@ -32,12 +35,14 @@ import {
   AnalysisInputError,
   AnalysisResourceConstraintError,
 } from "../../domain/analysisErrorCore.js";
+import { jsonByteLength } from "../../domain/jsonSerialization.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import {
   replayAnswer,
   replayEnvironmentTool,
   selectReplayExchange,
+  type ObservedQuery,
   type ReplayArguments,
   type ReplayResult,
 } from "./environmentReplay.js";
@@ -64,6 +69,7 @@ export type StateProvenance =
       readonly reason:
         | RecordedViewReason
         | "no-view"
+        | "query-multiplicity"
         | "unrecorded-request"
         | "page-exceeded"
         | "projection";
@@ -140,8 +146,9 @@ const fromRecording = (
   tool: EnvironmentManifestTool,
   args: ReplayArguments,
   reason: Extract<StateProvenance, { source: "recording" }>["reason"],
+  observedQuery?: ObservedQuery,
 ): Result<StateAnswer, AnalysisError> => {
-  const replayed = replayEnvironmentTool(source, tool, args);
+  const replayed = replayEnvironmentTool(source, tool, args, observedQuery);
   return replayed.ok
     ? ok({ ...replayed.value, state: { source: "recording", reason } })
     : replayed;
@@ -171,7 +178,7 @@ export const stateAnswer = (
   body: JsonValue,
   state: StateProvenance,
 ): Result<StateAnswer, AnalysisError> => {
-  const bytes = Buffer.byteLength(JSON.stringify(body), "utf8");
+  const bytes = jsonByteLength(body);
   if (bytes > REPLAY_BODY_LIMIT_BYTES)
     return err(
       new AnalysisResourceConstraintError(
@@ -294,6 +301,7 @@ const answerItem = (
   tool: EnvironmentManifestTool,
   view: StateItemView,
   args: ReplayArguments,
+  observedQuery?: ObservedQuery,
 ): Result<StateAnswer, AnalysisError> => {
   const { source, store } = serving;
   const call = itemCall(tool, args);
@@ -308,7 +316,7 @@ const answerItem = (
     });
   // A projection of an entity the state holds replays as the capture's projected reads did.
   if (asksProjection(view, tool, args))
-    return fromRecording(source, tool, args, "projection");
+    return fromRecording(source, tool, args, "projection", observedQuery);
   const shown = shownEntity(
     tool,
     view,
@@ -323,8 +331,12 @@ const answerItem = (
       refused(tool, `Tool ${tool.name} has no usable recorded envelope.`),
     );
   const exact =
-    selectReplayExchange(tool, new Map([[base.ordinal, base]]), args)?.exact ===
-    true;
+    selectReplayExchange(
+      tool,
+      new Map([[base.ordinal, base]]),
+      args,
+      observedQuery,
+    )?.exact === true;
   return stateAnswer(
     serving,
     { exchange: base, exact },
@@ -475,21 +487,34 @@ const answerCheckedLine = (
   tool: EnvironmentManifestTool,
   view: StateListView | StateDocumentView,
   args: ReplayArguments,
+  observedQuery?: ObservedQuery,
 ): Result<StateAnswer, AnalysisError> => {
   const named = checkedLine(
     serving.source,
     tool,
     view.checked_record_ordinals,
     args,
+    observedQuery,
   );
   const base =
     named ??
     (view.shape === "list"
-      ? (unfilteredLine(serving.source, tool, allLines(view), args) ??
-        queryLine(serving.source, tool, view, args))
+      ? (unfilteredLine(
+          serving.source,
+          tool,
+          allLines(view),
+          args,
+          observedQuery,
+        ) ?? queryLine(serving.source, tool, view, args, observedQuery))
       : undefined);
   if (base === undefined)
-    return fromRecording(serving.source, tool, args, "unrecorded-request");
+    return fromRecording(
+      serving.source,
+      tool,
+      args,
+      "unrecorded-request",
+      observedQuery,
+    );
   // An unfiltered call answers on a line it did not name, so its replay match is not exact.
   return view.shape === "list"
     ? answerList(
@@ -506,17 +531,32 @@ export const answerFromState = (
   serving: StateServing,
   tool: EnvironmentManifestTool,
   args: ReplayArguments,
+  observedQuery?: ObservedQuery,
 ): Result<StateAnswer, AnalysisError> => {
+  if (hasRepeatedQueryArgument(tool, args))
+    return fromRecording(
+      serving.source,
+      tool,
+      args,
+      "query-multiplicity",
+      observedQuery,
+    );
   const view = serving.store.state.views.get(tool.name);
   if (view === undefined)
-    return fromRecording(serving.source, tool, args, "no-view");
+    return fromRecording(serving.source, tool, args, "no-view", observedQuery);
   switch (view.shape) {
     case "recorded":
-      return fromRecording(serving.source, tool, args, view.reason);
+      return fromRecording(
+        serving.source,
+        tool,
+        args,
+        view.reason,
+        observedQuery,
+      );
     case "item":
-      return answerItem(serving, tool, view, args);
+      return answerItem(serving, tool, view, args, observedQuery);
     case "list":
     case "document":
-      return answerCheckedLine(serving, tool, view, args);
+      return answerCheckedLine(serving, tool, view, args, observedQuery);
   }
 };

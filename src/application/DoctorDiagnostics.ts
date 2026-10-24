@@ -1,18 +1,10 @@
 import {
   SUPPORTED_NODE_VERSION_PROSE,
-  supportsNodeVersion,
+  supportsJavaScriptRuntime,
 } from "../domain/runtimeVersion.js";
 import { providerStartupTimeoutSchema } from "../config/providerStartupTimeout.js";
-import {
-  LINUX_HOPPER_SETUP_HOSTS,
-  linuxHopperLauncherCandidates,
-  systemLinuxHopperLauncherCandidates,
-  supportsReaHost,
-} from "./LinuxHopper.js";
-import {
-  MAC_HOPPER_SYSTEM_LAUNCHER,
-  macHopperCanonicalLauncherCandidates,
-} from "./MacHopperPaths.js";
+import { hopperLauncherDiscovery } from "./HopperLauncherDiscovery.js";
+import { LINUX_HOPPER_SETUP_HOSTS, supportsReaHost } from "./LinuxHopper.js";
 import type {
   DoctorCheck,
   DoctorHost,
@@ -102,7 +94,7 @@ export const doctorHealthy = (
   );
 };
 
-/** Bun passes when its reported Node.js compatibility version is supported. */
+/** Runtime support follows the shared rule, which judges Bun by its Node.js compatibility. */
 const nodeCheck = ({ runtime }: DoctorHost): DoctorCheck => {
   const failure = {
     remediation: `Install ${SUPPORTED_NODE_VERSION_PROSE}.`,
@@ -112,7 +104,7 @@ const nodeCheck = ({ runtime }: DoctorHost): DoctorCheck => {
     return {
       ...check(
         "node",
-        supportsNodeVersion(runtime.version),
+        supportsJavaScriptRuntime(runtime),
         runtime.version,
         failure,
       ),
@@ -121,7 +113,7 @@ const nodeCheck = ({ runtime }: DoctorHost): DoctorCheck => {
   return {
     ...check(
       "node",
-      supportsNodeVersion(runtime.nodeCompatibilityVersion),
+      supportsJavaScriptRuntime(runtime),
       `Bun ${runtime.version} (Node.js ${runtime.nodeCompatibilityVersion} compatibility)`,
       failure,
     ),
@@ -154,26 +146,14 @@ const hostCheck = async (host: DoctorHost): Promise<DoctorCheck> => {
 };
 
 const findHopper = async (host: DoctorHost): Promise<string | undefined> => {
-  const candidates =
-    host.configuredHopperPath === undefined
-      ? [
-          ...(host.platform === "darwin"
-            ? macHopperCanonicalLauncherCandidates(host.homeDirectory)
-            : [MAC_HOPPER_SYSTEM_LAUNCHER]),
-          ...(host.platform === "linux"
-            ? linuxHopperLauncherCandidates(host.homeDirectory)
-            : [...systemLinuxHopperLauncherCandidates]),
-          ...(host.platform === "darwin"
-            ? []
-            : macHopperCanonicalLauncherCandidates(host.homeDirectory).slice(
-                1,
-              )),
-          ...(await host.manualHopperPaths()),
-        ]
-      : [host.configuredHopperPath];
-  const hopperPath = await firstExecutable(host, candidates);
-  if (hopperPath !== undefined || host.configuredHopperPath !== undefined)
-    return hopperPath;
+  if (host.configuredHopperPath !== undefined)
+    return firstExecutable(host, [host.configuredHopperPath]);
+  const discovery = hopperLauncherDiscovery(host.platform, host.homeDirectory);
+  const fixed = await firstExecutable(host, discovery.candidates);
+  if (fixed !== undefined || !discovery.probesMacApplicationBundles)
+    return fixed;
+  const renamed = await firstExecutable(host, await host.manualHopperPaths());
+  if (renamed !== undefined) return renamed;
   const brewCandidate = await host.brewHopperPath();
   return firstExecutable(
     host,

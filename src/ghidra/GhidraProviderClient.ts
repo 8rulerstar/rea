@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
-import { artifactFilePrimaryFailure } from "../artifacts/ArtifactFileOperation.js";
+import { artifactFilePrimaryFacts } from "../artifacts/ArtifactFileOperation.js";
 import { fileURLToPath } from "node:url";
 import { GHIDRA_BRIDGE_SOURCES } from "./GhidraBridgeSources.js";
 
@@ -386,6 +386,9 @@ export const createGhidraProviderClient = (input: {
       ...(config.ghidraDisabledAnalyzers === undefined
         ? {}
         : { disabledAnalyzers: config.ghidraDisabledAnalyzers }),
+      ...(config.ghidraDecompileTimeoutSeconds === undefined
+        ? {}
+        : { decompileTimeoutSeconds: config.ghidraDecompileTimeoutSeconds }),
       ...(seeds === undefined ? {} : { analysisSeeds: seeds }),
       platform: installation.platform,
       ...(extensions.length === 0 ? {} : { analysisExtensions: extensions }),
@@ -494,7 +497,7 @@ export const createGhidraProviderClient = (input: {
           extensionFailure,
           closed.error,
           operation,
-        );
+        ).bindCleanupDependencies([extensionFailure, closed.error]);
   };
   const startSession = async (
     operation: AnalysisOperation,
@@ -506,7 +509,7 @@ export const createGhidraProviderClient = (input: {
         projectSessionError(
           operation,
           started.error,
-          config.ghidraStartupTimeoutMs,
+          config,
           lostProviderHealth(),
         ),
       );
@@ -532,13 +535,10 @@ export const createGhidraProviderClient = (input: {
     target.format === "pe"
       ? new GhidraNativeAotSnapshotOwner({
           targetSha256: target.sha256,
+          targetPath: target.path,
           readSnapshot: client.readTargetSnapshot?.bind(client),
           projectFailure: (operation, failure) =>
-            projectSessionError(
-              operation,
-              failure,
-              config.ghidraStartupTimeoutMs,
-            ),
+            projectSessionError(operation, failure, config),
         })
       : undefined;
   const projectExecution = (
@@ -565,7 +565,7 @@ export const createGhidraProviderClient = (input: {
         projectSessionError(
           operation,
           called.error,
-          config.ghidraStartupTimeoutMs,
+          config,
           lostProviderHealth(),
         ),
       );
@@ -605,12 +605,7 @@ export const createGhidraProviderClient = (input: {
       measured: observed,
       client,
       mapSessionError: (failure) =>
-        projectSessionError(
-          operation,
-          failure,
-          config.ghidraStartupTimeoutMs,
-          lostProviderHealth(),
-        ),
+        projectSessionError(operation, failure, config, lostProviderHealth()),
       nativeAotResult: derived,
       signal,
     });
@@ -677,7 +672,7 @@ export const createGhidraProviderClient = (input: {
           projectSessionError(
             operation,
             called.error,
-            config.ghidraStartupTimeoutMs,
+            config,
             lostProviderHealth(),
           ),
         );
@@ -709,7 +704,7 @@ export const createGhidraProviderClient = (input: {
                 projectSessionError(
                   operation,
                   started.error,
-                  config.ghidraStartupTimeoutMs,
+                  config,
                   lostProviderHealth(),
                 ),
               );
@@ -858,16 +853,22 @@ const ghidraClientPrerequisites = (
   });
 };
 
+/** Configured deadlines that Ghidra failure projections name. */
+type GhidraProjectionLimits = Pick<
+  AppConfig,
+  "ghidraStartupTimeoutMs" | "ghidraDecompileTimeoutSeconds"
+>;
+
 const projectSessionError = (
   operation: AnalysisOperation,
   failure: GhidraSessionError,
-  startupTimeoutMs: number,
+  limits: GhidraProjectionLimits,
   health?: ProviderOperationHealth,
 ): AnalysisError => {
   const primary = projectPrimarySessionError(
     operation,
     failure,
-    startupTimeoutMs,
+    limits,
     health,
   );
   return failure.cleanupFailure === undefined
@@ -882,9 +883,10 @@ const projectSessionError = (
 const projectPrimarySessionError = (
   operation: AnalysisOperation,
   failure: GhidraSessionError,
-  startupTimeoutMs: number,
+  limits: GhidraProjectionLimits,
   health?: ProviderOperationHealth,
 ): AnalysisError => {
+  const startupTimeoutMs = limits.ghidraStartupTimeoutMs;
   const context = {
     cause: failure,
     diagnostics: failure.diagnostics,
@@ -892,15 +894,23 @@ const projectPrimarySessionError = (
       ? {}
       : { partialObservation: failure.partialObservation }),
   };
-  const physicalCause = artifactFilePrimaryFailure(failure.cause);
-  if (physicalCause instanceof AnalysisAccessDeniedError)
+  const { cause: physicalCause, origin } = artifactFilePrimaryFacts(
+    failure.cause,
+  );
+  if (
+    origin === "owned-or-classified" &&
+    physicalCause instanceof AnalysisAccessDeniedError
+  )
     return new AnalysisAccessDeniedError(
       operation,
       physicalCause.path,
       physicalCause.systemCode,
       context,
     );
-  if (physicalCause instanceof AnalysisArtifactChangedError)
+  if (
+    origin === "owned-or-classified" &&
+    physicalCause instanceof AnalysisArtifactChangedError
+  )
     return new AnalysisArtifactChangedError(
       operation,
       physicalCause.path,
@@ -929,10 +939,34 @@ const projectPrimarySessionError = (
   if (failure.kind === "remote" && failure.remoteCode === "decompile_failed")
     return new ProviderAdapterError("ghidra", operation, {
       ...context,
-      userMessage: `${failure.message.trim().replace(/\.$/u, "")}. Only the decompiler failed for this procedure; the Ghidra session remains usable.`,
+      userMessage: `${failure.message.trim().replace(/\.$/u, "")}. ${ghidraSessionContinuationMessage(
+        failure,
+        "Only the decompiler failed for this procedure; the Ghidra session remains usable.",
+      )}`,
       remediationAction:
         "Call analyze_function (CLI: `rea function`) for the same procedure. It returns assembly, callers, callees, references and basic blocks from the Ghidra listing and records this decompiler failure under facet_availability.pseudocode. Repeating the unchanged decompile request is not expected to succeed.",
     });
+  // A request-level deadline, not a provider failure: other operations stay
+  // available. Only promise session reuse when no caller cancellation closed
+  // the session while the timeout settled.
+  if (
+    failure.kind === "remote" &&
+    failure.remoteCode === "decompile_timed_out" &&
+    limits.ghidraDecompileTimeoutSeconds !== undefined
+  )
+    return new AnalysisTimeoutError(
+      operation,
+      limits.ghidraDecompileTimeoutSeconds * 1000,
+      {
+        ...context,
+        userMessage: `${failure.message.trim().replace(/\.$/u, "")}. ${ghidraSessionContinuationMessage(
+          failure,
+          "Only this procedure's decompilation was stopped; the Ghidra session remains usable.",
+        )}`,
+        remediationAction:
+          "Use analyze_function (CLI: `rea function`) for listing facts. Raise REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS and restart REA. Set the MCP tool-call deadline to cover startup and the full call; earlier cancellation closes the session. `rea setup` estimates deadlines for new Codex/Kimi registrations and preserves existing positive values; edit existing deadlines yourself.",
+      },
+    );
   if (failure.kind === "analysis_timeout")
     return new AnalysisTimeoutError(
       operation,
@@ -946,12 +980,15 @@ const projectPrimarySessionError = (
     return new AnalysisResourceConstraintError(
       operation,
       "memory",
-      failure.message,
+      `${failure.message.trim().replace(/\.$/u, "")}. ${ghidraSessionContinuationMessage(
+        failure,
+        "The active analysis session and annotations remain available.",
+      )}`,
       null,
       {
         ...context,
         remediationAction:
-          "Retry this search in literal mode or simplify the regex. The active analysis session and annotations remain available.",
+          "Retry this search in literal mode or simplify the regex.",
       },
     );
   if (
@@ -988,6 +1025,11 @@ const projectPrimarySessionError = (
       ? "Ghidra's output for this operation is incomplete. No OutOfMemoryError was confirmed; a memory cause cannot be ruled out."
       : undefined;
   if (memoryFailure !== undefined) return memoryFailure;
+  const killed = projectSigkill(operation, failure, context, {
+    restart: exitedProviderMessage(operation, failure, health),
+    uncertainty,
+  });
+  if (killed !== undefined) return killed;
   if (failure.kind === "timeout") {
     const timeoutMs = failure.timeoutMs ?? startupTimeoutMs;
     const guidance =
@@ -1116,6 +1158,89 @@ const projectObservedJvmMemoryFailure = (
         : {}),
     },
   );
+};
+
+/** Interpret the queue's observed cancellation and cleanup outcome once. */
+const ghidraSessionContinuationMessage = (
+  failure: GhidraSessionError,
+  healthyMessage: string,
+): string => {
+  if (failure.concurrentCancellation === undefined) return healthyMessage;
+  return failure.cleanupFailure === undefined
+    ? "The request was also cancelled before the failure settled, so REA closed the Ghidra session; the next request starts a new session and repeats import and analysis."
+    : "The request was also cancelled, and Ghidra session shutdown left cleanup unconfirmed. Close the target to retry retained cleanup before starting another Ghidra session.";
+};
+
+const memoryCgroupSchema = z.object({
+  path: z.string(),
+  oom_kill_before: z.number().int().nonnegative(),
+  oom_kill_after: z.number().int().nonnegative(),
+  memory_max: z
+    .union([z.number().int().nonnegative(), z.literal("max")])
+    .nullable(),
+});
+
+const GHIDRA_PROCESS_TREE_MEMORY_ACTION =
+  "A memory limit covers Ghidra's native decompiler processes as well as its Java heap, and their number follows the available CPUs, so a larger GHIDRA_HEADLESS_MAXMEM does not help. Raise the container or host memory limit, or allow fewer CPUs with a longer REA_GHIDRA_STARTUP_TIMEOUT_MS.";
+
+/**
+ * Own SIGKILL interpretation for startup and running-provider failures.
+ * The signal alone leaves its cause unknown. For process/protocol failures
+ * observed before REA requested a stop, a rising cgroup oom_kill count supplies
+ * separate memory evidence. That count covers the cgroup and its child groups,
+ * not only REA's process tree.
+ */
+const projectSigkill = (
+  operation: AnalysisOperation,
+  failure: GhidraSessionError,
+  context: {
+    readonly cause: GhidraSessionError;
+    readonly diagnostics: Readonly<Record<string, JsonValue>>;
+  },
+  guidance: {
+    readonly restart: string | undefined;
+    readonly uncertainty: string | undefined;
+  },
+): AnalysisError | undefined => {
+  if (
+    (failure.kind !== "start" &&
+      failure.kind !== "process" &&
+      failure.kind !== "protocol") ||
+    failure.diagnostics.exit_signal !== "SIGKILL"
+  )
+    return undefined;
+  const retry = guidance.restart ?? "Then retry.";
+  const cgroup = memoryCgroupSchema.safeParse(
+    failure.diagnostics.memory_cgroup,
+  );
+  if (
+    (failure.kind === "process" || failure.kind === "protocol") &&
+    failure.diagnostics.stop_requested === false &&
+    cgroup.success &&
+    cgroup.data.oom_kill_after > cgroup.data.oom_kill_before
+  ) {
+    const configuredHeap = failure.diagnostics.configured_jvm_max_heap;
+    return new AnalysisResourceConstraintError(
+      operation,
+      "memory",
+      `Ghidra was killed by SIGKILL while the oom_kill count of REA's cgroup ${cgroup.data.path} rose from ${String(cgroup.data.oom_kill_before)} to ${String(cgroup.data.oom_kill_after)}, so the kernel OOM killer ended a process in that cgroup or one of its child groups. The Java heap need not have been full.`,
+      {
+        cgroup_memory_max: cgroup.data.memory_max,
+        configured_jvm_max_heap:
+          typeof configuredHeap === "string" ? configuredHeap : null,
+      },
+      {
+        ...context,
+        remediationAction: `${GHIDRA_PROCESS_TREE_MEMORY_ACTION} ${retry}`,
+      },
+    );
+  }
+  return new ProviderAdapterError("ghidra", operation, {
+    ...context,
+    userMessage: `Ghidra process diagnostics report termination by SIGKILL. The signal alone does not establish its cause or an out-of-memory failure.${guidance.uncertainty === undefined ? "" : ` ${guidance.uncertainty}`}`,
+    remediationAction:
+      "Review the retained process output and host or container termination records before choosing a resource-specific remedy. Export useful Evidence, close the binary and resolve any cleanup failure, then call open_binary for the same target to start a new Ghidra session. Session-only annotations are not retained.",
+  });
 };
 
 /** Name the settings that change Ghidra's import-and-analysis startup deadline. */

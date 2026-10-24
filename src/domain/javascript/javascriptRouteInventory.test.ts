@@ -20,11 +20,51 @@ const source = (
   status: "complete",
   reason: null,
   facts: analyzeJavaScriptStaticSource(text).routes!,
+  ...(url === null && key.startsWith("app/")
+    ? {
+        next_app_context: {
+          kind: "app-directory" as const,
+          directory: "app",
+          package: {
+            path: "package.json",
+            sha256: "b".repeat(64),
+            container_sha256: "c".repeat(64),
+          },
+        },
+      }
+    : {}),
 });
 const build = (inputs: JavaScriptRouteInventoryInput[], bytes?: number) =>
   javaScriptRouteInventorySchema.parse(
     completeSemanticSteps(buildJavaScriptRouteInventorySteps(inputs, bytes)),
   );
+
+it("does not promote page-shaped paths without source-router applicability", () => {
+  const unknown = source("app/page.js", "");
+  delete (unknown as { next_app_context?: unknown }).next_app_context;
+  const result = build([unknown]);
+  expect(result.routes).toEqual([]);
+  expect(result.unknowns).toMatchObject([
+    { kind: "interpretation", reason: expect.stringContaining("not measured") },
+  ]);
+});
+
+it("binds source identity to the package evidence establishing router applicability", () => {
+  const first = source("app/page.js", "");
+  const context = first.next_app_context;
+  if (context?.kind !== "app-directory")
+    throw new Error("Expected declared fixture context");
+  const second = {
+    ...first,
+    next_app_context: {
+      ...context,
+      package: { ...context.package, sha256: "d".repeat(64) },
+    },
+  };
+  expect(build([first]).sources[0]!.id).not.toBe(
+    build([second]).sources[0]!.id,
+  );
+});
 
 it("coalesces exact patterns while retaining independent occurrences and stable identities", () => {
   const inputs = [
@@ -41,9 +81,35 @@ it("coalesces exact patterns while retaining independent occurrences and stable 
     "/reports/settings",
   ]);
   expect(result.routes[0]).toMatchObject({
-    occurrence_count: 3,
+    occurrence_count: 2,
     source_count: 2,
   });
+  const reportOccurrences = result.occurrences.filter(
+    ({ route_id }) => route_id === result.routes[0]!.id,
+  );
+  expect(
+    reportOccurrences
+      .map(({ source_id, mechanism, segments }) => ({
+        source: result.sources.find(({ id }) => id === source_id)?.key,
+        mechanism,
+        segments: segments.map(({ value }) => value),
+      }))
+      .sort((left, right) => left.source!.localeCompare(right.source!)),
+  ).toEqual([
+    {
+      source: "one.js",
+      mechanism: "navigation-target",
+      segments: ["/reports"],
+    },
+    {
+      source: "two.js",
+      mechanism: "nested-route-object",
+      segments: ["/reports"],
+    },
+  ]);
+  expect(new Set(result.occurrences.map(({ id }) => id)).size).toBe(
+    result.occurrences.length,
+  );
   expect(result.routes.map(({ id }) => id)).toEqual(
     repeated.routes.map(({ id }) => id),
   );

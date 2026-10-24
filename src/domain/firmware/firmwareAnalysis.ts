@@ -108,7 +108,7 @@ const chunk = z.strictObject({
   handler: z.string().nullable(),
   encrypted: z.boolean().nullable(),
   root_file_range: range.nullable(),
-  /** The producer reported extraction problems for this chunk. */
+  /** The producer reported an extraction error or missing dependency for this chunk. */
   extraction_failed: z.boolean(),
 });
 /** One unextracted region or failing task/stage, with a supported continuation
@@ -117,6 +117,7 @@ export const extractionGap = z.strictObject({
   kind: z.enum([
     "missing-extractor-dependency",
     "unknown-chunk-handler",
+    "unclassified-range",
     "encrypted-chunk",
     "depth-limited",
     "extractor-failure",
@@ -171,6 +172,8 @@ export const firmwareResultSchemas = {
     coverage: z.enum(["complete", "partial"]),
     files: z.array(
       z.strictObject({
+        // Producer-relative identity retains source spelling; `path` identifies
+        // the actual published file after destination name normalization.
         relative_path: z.string(),
         path: z.string(),
         size: bytes,
@@ -209,6 +212,3 @@ export const firmwareResultSchemas = {
     published_bytes: bytes,
   }),
 } as const;
-
-export * from "./hardwareMemoryMap.js";
-export * from "./hardwarePeripheralAttribution.js";

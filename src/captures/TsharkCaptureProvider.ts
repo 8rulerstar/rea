@@ -28,6 +28,7 @@ import type { PacketCapturePort } from "../application/captures/PacketCaptureSer
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactAnalysisResources,
+  artifactCommandOutput,
   type ArtifactAnalysisRuntime,
 } from "../process/ArtifactAnalysisResources.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
@@ -36,19 +37,14 @@ import {
   type AnalysisCapturedOutput,
 } from "../domain/analysisErrorBase.js";
 import {
-  AnalysisAccessDeniedError,
   AnalysisArtifactChangedError,
   AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
-  AnalysisInputError,
   AnalysisOutputError,
   AnalysisResourceConstraintError,
 } from "../domain/analysisErrorCore.js";
 import { createEvidence } from "../domain/evidence.js";
-import {
-  fixedAllowanceOptions,
-  fixedProducerInputAllowance,
-} from "../domain/fixedAllowanceRemediation.js";
+import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import {
   type InspectPacketCaptureInput,
@@ -136,12 +132,8 @@ export class TsharkCaptureProvider implements PacketCapturePort {
     // TShark 4.6.9 emits a 22.3 MB glossary; keep capture output capped at 4 MiB.
     const limits =
       "path" in input ? LIMITS : { ...LIMITS, output_bytes: 32 * 1024 * 1024 };
-    let phase:
-      | "configuration"
-      | "artifact"
-      | "workspace"
-      | "producer"
-      | "integrity" = "configuration";
+    let phase: "configuration" | "workspace" | "producer" | "integrity" =
+      "configuration";
     let capturedOutput: AnalysisCapturedOutput | undefined;
     let resourcePath = "path" in input ? input.path : "TShark field glossary";
     let effectiveLimits: LinuxResourceLimits | undefined;
@@ -216,30 +208,13 @@ export class TsharkCaptureProvider implements PacketCapturePort {
             ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
           },
         );
-        capturedOutput = {
-          stdout: output.stdout.text,
-          stderr: output.stderr.text,
-          truncated: output.diagnosticTruncated ?? false,
-          exit_code: output.exitCode ?? null,
-          signal: output.signal ?? null,
-        };
-        // Finish bounded integrity checks after output; service handles late cancellation with Evidence.
-        const previousPhase = phase;
-        phase = "integrity";
-        resourcePath = command;
-        const current = await this.#resources.read(command, 64 * 1024 * 1024);
-        resourcePath = limiter;
-        const currentLimiter = await this.#resources.read(
-          limiter,
-          64 * 1024 * 1024,
+        capturedOutput = artifactCommandOutput(output);
+        const current = await this.#resources.readCommandAfterRun(
+          command,
+          { path: limiter, sha256: limiterIdentity.sha256 },
+          capturedOutput,
+          operation,
         );
-        if (currentLimiter.sha256 !== limiterIdentity.sha256)
-          throw new AnalysisArtifactChangedError(
-            operation,
-            limiter,
-            "Configured resource limiter changed during analysis.",
-            { capturedOutput },
-          );
         assertWiresharkExecutableIdentity(
           operation,
           command,
@@ -247,7 +222,6 @@ export class TsharkCaptureProvider implements PacketCapturePort {
           wiresharkExecutableIdentity(current),
           { capturedOutput },
         );
-        phase = previousPhase;
         resourcePath = "path" in input ? input.path : command;
         if (output.exitCode !== 0)
           throw new ProviderAdapterError(
@@ -315,12 +289,13 @@ export class TsharkCaptureProvider implements PacketCapturePort {
           }),
         );
       } else {
-        phase = "artifact";
-        const selected = await this.#resources.read(
-          input.path,
-          LIMITS.input_bytes,
-          options?.signal,
-        );
+        const selected = await this.#resources.readSelectedArtifact({
+          path: input.path,
+          maximumBytes: LIMITS.input_bytes,
+          allowanceName: "the fixed packet-capture input allowance",
+          observedOutput: capturedOutput,
+          signal: options?.signal,
+        });
         phase = "workspace";
         await writeFile(snapshotPath, selected.bytes, {
           flag: "wx",
@@ -362,10 +337,9 @@ export class TsharkCaptureProvider implements PacketCapturePort {
           );
         phase = "producer";
         resourcePath = "path" in input ? input.path : command;
-        const matchingPackets = parsePacketOutput(
-          output.stdout.text,
-          input.fields,
-        );
+        // TShark resolves `-e` aliases before emitting canonical field names;
+        // the command arguments, not output names, own field selection.
+        const matchingPackets = parsePacketOutput(output.stdout.text);
         const start = Math.min(input.match_offset, matchingPackets.length);
         const end =
           input.match_limit === null
@@ -446,12 +420,7 @@ export class TsharkCaptureProvider implements PacketCapturePort {
   }
   #failure(
     cause: unknown,
-    phase:
-      | "configuration"
-      | "artifact"
-      | "workspace"
-      | "producer"
-      | "integrity",
+    phase: "configuration" | "workspace" | "producer" | "integrity",
     path: string,
     workspacePath: string | null,
     effectiveLimits: LinuxResourceLimits | undefined,
@@ -519,28 +488,13 @@ export class TsharkCaptureProvider implements PacketCapturePort {
         cause,
         workspacePath,
       );
-    if (phase === "integrity") {
-      const detail = {
+    if (phase === "integrity")
+      return this.#resources.integrityFailure(
         cause,
-        ...(observedOutput === undefined
-          ? {}
-          : { capturedOutput: observedOutput }),
-      };
-      if (
-        cause instanceof ArtifactReaderFailure &&
-        ["limit", "integrity", "path"].includes(cause.reason)
-      )
-        return new AnalysisArtifactChangedError(
-          operation,
-          path,
-          `Post-run identity verification failed for ${path}: ${reason}`,
-          detail,
-        );
-      return new ProviderAdapterError(TSHARK_PROVIDER_IDENTITY.id, operation, {
-        ...detail,
-        diagnostics: { stage: "integrity", resource_path: path, reason },
-      });
-    }
+        path,
+        observedOutput,
+        operation,
+      );
     if (phase === "configuration")
       return new AnalysisCapabilityUnavailableError(
         TSHARK_PROVIDER_IDENTITY.id,
@@ -554,41 +508,10 @@ export class TsharkCaptureProvider implements PacketCapturePort {
           userMessage: `${reason} On Linux, supply TShark 4.x on PATH or through absolute REA_TSHARK_COMMAND, and util-linux prlimit through REA_TSHARK_PRLIMIT_COMMAND (default /usr/bin/prlimit).`,
         },
       );
-    if (
-      phase === "artifact" &&
-      cause instanceof ArtifactReaderFailure &&
-      cause.reason === "limit"
-    )
-      return new AnalysisResourceConstraintError(
-        operation,
-        "file-size",
-        reason,
-        { input_bytes: LIMITS.input_bytes },
-        {
-          cause,
-          ...fixedProducerInputAllowance(
-            LIMITS.input_bytes,
-            "the fixed packet-capture input allowance",
-          ),
-        },
-      );
     if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
       return new AnalysisArtifactChangedError(operation, path, reason, {
         cause,
       });
-    if (
-      phase === "artifact" &&
-      cause instanceof Error &&
-      "code" in cause &&
-      (cause.code === "EACCES" || cause.code === "EPERM")
-    )
-      return new AnalysisAccessDeniedError(operation, path, cause.code, {
-        cause,
-      });
-    if (phase === "artifact")
-      return new AnalysisInputError(operation, { cause }, [
-        { path: ["path"], reason: "invalid_value", message: reason },
-      ]);
     return new AnalysisOutputError(operation, reason, {
       cause,
       ...(observedOutput === undefined

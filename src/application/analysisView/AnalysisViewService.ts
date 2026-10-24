@@ -3,9 +3,8 @@ import { dispatchQueuedInterrupts } from "../../process/queuedInterrupts.js";
 import { readImmutableEvidenceBundle } from "../EvidenceBundleFiles.js";
 import { INSPECT_ANALYSIS_VIEW_OPERATION } from "../../domain/analysisView/analysisViewErrors.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
-import { z } from "zod";
 
-import { ANALYSIS_VIEW_PROVIDER } from "../InvestigationProviders.js";
+import { ANALYSIS_VIEW_PROVIDER } from "../../domain/investigationProviders.js";
 import type { EvidenceLookup } from "../EvidenceInputResolver.js";
 import { resolveEvidenceInput } from "../EvidenceInputResolver.js";
 import type { EvidenceWriter } from "../investigation/InvestigationRecordPort.js";
@@ -17,11 +16,8 @@ import {
 } from "../../domain/analysisErrorCore.js";
 import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
 import { EvidenceIntegrityError } from "../../domain/evidenceErrors.js";
-import {
-  createEvidence,
-  parseEvidence,
-  type Evidence,
-} from "../../domain/evidence.js";
+import { safeParseEvidence } from "../../domain/evidenceValidation.js";
+import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import {
   inspectAnalysisViewInputSchema,
   projectAnalysisView,
@@ -96,7 +92,11 @@ const inspectFileView = async (
   lookup?: EvidenceLookup,
   options: EvidenceFileReadOptions = {},
 ): Promise<Result<Evidence, AnalysisError>> => {
-  const loaded = await readEvidenceFileSource(input.source.path, options);
+  const loaded = await readEvidenceFileSource(
+    input.source.path,
+    options,
+    input.source.evidence_id,
+  );
   // Authentication and projection are synchronous; yield so a pending abort is dispatched before each check.
   const cancelled = async (): Promise<boolean> => {
     await setImmediate();
@@ -335,30 +335,20 @@ const authenticateEvidence = (
   path: readonly (string | number)[],
   input: unknown,
 ): Result<Evidence, AnalysisError> => {
-  try {
-    return ok(parseEvidence(value));
-  } catch (cause: unknown) {
-    if (cause instanceof z.ZodError)
-      return err(
-        analysisInputErrorFromIssues(
-          INSPECT_ANALYSIS_VIEW_OPERATION,
-          cause.issues.map((issue) => ({
-            ...issue,
-            path: [...path, ...issue.path],
-          })),
-          input,
-          { cause },
-        ),
-      );
-    if (cause instanceof TypeError)
-      return err(
-        new EvidenceIntegrityError(
-          cause.message,
-          cause.message.length > 0 ? { userMessage: cause.message } : undefined,
-        ),
-      );
-    throw cause;
-  }
+  const parsed = safeParseEvidence(value);
+  if (parsed.ok) return parsed;
+  const cause = parsed.error;
+  return err(
+    analysisInputErrorFromIssues(
+      INSPECT_ANALYSIS_VIEW_OPERATION,
+      cause.issues.map((issue) => ({
+        ...issue,
+        path: [...path, ...issue.path],
+      })),
+      input,
+      { cause },
+    ),
+  );
 };
 
 const createAnalysisViewEvidence = (
@@ -377,6 +367,12 @@ const createAnalysisViewEvidence = (
             ? {}
             : { architecture: parent.subject.architecture }),
         };
+  const nativeFunctionView =
+    result.kind === "native" ||
+    (result.kind === "summary" &&
+      result.parent_operation === "analyze_function")
+      ? result
+      : undefined;
   return createEvidence(
     target,
     ANALYSIS_VIEW_PROVIDER,
@@ -400,17 +396,23 @@ const createAnalysisViewEvidence = (
           : "derived",
       authority: parent.authority,
       limitations: result.limitations,
-      ...(result.kind === "native" && parent.relationship_coverage !== null
+      ...(nativeFunctionView !== undefined &&
+      parent.relationship_coverage !== null
         ? { relationshipCoverage: parent.relationship_coverage }
         : {}),
       locations: [
         ...(result.artifact != null && result.artifact.path.length > 0
           ? [{ kind: "artifact-path" as const, path: result.artifact.path }]
           : []),
-        ...(result.kind === "native" &&
-        result.procedure_address !== null &&
-        result.procedure_address.length > 0
-          ? [{ kind: "address" as const, address: result.procedure_address }]
+        ...(nativeFunctionView !== undefined &&
+        nativeFunctionView.procedure_address !== null &&
+        nativeFunctionView.procedure_address.length > 0
+          ? [
+              {
+                kind: "address" as const,
+                address: nativeFunctionView.procedure_address,
+              },
+            ]
           : []),
       ],
       evidenceLinks: [parent.evidence_id],

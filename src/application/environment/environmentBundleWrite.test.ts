@@ -1,3 +1,4 @@
+import { requirePermissionDenial } from "../../../tests/fixtures/permissionDenial.js";
 import {
   appendFile,
   chmod,
@@ -19,10 +20,7 @@ import {
 } from "../../../tests/fixtures/environmentServe.js";
 import { SafeOutputTree } from "../../artifacts/SafeOutputTree.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
-import {
-  AnalysisAccessDeniedError,
-  AnalysisOutputError,
-} from "../../domain/analysisErrorCore.js";
+import { AnalysisOutputError } from "../../domain/analysisErrorCore.js";
 import {
   exportEnvironmentBundle,
   readEnvironmentExportInputs,
@@ -167,9 +165,10 @@ it("uses confirmed publication after the output owner's descriptor cleanup compl
   }
 });
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32")(
   "returns a tagged permission refusal for an existing read-only empty directory",
-  async () => {
+  async (context) => {
+    await requirePermissionDenial(context, "directory-write");
     const root = await createTestTempDirectory("rea-bundle-readonly-");
     const files = await writeEnvironmentServeFiles(root);
     const inputs = await readEnvironmentExportInputs(
@@ -188,9 +187,14 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(result).toMatchObject({
         ok: false,
         error: {
-          _tag: "AnalysisAccessDeniedError",
+          _tag: "AnalysisOutputError",
           operation: "environment-export",
-          diagnostics: { output_directory: directory },
+          diagnostics: {
+            output_directory: directory,
+            path: join(directory, "README.md"),
+            system_code: "EACCES",
+            boundary: "filesystem-write",
+          },
         },
       });
       expect(await readdir(directory)).toEqual([]);
@@ -200,9 +204,10 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   },
 );
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32")(
   "names the nested path when write permission is lost after earlier files",
-  async () => {
+  async (context) => {
+    await requirePermissionDenial(context, "directory-write");
     const root = await createTestTempDirectory("rea-bundle-later-denied-");
     const files = await writeEnvironmentServeFiles(root);
     const inputs = await readEnvironmentExportInputs(
@@ -229,12 +234,15 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       });
       if (result.ok) throw new Error("expected a permission refusal");
       expect(result.error).toMatchObject({
-        _tag: "AnalysisAccessDeniedError",
+        _tag: "AnalysisOutputError",
         diagnostics: { output_directory: directory },
       });
-      if (!(result.error instanceof AnalysisAccessDeniedError))
-        throw result.error;
-      expect(result.error.path.startsWith(`${directory}/`)).toBe(true);
+      if (!(result.error instanceof AnalysisOutputError)) throw result.error;
+      expect(result.error.diagnostics).toMatchObject({
+        path: expect.stringContaining(`${directory}/`),
+        system_code: "EACCES",
+        boundary: "filesystem-write",
+      });
       expect(await readdir(directory)).not.toEqual([]);
     } finally {
       writer.mockRestore();

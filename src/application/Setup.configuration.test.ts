@@ -286,6 +286,38 @@ describe("configured Linux Hopper selection", () => {
   });
 });
 
+it("offers shared skill intent when the detected personal copy is current", async () => {
+  const host = new FakeSetupHost();
+  host.hopper = "/Applications/Hopper";
+  host.clients = [{ name: "claude_code", configPath: "/claude.json" }];
+  host.skillNeedsInstall = (clients) => Promise.resolve(clients.length === 0);
+  const result = await runSetup(
+    { ...options(false), structured: false },
+    host,
+    async (actions, context) => {
+      if (context?.stage !== "select") return true;
+      expect(actions).toContainEqual(
+        expect.objectContaining({ id: "install_skill" }),
+      );
+      return { approved: false, selectedActionIds: ["install_skill"] };
+    },
+  );
+  expect(result.status).toBe("ready");
+  expect(result.plannedActions).toEqual([
+    expect.objectContaining({
+      id: "install_skill",
+      target: join(
+        host.homeDirectory,
+        ".agents",
+        "skills",
+        "reverse-engineer-anything",
+      ),
+    }),
+  ]);
+  expect(host.configurations).toBe(0);
+  expect(host.skillInstalls).toBe(1);
+});
+
 describe("setup workflow action selection", () => {
   it("executes only actions selected by the interactive adapter", async () => {
     const host = new FakeSetupHost();
@@ -390,7 +422,9 @@ describe("setup workflow action selection", () => {
     expect(setupRegistrationCommand("win32", undefined, undefined)).toEqual([]);
     expect(setupRegistrationCommand("win32", "npx", undefined)).not.toEqual([]);
   });
+});
 
+describe("setup configuration failure recovery", () => {
   it.each([
     [
       "path",
@@ -413,13 +447,33 @@ describe("setup workflow action selection", () => {
     host.hopper = "/Applications/Hopper";
     host.clients = [{ name: "internal_client_key", configPath: "/agent.json" }];
     host.clientResults.set("internal_client_key", { status: "failed", reason });
+    // Exercise registration recovery without selecting a synthetic skill client.
     const result = await runSetup(
-      { ...options(true), clientIds: ["internal_client_key"] },
+      {
+        ...options(true),
+        clientIds: ["internal_client_key"],
+        installSkill: false,
+      },
       host,
     );
     expect(result.status).toBe("needs_human");
     expect(result.remediation).toBe(message);
     expect(result.remediation).not.toContain("internal_client_key");
+    expect(result.plannedActions).toEqual([
+      expect.objectContaining({
+        id: "configure_client:internal_client_key",
+        kind: "configure_client",
+        target: "/agent.json",
+      }),
+    ]);
+    expect(result.clients).toEqual({
+      internal_client_key: { status: "failed", reason },
+    });
+    expect(result.appliedActions).toEqual([]);
+    expect(host.configurations).toBe(1);
+    expect(host.skillDirectoryValidations).toEqual([]);
+    expect(host.skillInstalls).toBe(0);
+    expect(host.hopperInstalls).toBe(0);
   });
 
   it("names the recovery backup that holds the restored original after a readback failure", async () => {

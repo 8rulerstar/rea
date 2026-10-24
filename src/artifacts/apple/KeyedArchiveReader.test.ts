@@ -1,3 +1,4 @@
+import { binaryKeyedArchiveUidShapes } from "../../../tests/fixtures/keyedArchiveUidShapes.js";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import {
   inspectBundleKeyedArchive,
 } from "./KeyedArchiveReader.js";
 import {
-  plistNestingLimitMessage,
+  PlistNestingLimitError,
   unknownDateLimitation,
 } from "../../domain/apple/plistValue.js";
 import { deeplyNestedXmlPlist } from "../../../tests/fixtures/keyedArchiveXmlNesting.js";
@@ -794,7 +795,7 @@ describe("XML plist nesting preflight", () => {
           Buffer.from(deeplyNestedXmlPlist(depth)),
           selection,
         ),
-      ).toThrow(new RangeError(plistNestingLimitMessage()));
+      ).toThrow(new PlistNestingLimitError(128));
     },
   );
 
@@ -811,6 +812,113 @@ describe("XML plist nesting preflight", () => {
   it("rejects one nesting level past the limit before decoding", () => {
     expect(() =>
       decodeKeyedArchiveBytes(deeplyNestedArchive(127), selection),
-    ).toThrow(new RangeError(plistNestingLimitMessage()));
+    ).toThrow(new PlistNestingLimitError(128));
   });
+});
+
+it("distinguishes binary UID records from authored UID-shaped dictionaries", () => {
+  const graph = decodeKeyedArchiveBytes(binaryKeyedArchiveUidShapes(), {
+    offset: 0,
+    limit: 10,
+  });
+  expect(graph.objects[1]?.value).toMatchObject({
+    ordinary: { UID: 2 },
+    xmlConvention: { CF$UID: 2 },
+    actual: { UID: 2 },
+  });
+  expect(
+    graph.references
+      .filter(({ source }) => source === 1)
+      .map(({ path, target }) => ({ path, target })),
+  ).toEqual([
+    { path: ["$class"], target: 3 },
+    { path: ["actual"], target: 2 },
+    { path: ["shared", 0], target: 2 },
+    { path: ["shared", 1], target: 2 },
+  ]);
+});
+
+it("keeps XML authored UID dictionaries as data alongside CF$UID references", () => {
+  const graph = decodeKeyedArchiveBytes(
+    Buffer.from(
+      build({
+        $archiver: "NSKeyedArchiver",
+        $version: 100000,
+        $top: { root: { CF$UID: 1 } },
+        $objects: [
+          "$null",
+          { $class: { CF$UID: 2 }, authoredRecord: { UID: 3 } },
+          { $classname: "T", $classes: ["T", "NSObject"] },
+          "sharedString",
+        ],
+      }),
+    ),
+    { offset: 0, limit: 10 },
+  );
+  expect(graph.objects[1]?.value).toMatchObject({ authoredRecord: { UID: 3 } });
+  expect(graph.total_references).toBe(2);
+  expect(
+    graph.references.map(({ source, path, target, status }) => ({
+      source,
+      path,
+      target,
+      status,
+    })),
+  ).toEqual([
+    { source: null, path: ["root"], target: 1, status: "resolved" },
+    { source: 1, path: ["$class"], target: 2, status: "resolved" },
+  ]);
+});
+
+it("preserves exact integers in XML authored UID dictionaries", () => {
+  const xml = build({
+    $archiver: "NSKeyedArchiver",
+    $objects: ["$null", { UID: 9007199254740992 }],
+    $top: { root: { CF$UID: 1 } },
+  }).replace("9007199254740992", "9007199254740993");
+  const graph = decodeKeyedArchiveBytes(Buffer.from(xml), {
+    offset: 0,
+    limit: 10,
+  });
+  expect(graph.objects[1]?.value).toEqual({
+    UID: { $plist_type: "integer", decimal: "9007199254740993" },
+  });
+  expect(graph.total_references).toBe(1);
+});
+
+it("preserves XML dictionary identity when prototype-key omission leaves a CF$UID field", () => {
+  const xml = build({
+    $archiver: "NSKeyedArchiver",
+    $objects: [
+      "$null",
+      { authoredRecord: { CF$UID: 2, prototypeKey: "authored" } },
+      "target",
+    ],
+    $top: { root: { CF$UID: 1 }, genuine: { CF$UID: 2 } },
+  }).replace("<key>prototypeKey</key>", "<key>__proto__</key>");
+  const graph = decodeKeyedArchiveBytes(Buffer.from(xml), {
+    offset: 0,
+    limit: 10,
+  });
+  expect(graph.objects[1]?.value).toEqual({ authoredRecord: { CF$UID: 2 } });
+  expect(graph.total_references).toBe(2);
+  expect(graph.references).toEqual([
+    expect.objectContaining({
+      source: null,
+      path: ["genuine"],
+      target: 2,
+      status: "resolved",
+    }),
+    expect.objectContaining({
+      source: null,
+      path: ["root"],
+      target: 1,
+      status: "resolved",
+    }),
+  ]);
+  expect(graph.limitations).toContainEqual(
+    expect.stringMatching(
+      /\b1 dictionary entry\b.*\b__proto__\b.*\bomitted\b/u,
+    ),
+  );
 });

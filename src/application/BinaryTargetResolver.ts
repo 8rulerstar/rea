@@ -1,4 +1,19 @@
-import { regularFileCancellation } from "../filesystem/OwnedRegularFile.js";
+import {
+  regularFileCancellation,
+  RegularFileCleanupFailure,
+  RegularFileCancelled,
+  withOwnedRegularFile,
+  OwnedRegularFileOperationFailure,
+} from "../filesystem/OwnedRegularFile.js";
+import {
+  bindRegularFileCleanup,
+  RetainedRegularFileCleanupFailure,
+  retryRegularFileCleanup,
+} from "./RegularFileRead.js";
+import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import { jsonValueSchema } from "../domain/jsonValue.js";
+import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { constants, type Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import {
@@ -11,14 +26,12 @@ import {
 import { extname } from "node:path";
 
 import { BinaryTargetError } from "../domain/configurationErrors.js";
-import {
-  openRegularFile,
-  sameRegularFileState,
-} from "../filesystem/RegularFile.js";
+import { sameRegularFileState } from "../filesystem/RegularFile.js";
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { readMipsElfMetadata } from "./MipsElfMetadata.js";
+import { validateElfDeclaredRanges } from "../domain/elfDeclaredRanges.js";
 import {
   resolveAppBundleExecutable,
   type ResolvedAppBundle,
@@ -32,7 +45,13 @@ import {
   rawBinarySelectionError,
 } from "../domain/rawBinary.js";
 import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
-import { observeMzWindowsHeader } from "../domain/dosMz.js";
+import {
+  mzWindowsHeaderLayoutLimitation,
+  observeMzWindowsHeader,
+  parseMzHeaderEvidence,
+  type DosMzHeader,
+  type MzWindowsHeaderObservation,
+} from "../domain/dosMz.js";
 import {
   createXmlPlistSignatureProbe,
   hasBinaryPlistSignature,
@@ -56,13 +75,28 @@ import {
   type ExecutableMetadata,
 } from "../domain/binaryTarget.js";
 import {
+  classifyFatContainerIdentity,
   readFatContainerHeader,
   readMachoHeaderPrefixFacts,
   type FatSliceHeaderEvidence,
   type MachoHeaderPrefixFacts,
 } from "../domain/apple/machoContainer.js";
-import type { PeCodeViewRecord } from "../domain/binaryTargetTypes.js";
+import {
+  isJvmClassFile,
+  MAX_JVM_CLASS_IDENTITY_BYTES,
+  JVM_CLASS_IDENTITY_LIMIT_REASON,
+} from "../domain/apple/jvmClassFile.js";
+import {
+  MachoLoadCommandCursor,
+  readMachoLoadCommandTableHeader,
+  type MachoLoadCommandTableHeader,
+} from "../domain/apple/machoLoadCommands.js";
+import type {
+  PeCodeViewRecord,
+  UniversalMachOSlice,
+} from "../domain/binaryTargetTypes.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
+import type { JsonValue } from "../domain/jsonValue.js";
 
 const XML_PLIST_PROBE_CHUNK_BYTES = 64 * 1024;
 
@@ -75,6 +109,7 @@ export interface BinaryTargetResolverOptions {
   readonly architecture?: BinaryArchitecture;
   readonly entryPoint?: string;
   readonly signal?: AbortSignal;
+  readonly resources?: ArtifactResourceScope;
 }
 
 /**
@@ -90,13 +125,12 @@ export const parseBinaryTarget = async (
   Result<BinaryTarget, BinaryTargetError | AnalysisCancelledError>
 > => {
   const cwd = options.cwd ?? process.cwd();
-  const hostArchitecture = options.hostArchitecture ?? process.arch;
-  const { targetKind, formatHint, signal, architecture, entryPoint } = options;
+  const { signal } = options;
   const candidate = absoluteCallerPath(input, { cwd });
   // Failures before canonicalization concern the selected path itself; later
   // failures concern the canonical path opened with symbolic links rejected.
   let stage: TargetFilesystemStage = "resolve";
-  try {
+  const resolve = async (): Promise<TargetResolution> => {
     throwIfTargetResolutionCancelled(signal);
     await access(candidate, constants.R_OK);
     throwIfTargetResolutionCancelled(signal);
@@ -111,156 +145,344 @@ export const parseBinaryTarget = async (
     const { executable: path, infoPlist } = resolved.value;
     const bundle =
       infoPlist === undefined ? {} : { bundleInfoPlist: infoPlist };
-    const handle = await openRegularFile(path, {
-      symlinks: "reject",
-      signal,
-    });
-    try {
-      throwIfTargetResolutionCancelled(signal);
-      const metadata = await handle.stat();
-      throwIfTargetResolutionCancelled(signal);
-      if (formatHint === "raw-binary") {
-        if (targetKind !== undefined && targetKind !== "executable")
-          return err(
-            new BinaryTargetError(
-              path,
-              "raw-binary format requires an executable target kind",
-              { constraint: "load_selection_rejected" },
-            ),
+    return withOwnedRegularFile<TargetResolution>(
+      path,
+      {
+        symlinks: "reject",
+        ...(signal === undefined ? {} : { signal }),
+      },
+      async (handle) => {
+        try {
+          return await readOpenedBinaryTarget(
+            handle,
+            { path, sourcePath, ...bundle },
+            options,
           );
-        const admitted = admitRawBinary({
-          architecture,
-          entryPoint,
-          fileBytes: metadata.size,
-        });
-        if (!admitted.ok)
-          return err(
-            new BinaryTargetError(path, admitted.error.reason, {
-              constraint: admitted.error.constraint,
-            }),
-          );
-        return ok({
-          path,
-          sourcePath,
-          ...bundle,
-          sha256: await sha256Handle(handle, path, metadata, signal),
-          kind: "executable",
-          format: "raw-binary",
-          architecture: admitted.value.architecture,
-          availableArchitectures: [admitted.value.architecture],
-          entryPoint: admitted.value.entryPoint,
-          entryPointSource: admitted.value.entryPointSource,
-        });
-      }
-      const pairing = rawBinarySelectionError({
-        ...(formatHint === undefined ? {} : { format: formatHint }),
-        architecture,
-        entryPoint,
-      });
-      if (pairing !== undefined)
+        } catch (cause: unknown) {
+          throw new OwnedRegularFileOperationFailure(cause);
+        }
+      },
+    );
+  };
+  try {
+    const resolved = await (options.resources === undefined
+      ? resolve()
+      : options.resources.run(resolve));
+    return finalizedTargetResolution(resolved, signal);
+  } catch (cause: unknown) {
+    // A caller-selected abort value never transfers file ownership.
+    if (signal?.aborted === true && cause === signal.reason)
+      return err(
+        new AnalysisCancelledError("resolve_binary_target", { cause }),
+      );
+    if (cause instanceof RegularFileCleanupFailure) {
+      const fileFailure = cause as RegularFileCleanupFailure<TargetResolution>;
+      if (options.resources === undefined)
         return err(
-          new BinaryTargetError(path, pairing, {
-            constraint: "load_selection_rejected",
-          }),
+          targetFileCleanupError(
+            new RetainedRegularFileCleanupFailure(fileFailure),
+            candidate,
+            stage,
+          ),
         );
-      if (formatHint === "dos-com") {
-        if (targetKind !== undefined && targetKind !== "executable")
-          return err(
-            new BinaryTargetError(
-              path,
-              "DOS COM format requires an executable target kind",
-              { constraint: "load_selection_rejected" },
-            ),
-          );
-        const length = validateDosComLength(metadata.size);
-        if (!length.ok)
-          return err(
-            new BinaryTargetError(path, length.error, {
-              constraint: "file_format_rejected",
-            }),
-          );
-        return ok({
-          path,
-          sourcePath,
-          ...bundle,
-          sha256: await sha256Handle(handle, path, metadata, signal),
-          kind: "executable",
-          format: "dos-com",
-          architecture: "x86",
-          availableArchitectures: ["x86"],
-        });
-      }
-      // Probe WASM content before suffix-only database routing; an explicit
-      // database selection keeps the caller's chosen interpretation.
-      const artifactFormat =
-        targetKind === "database"
-          ? undefined
-          : await detectArtifactFormat(path, handle, signal);
-      if (
-        targetKind === "database" ||
-        (targetKind === undefined && path.toLowerCase().endsWith(".hop"))
-      )
-        return ok({
-          path,
-          sourcePath,
-          sha256: await sha256Handle(handle, path, metadata, signal),
-          kind: "database",
-          format: "analysis-database",
-        });
-      if (artifactFormat !== undefined) {
-        const identity = {
-          path,
-          sourcePath,
-          sha256: await sha256Handle(handle, path, metadata, signal),
-        };
-        return isArchiveFormat(artifactFormat)
-          ? ok({ ...identity, kind: "archive", format: artifactFormat })
-          : ok({ ...identity, kind: "artifact", format: artifactFormat });
-      }
-      const detected = await readExecutableMetadata(
-        handle,
-        hostArchitecture,
+      const retried = await retryRegularFileCleanup(
+        fileFailure,
+        options.resources,
         signal,
       );
-      if (!detected.ok) {
-        // Only bytes no other format claims may lead a located ZIP, so an
-        // executable with an appended archive keeps its executable route.
-        if (
-          !(await claimsLeadingExecutableHeader(
-            handle,
-            metadata.size,
-            signal,
-          )) &&
-          (await locateTrailingZipArchive(metadata.size, (position, length) =>
-            readHandleRange(handle, position, length, signal),
-          )) !== undefined
-        )
-          return ok({
-            path,
-            sourcePath,
-            sha256: await sha256Handle(handle, path, metadata, signal),
-            kind: "archive",
-            format: zipRootPackageFormat(path),
-          });
-        return err(
-          new BinaryTargetError(path, detected.error, {
-            constraint: "file_format_rejected",
-          }),
+      if (retried.failure !== undefined)
+        return err(targetFileCleanupError(retried.failure, candidate, stage));
+      if (retried.outcome.kind === "failed")
+        return targetResolutionFailure(
+          fileFailure.operationFailure ?? retried.outcome.cause,
+          candidate,
+          stage,
+          signal,
         );
-      }
+      return finalizedTargetResolution(retried.outcome.value, signal);
+    }
+    if (cause instanceof RegularFileCancelled)
+      return finalizedTargetResolution(
+        cause.outcome.value as TargetResolution,
+        signal,
+      );
+    if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined) {
+      const error = new BinaryTargetError(
+        candidate,
+        "A previous target file could not be closed",
+        {
+          cause,
+          cleanup: cause.cleanup,
+          partialObservation: cause.partialObservation,
+        },
+      );
+      bindRegularFileCleanup(cause, error);
+      return err(error);
+    }
+    return targetResolutionFailure(cause, candidate, stage, signal);
+  }
+};
+
+type TargetResolution = Result<
+  BinaryTarget,
+  BinaryTargetError | AnalysisCancelledError
+>;
+
+/** Classify and hash the one descriptor admitted by the lifetime owner. */
+const readOpenedBinaryTarget = async (
+  handle: FileHandle,
+  selected: {
+    readonly path: string;
+    readonly sourcePath: string;
+    readonly bundleInfoPlist?: string;
+  },
+  options: BinaryTargetResolverOptions,
+): Promise<TargetResolution> => {
+  const { path, sourcePath, bundleInfoPlist } = selected;
+  const bundle = bundleInfoPlist === undefined ? {} : { bundleInfoPlist };
+  const hostArchitecture = options.hostArchitecture ?? process.arch;
+  const { targetKind, formatHint, signal, architecture, entryPoint } = options;
+  throwIfTargetResolutionCancelled(signal);
+  const metadata = await handle.stat();
+  throwIfTargetResolutionCancelled(signal);
+  if (formatHint === "raw-binary") {
+    if (targetKind !== undefined && targetKind !== "executable")
+      return err(
+        new BinaryTargetError(
+          path,
+          "raw-binary format requires an executable target kind",
+          { constraint: "load_selection_rejected" },
+        ),
+      );
+    const admitted = admitRawBinary({
+      architecture,
+      entryPoint,
+      fileBytes: metadata.size,
+    });
+    if (!admitted.ok)
+      return err(
+        new BinaryTargetError(path, admitted.error.reason, {
+          constraint: admitted.error.constraint,
+        }),
+      );
+    return ok({
+      path,
+      sourcePath,
+      ...bundle,
+      sha256: await sha256Handle(handle, path, metadata, signal),
+      kind: "executable",
+      format: "raw-binary",
+      architecture: admitted.value.architecture,
+      availableArchitectures: [admitted.value.architecture],
+      entryPoint: admitted.value.entryPoint,
+      entryPointSource: admitted.value.entryPointSource,
+    });
+  }
+  const pairing = rawBinarySelectionError({
+    ...(formatHint === undefined ? {} : { format: formatHint }),
+    architecture,
+    entryPoint,
+  });
+  if (pairing !== undefined)
+    return err(
+      new BinaryTargetError(path, pairing, {
+        constraint: "load_selection_rejected",
+      }),
+    );
+  if (formatHint === "dos-com") {
+    if (targetKind !== undefined && targetKind !== "executable")
+      return err(
+        new BinaryTargetError(
+          path,
+          "DOS COM format requires an executable target kind",
+          { constraint: "load_selection_rejected" },
+        ),
+      );
+    const length = validateDosComLength(metadata.size);
+    if (!length.ok)
+      return err(
+        new BinaryTargetError(path, length.error, {
+          constraint: "file_format_rejected",
+        }),
+      );
+    return ok({
+      path,
+      sourcePath,
+      ...bundle,
+      sha256: await sha256Handle(handle, path, metadata, signal),
+      kind: "executable",
+      format: "dos-com",
+      architecture: "x86",
+      availableArchitectures: ["x86"],
+    });
+  }
+  // Probe WASM content before suffix-only database routing; an explicit
+  // database selection keeps the caller's chosen interpretation.
+  const artifactFormat =
+    targetKind === "database"
+      ? undefined
+      : await detectArtifactFormat(path, handle, signal);
+  if (
+    targetKind === "database" ||
+    (targetKind === undefined && path.toLowerCase().endsWith(".hop"))
+  )
+    return ok({
+      path,
+      sourcePath,
+      sha256: await sha256Handle(handle, path, metadata, signal),
+      kind: "database",
+      format: "analysis-database",
+    });
+  if (artifactFormat !== undefined) {
+    const identity = {
+      path,
+      sourcePath,
+      sha256: await sha256Handle(handle, path, metadata, signal),
+    };
+    return isArchiveFormat(artifactFormat)
+      ? ok({ ...identity, kind: "archive", format: artifactFormat })
+      : ok({ ...identity, kind: "artifact", format: artifactFormat });
+  }
+  const detected = await readExecutableMetadata(
+    handle,
+    hostArchitecture,
+    signal,
+  );
+  if (!detected.ok) {
+    // Only bytes no other format claims may lead a located ZIP, so an
+    // executable with an appended archive keeps its executable route.
+    if (
+      !(await claimsLeadingExecutableHeader(handle, metadata.size, signal)) &&
+      (await locateTrailingZipArchive(metadata.size, (position, length) =>
+        readHandleRange(handle, position, length, signal),
+      )) !== undefined
+    )
       return ok({
         path,
         sourcePath,
-        ...bundle,
         sha256: await sha256Handle(handle, path, metadata, signal),
-        kind: "executable",
-        ...detected.value,
+        kind: "archive",
+        format: zipRootPackageFormat(path),
       });
-    } finally {
-      await handle.close();
-    }
-  } catch (cause: unknown) {
-    if (cause instanceof AnalysisCancelledError) return err(cause);
+    const reason =
+      typeof detected.error === "string"
+        ? detected.error
+        : detected.error.reason;
+    const diagnostics =
+      typeof detected.error === "string"
+        ? undefined
+        : detected.error.diagnostics;
+    return err(
+      new BinaryTargetError(path, reason, {
+        constraint: "file_format_rejected",
+        ...(diagnostics === undefined ? {} : { diagnostics }),
+      }),
+    );
+  }
+  return ok({
+    path,
+    sourcePath,
+    ...bundle,
+    sha256: await sha256Handle(handle, path, metadata, signal),
+    kind: "executable",
+    ...detected.value,
+  });
+};
+
+/** Preserve an earlier admission refusal over an interruption during final close. */
+const finalizedTargetResolution = (
+  result: TargetResolution,
+  signal?: AbortSignal,
+): TargetResolution => {
+  if (!result.ok || signal?.aborted !== true) return result;
+  return err(
+    new AnalysisCancelledError("resolve_binary_target", {
+      cause: signal.reason,
+      diagnostics: { completed_target: jsonValueSchema.parse(result.value) },
+    }),
+  );
+};
+
+/** Descriptor cleanup retains the physical result and binds its exact release lease. */
+const targetFileCleanupError = (
+  failure: RetainedRegularFileCleanupFailure<TargetResolution>,
+  candidate: string,
+  stage: TargetFilesystemStage,
+): BinaryTargetError => {
+  const cancellation = regularFileCancellation(failure);
+  const completed =
+    failure.outcome.kind === "completed" ? failure.outcome.value : undefined;
+  const completedTarget =
+    completed?.ok === true ? jsonValueSchema.parse(completed.value) : undefined;
+  let primary: BinaryTargetError | AnalysisCancelledError | undefined;
+  if (failure.outcome.kind === "failed") {
+    const physical = failure.outcome.cause;
+    primary =
+      physical instanceof BinaryTargetError ||
+      physical instanceof AnalysisCancelledError
+        ? physical
+        : cancellation !== undefined
+          ? new AnalysisCancelledError("resolve_binary_target", {
+              cause: cancellation.reason,
+            })
+          : (classifyTargetFilesystemFailure(candidate, physical, stage) ??
+            new BinaryTargetError(
+              failure.path,
+              "Target read failed before file cleanup",
+              { cause: physical },
+            ));
+  } else if (completed?.ok === false) primary = completed.error;
+  else if (cancellation !== undefined)
+    primary = new AnalysisCancelledError("resolve_binary_target", {
+      cause: cancellation.reason,
+      ...(completedTarget === undefined
+        ? {}
+        : { diagnostics: { completed_target: completedTarget } }),
+    });
+  const error = new BinaryTargetError(
+    failure.path,
+    "The target file handle could not be closed",
+    {
+      cause: failure,
+      cleanupPrimary: primary,
+      cleanup: {
+        reason:
+          failure.cleanupCause instanceof Error
+            ? failure.cleanupCause.message
+            : String(failure.cleanupCause),
+        resources: [failure.path],
+      },
+      diagnostics: {
+        ...(primary === undefined
+          ? {}
+          : { primary_error: projectAnalysisError(primary) }),
+        ...(completedTarget === undefined
+          ? {}
+          : { completed_target: completedTarget }),
+      },
+    },
+  );
+  bindRegularFileCleanup(failure, error);
+  return error;
+};
+
+const targetResolutionFailure = (
+  cause: unknown,
+  candidate: string,
+  stage: TargetFilesystemStage,
+  signal?: AbortSignal,
+): TargetResolution => {
+  // Physical rejection values do not grant ownership of foreign descriptors.
+  const physical =
+    cause instanceof OwnedRegularFileOperationFailure
+      ? cause.operationCause
+      : cause;
+  if (
+    physical instanceof AnalysisCancelledError ||
+    physical instanceof BinaryTargetError
+  )
+    return err(physical);
+  if (!(cause instanceof OwnedRegularFileOperationFailure)) {
     const cancellation = regularFileCancellation(cause);
     if (cancellation !== undefined)
       return err(
@@ -268,16 +490,14 @@ export const parseBinaryTarget = async (
           cause: cancellation.reason,
         }),
       );
-    if (signal?.aborted === true && cause === signal.reason)
-      return err(
-        new AnalysisCancelledError("resolve_binary_target", { cause }),
-      );
-    if (cause instanceof BinaryTargetError) return err(cause);
-    if (!(cause instanceof Error)) throw cause;
-    const failure = classifyTargetFilesystemFailure(candidate, cause, stage);
-    if (failure === undefined) throw cause;
-    return err(failure);
   }
+  if (signal?.aborted === true && physical === signal.reason)
+    return err(
+      new AnalysisCancelledError("resolve_binary_target", { cause: physical }),
+    );
+  const failure = classifyTargetFilesystemFailure(candidate, physical, stage);
+  if (failure === undefined) throw physical;
+  return err(failure);
 };
 
 /**
@@ -344,7 +564,9 @@ const targetFailureReason = (
 
 const throwIfTargetResolutionCancelled = (signal?: AbortSignal): void => {
   if (signal?.aborted === true)
-    throw new AnalysisCancelledError("resolve_binary_target");
+    throw new AnalysisCancelledError("resolve_binary_target", {
+      cause: signal.reason,
+    });
 };
 
 const detectArtifactFormat = async (
@@ -547,7 +769,7 @@ const readExecutableMetadata = async (
   handle: FileHandle,
   hostArchitecture: NodeJS.Architecture,
   signal?: AbortSignal,
-): Promise<Result<ExecutableMetadata, string>> => {
+): Promise<Result<ExecutableMetadata, ExecutableMetadataFailure>> => {
   throwIfTargetResolutionCancelled(signal);
   const prefix = Buffer.alloc(4096);
   const prefixRead = await handle.read(prefix, 0, prefix.length, 0);
@@ -558,10 +780,12 @@ const readExecutableMetadata = async (
   const fileSize = (await handle.stat()).size;
   throwIfTargetResolutionCancelled(signal);
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
-    let windowsHeader = observeMzWindowsHeader(bytes, fileSize);
-    let signatureBytes: Buffer | undefined;
-    if (windowsHeader.state === "signature-needed") {
-      const { offset } = windowsHeader;
+    let evidence = parseMzHeaderEvidence(bytes, fileSize);
+    let signatureEvidence:
+      | { readonly offset: number; readonly bytes: Buffer }
+      | undefined;
+    if (evidence.windowsHeader.state === "signature-needed") {
+      const { offset } = evidence.windowsHeader;
       const signature = Buffer.alloc(Math.min(4, fileSize - offset));
       const observedSignature = await handle.read(
         signature,
@@ -570,12 +794,23 @@ const readExecutableMetadata = async (
         offset,
       );
       throwIfTargetResolutionCancelled(signal);
-      signatureBytes = signature.subarray(0, observedSignature.bytesRead);
-      windowsHeader = observeMzWindowsHeader(bytes, fileSize, signatureBytes);
+      signatureEvidence = {
+        offset,
+        bytes: signature.subarray(0, observedSignature.bytesRead),
+      };
+      evidence = parseMzHeaderEvidence(bytes, fileSize, signatureEvidence);
     }
+    const { windowsHeader } = evidence;
     if (windowsHeader.state === "declared") {
-      if (windowsHeader.offset < 64)
-        return err("invalid Windows new-header offset in MZ image");
+      const limitation = mzWindowsHeaderLayoutLimitation(windowsHeader);
+      if (limitation !== undefined)
+        return err({
+          reason: limitation,
+          diagnostics: {
+            unsupported_layout: true,
+            mz_windows_header: { ...windowsHeader },
+          },
+        });
       return readPeMetadata(
         handle,
         windowsHeader.offset,
@@ -599,18 +834,52 @@ const readExecutableMetadata = async (
       const table = Buffer.alloc(tableEnd);
       const observed = await handle.read(table, 0, table.length, 0);
       throwIfTargetResolutionCancelled(signal);
+      evidence = parseMzHeaderEvidence(
+        table.subarray(0, observed.bytesRead),
+        fileSize,
+        signatureEvidence,
+      );
+      if (evidence.windowsHeader.state === "candidate")
+        return err(
+          unresolvedMzHeaderFailure(evidence.windowsHeader, evidence.dos),
+        );
       return parseExecutableHeader(
         table.subarray(0, observed.bytesRead),
         hostArchitecture,
         fileSize,
+        signatureEvidence,
       );
     }
+    if (windowsHeader.state === "candidate")
+      return err(unresolvedMzHeaderFailure(windowsHeader, evidence.dos));
     return parseExecutableHeader(
       bytes,
       hostArchitecture,
       fileSize,
-      signatureBytes,
+      signatureEvidence,
     );
+  }
+  if (bytes.length >= 4 && bytes.toString("hex", 0, 4) === "7f454c46")
+    return readElfMetadata(handle, bytes, {
+      fileSize,
+      hostArchitecture,
+      signal,
+    });
+  const thin = await readThinMachoMetadata(handle, bytes, {
+    fileSize,
+    hostArchitecture,
+    signal,
+  });
+  if (thin !== null) return thin;
+  const hasJvmMagic = bytes.length >= 4 && bytes.readUInt32BE(0) === 0xcafebabe;
+  if (
+    hasJvmMagic &&
+    fileSize > bytes.length &&
+    fileSize <= MAX_JVM_CLASS_IDENTITY_BYTES
+  ) {
+    const complete = await readHandleRange(handle, 0, fileSize, signal);
+    if (complete.byteLength === fileSize && isJvmClassFile(complete))
+      return err("unsupported binary format");
   }
   const fatEvidence = await readFatSliceHeaderEvidence(
     handle,
@@ -618,6 +887,16 @@ const readExecutableMetadata = async (
     fileSize,
     signal,
   );
+  if (
+    hasJvmMagic &&
+    fileSize > MAX_JVM_CLASS_IDENTITY_BYTES &&
+    fatEvidence !== undefined &&
+    classifyFatContainerIdentity(
+      fatEvidence.header,
+      (offset) => fatEvidence.sliceHeadersByOffset.get(offset)?.magic,
+    ).state === "malformed"
+  )
+    return err(JVM_CLASS_IDENTITY_LIMIT_REASON);
   const parsed = parseExecutableHeader(
     bytes,
     hostArchitecture,
@@ -626,10 +905,34 @@ const readExecutableMetadata = async (
     fatEvidence,
   );
   if (
-    !parsed.ok ||
-    parsed.value.architecture !== "mips" ||
-    parsed.value.mips.elfClass !== 32
-  )
+    parsed.ok &&
+    parsed.value.format === "mach-o-universal" &&
+    fatEvidence !== undefined
+  ) {
+    for (const slice of fatEvidence.header.slices) {
+      const framed = await readMachoSliceCommandFrames(handle, slice, signal);
+      if (!framed.ok) return framed;
+    }
+  }
+  return parsed;
+};
+
+/** ELF structure and family declarations share one descriptor before provider selection. */
+const readElfMetadata = async (
+  handle: FileHandle,
+  bytes: Buffer,
+  options: {
+    readonly fileSize: number;
+    readonly hostArchitecture: NodeJS.Architecture;
+    readonly signal?: AbortSignal | undefined;
+  },
+): Promise<Result<ExecutableMetadata, ExecutableMetadataFailure>> => {
+  const { fileSize, hostArchitecture, signal } = options;
+  const parsed = parseExecutableHeader(bytes, hostArchitecture, fileSize);
+  if (!parsed.ok || parsed.value.format !== "elf") return parsed;
+  const ranges = await readElfDeclaredRanges(handle, bytes, fileSize, signal);
+  if (!ranges.ok) return ranges;
+  if (parsed.value.architecture !== "mips" || parsed.value.mips.elfClass !== 32)
     return parsed;
   const declarations = await readMipsElfMetadata(
     handle,
@@ -650,6 +953,169 @@ const readExecutableMetadata = async (
         ? {}
         : { limitations: declarations.value.limitations }),
     },
+  });
+};
+
+/** Borrow the admitted descriptor; every request is at most one 64 KiB table chunk. */
+const readElfDeclaredRanges = async (
+  handle: FileHandle,
+  prefix: Buffer,
+  fileSize: number,
+  signal?: AbortSignal,
+): Promise<Result<null, string>> => {
+  const ranges = validateElfDeclaredRanges(prefix, fileSize);
+  let next = ranges.next();
+  let window: Buffer | undefined;
+  while (!next.done) {
+    throwIfTargetResolutionCancelled(signal);
+    const { offset, size } = next.value;
+    let bytes: Buffer;
+    if (offset + size <= prefix.length)
+      bytes = prefix.subarray(offset, offset + size);
+    else {
+      window ??= Buffer.allocUnsafe(64 * 1024);
+      bytes = window.subarray(0, size);
+      let length = 0;
+      while (length < size) {
+        const read = await handle.read(
+          bytes,
+          length,
+          size - length,
+          offset + length,
+        );
+        throwIfTargetResolutionCancelled(signal);
+        if (read.bytesRead === 0) break;
+        length += read.bytesRead;
+      }
+      bytes = bytes.subarray(0, length);
+    }
+    next = ranges.next(bytes);
+  }
+  return next.value;
+};
+
+type ExecutableMetadataFailure =
+  | string
+  | {
+      readonly reason: string;
+      readonly diagnostics: Readonly<Record<string, JsonValue>>;
+    };
+
+const unresolvedMzHeaderFailure = (
+  windowsHeader: Extract<MzWindowsHeaderObservation, { state: "candidate" }>,
+  dos: Result<DosMzHeader, string>,
+): Exclude<ExecutableMetadataFailure, string> => {
+  return {
+    reason: "MZ Windows new-header candidate is unresolved",
+    diagnostics: {
+      mz_windows_header: {
+        state: windowsHeader.state,
+        offset: windowsHeader.offset,
+        signature: windowsHeader.signature,
+      },
+      mz_dos: dos.ok
+        ? {
+            state: "valid",
+            header_bytes: dos.value.headerBytes,
+            image_bytes: dos.value.imageBytes,
+            module_bytes: dos.value.moduleBytes,
+            overlay_bytes: dos.value.overlayBytes,
+            relocation_count: dos.value.relocationCount,
+            relocation_table_offset: dos.value.relocationTableOffset,
+            entry_segment: dos.value.entrySegment,
+            entry_offset: dos.value.entryOffset,
+          }
+        : { state: "invalid", reason: dos.error },
+    },
+  };
+};
+
+/** Establish a complete thin-command framing proof before provider admission. */
+const readThinMachoMetadata = async (
+  handle: FileHandle,
+  prefix: Buffer,
+  input: {
+    readonly fileSize: number;
+    readonly hostArchitecture: NodeJS.Architecture;
+    readonly signal?: AbortSignal | undefined;
+  },
+): Promise<Result<ExecutableMetadata, string> | null> => {
+  const table = readMachoLoadCommandTableHeader(prefix, input.fileSize);
+  if (!table.ok) return table;
+  if (table.value === null) return null;
+  const parsed = parseExecutableHeader(
+    prefix.subarray(0, table.value.headerSize),
+    input.hostArchitecture,
+    input.fileSize,
+  );
+  if (!parsed.ok) return parsed;
+  const framed = await readMachoCommandFrames(handle, table.value, {
+    prefix,
+    fileSize: input.fileSize,
+    signal: input.signal,
+  });
+  return framed.ok ? parsed : framed;
+};
+
+/** Walk thin command headers through one probe window, skipping payload bytes. */
+const readMachoCommandFrames = async (
+  handle: FileHandle,
+  table: MachoLoadCommandTableHeader,
+  input: {
+    readonly prefix: Buffer;
+    readonly fileSize: number;
+    readonly fileOffset?: number | undefined;
+    readonly signal?: AbortSignal | undefined;
+  },
+): Promise<Result<null, string>> => {
+  const commands = new MachoLoadCommandCursor(table);
+  let window = input.prefix;
+  let windowOffset = 0;
+  while (commands.nextOffset !== null) {
+    const offset = table.headerSize + commands.nextOffset;
+    if (
+      offset + 8 <= input.fileSize &&
+      (offset < windowOffset || offset + 8 > windowOffset + window.length)
+    ) {
+      window = Buffer.alloc(Math.min(4096, input.fileSize - offset));
+      windowOffset = offset;
+      const observed = await handle.read(
+        window,
+        0,
+        window.length,
+        (input.fileOffset ?? 0) + offset,
+      );
+      throwIfTargetResolutionCancelled(input.signal);
+      window = window.subarray(0, observed.bytesRead);
+    }
+    const relative = offset - windowOffset;
+    const frame = commands.read(
+      relative >= 0 ? window.subarray(relative, relative + 8) : Buffer.alloc(0),
+    );
+    if (!frame.ok) return frame;
+  }
+  return commands.finish();
+};
+
+/** Validate declared FAT slices after the canonical table/identity admission succeeds. */
+const readMachoSliceCommandFrames = async (
+  handle: FileHandle,
+  slice: UniversalMachOSlice,
+  signal?: AbortSignal,
+): Promise<Result<null, string>> => {
+  const prefix = Buffer.alloc(Math.min(4096, slice.size));
+  const observed = await handle.read(prefix, 0, prefix.length, slice.offset);
+  throwIfTargetResolutionCancelled(signal);
+  const bytes = prefix.subarray(0, observed.bytesRead);
+  const table = readMachoLoadCommandTableHeader(bytes, slice.size);
+  if (!table.ok) return table;
+  if (table.value === null)
+    return err("FAT slice does not identify a thin Mach-O image");
+  return readMachoCommandFrames(handle, table.value, {
+    prefix: bytes,
+    fileSize: slice.size,
+    fileOffset: slice.offset,
+    signal,
   });
 };
 
@@ -734,11 +1200,10 @@ const readPeMetadata = async (
   throwIfTargetResolutionCancelled(signal);
   if (fileHeaderRead.bytesRead !== fileHeader.length)
     return err("invalid or truncated PE header");
-  const windowsHeader = observeMzWindowsHeader(
-    mzPrefix,
-    fileSize,
-    fileHeader.subarray(0, 4),
-  );
+  const windowsHeader = observeMzWindowsHeader(mzPrefix, fileSize, {
+    offset,
+    bytes: fileHeader.subarray(0, 4),
+  });
   if (windowsHeader.state !== "declared")
     return err("invalid Windows new-header signature in MZ image");
   if (["NE", "LE", "LX"].includes(windowsHeader.signature))

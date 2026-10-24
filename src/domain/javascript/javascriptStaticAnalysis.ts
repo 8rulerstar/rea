@@ -14,10 +14,12 @@ import {
   traverseJavaScriptAstSteps,
 } from "./javascriptSemanticTraversal.js";
 
+import { isElectronRendererLoad } from "./electronStaticRenderer.js";
+import { finishElectronNativeBindingsSteps } from "./electronStaticAnalysisNative.js";
 import { inspectElectronStaticNode } from "./electronStaticAnalysis.js";
 import { hasPossibleCommonJsDelegateWrite } from "./javascriptSemanticRequireOrigin.js";
 import { semanticResourceLimitReason } from "./javascriptSemanticResourceLimits.js";
-import { createStaticNodePathResolveQuery } from "./javascriptStaticPathIntrinsics.js";
+import { createStaticPathIntrinsicQuery } from "./javascriptStaticPathIntrinsics.js";
 import { createSemanticExpressionShapeResolver } from "./javascriptSemanticExpressionShapes.js";
 import { finishElectronBrowserWindowsSteps } from "./electronStaticAnalysisBrowser.js";
 import {
@@ -34,7 +36,6 @@ import {
   finishModuleRequireCalls,
   finishSqliteStorageCalls,
   inspectCall,
-  inspectRoleProperty,
   inspectRpcNode,
   finishRpcScanSteps,
   indexVitePreloadDependencyTable,
@@ -103,12 +104,15 @@ export function* analyzeParsedJavaScriptStaticSourceSteps(
     bindings,
   );
   const findings: JavaScriptFindingContext = {
-    nodePathResolve: createStaticNodePathResolveQuery(index),
+    pathIntrinsics: createStaticPathIntrinsicQuery(index),
+    rendererLoad: (callee, site) =>
+      isElectronRendererLoad(callee, site, findings, index),
     source,
     accumulator,
     vitePreloadDependencyTable: indexVitePreloadDependencyTable(file.program),
     openReceiverFacts: receivers.openReceivers,
     electronBindings: electronIdentity.bindings,
+    electronExportIntact: electronIdentity.intactExport,
     electronInvocationPath: electronIdentity.invocationPath,
     electronAppPathChangePossible: electronIdentity.mayChangeAppPath,
     rpcScan: createJavaScriptRpcScan(source, receivers.rpcClientRoots, index),
@@ -121,10 +125,11 @@ export function* analyzeParsedJavaScriptStaticSourceSteps(
   );
   yield* traverseStaticSourceSteps(file, findings, bindings, routeScan);
   const routes = yield* routeScan.finishSteps();
+  yield* finishElectronNativeBindingsSteps(findings, index);
   yield* finishElectronBrowserWindowsSteps(findings, index);
   if (accumulator.pendingModuleRequireCalls.length > 0) {
     yield* index.indexMemberMutationFactsSteps();
-    finishModuleRequireCalls(findings, bindings);
+    finishModuleRequireCalls(findings, index);
   }
   if (
     accumulator.pendingNetworkCalls.length > 0 ||
@@ -330,8 +335,5 @@ const inspectNode = (
       kind: "dynamic-import",
       specifier: stringValue(node.source),
     });
-  if (t.isObjectProperty(node)) {
-    inspectRoleProperty(node, findings);
-  }
   inspectRpcNode(node, findings);
 };

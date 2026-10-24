@@ -33,6 +33,7 @@ import { UnknownRegistryError } from "./unknownRegistryError.js";
 import { providerRetryAction } from "./providerOperationHealth.js";
 import { fixedAllowanceRemediation } from "./fixedAllowanceRemediation.js";
 import {
+  primaryAnalysisError,
   resolvedAnalysisError,
   type AnalysisError,
   type AnalysisErrorTag,
@@ -106,6 +107,12 @@ export const analysisErrorRemediationAction = (
   )
     return error.remediationAction;
   if (error instanceof AnalysisTimeoutError) return timeoutRemediation(error);
+  if (
+    error instanceof ArtifactOperationError &&
+    error.reason === "limit" &&
+    error.boundary === "capacity"
+  )
+    return "Use an artifact within the capacity reported in details.detail. Changing output detail or retrying the unchanged input does not remove this boundary.";
   if (error instanceof HopperTimeoutError)
     return error.operation === undefined
       ? "Review details.launcher and inspect Hopper for ongoing initial analysis or a pending loader, demo, or license dialog. For a large target, increase REA_HOPPER_STARTUP_TIMEOUT_MS in the environment that starts REA and allow at least that long in the MCP client. Resolve retained cleanup before reopening."
@@ -168,7 +175,7 @@ export const analysisErrorRemediationAction = (
 export const analysisErrorCategory = (
   error: AnalysisError,
 ): AnalysisErrorProjection["category"] => {
-  error = resolvedAnalysisError(error);
+  error = primaryAnalysisError(error);
   if (error instanceof AnalysisCapabilityUnavailableError && error.retryable)
     return "unavailable";
   if (
@@ -205,12 +212,19 @@ export const analysisErrorCategory = (
     return "unavailable";
   if (error instanceof ArtifactOperationError)
     return artifactErrorCategory(error.reason);
+  if (error instanceof EvidenceFileError && error.reason === "path-limit")
+    return "resource_constraint";
   if (
     error instanceof EvidenceFileError &&
     (error.reason === "missing" ||
       error.reason === "not-file" ||
       error.reason === "wrong-kind" ||
       error.reason === "exists")
+  )
+    return "invalid_input";
+  if (
+    error instanceof UnknownRegistryError &&
+    error.reason === "already-exists"
   )
     return "invalid_input";
   return STATIC_ERROR_CATEGORIES[error._tag] ?? "execution_failure";
@@ -296,6 +310,11 @@ export const analysisErrorUserMessage = (error: AnalysisError): string => {
   if (error instanceof EvidenceIntegrityError)
     return "Evidence is invalid or has changed. Recreate or re-import it, then try again.";
   if (error instanceof EvidenceFileError) return evidenceFileMessage(error);
+  if (
+    error instanceof UnknownRegistryError &&
+    error.reason === "already-exists"
+  )
+    return "This residual unknown already exists in the session. Reuse it or call update_unknown with its current expected_revision; do not repeat record_unknown.";
   if (error instanceof UnknownRegistryError && error.reason === "not-found")
     return "The requested residual unknown does not exist in this session. Check the unknown_id and try again.";
   if (error instanceof UnknownRegistryError)
@@ -461,7 +480,10 @@ const artifactMessage = ({
   if (reason === "cancelled")
     return "Artifact operation was cancelled. Start it again when ready.";
   if (reason === "limit")
-    return "Artifact is too large to process safely. Narrow the requested path or use a smaller artifact.";
+    return (
+      detail ??
+      "Artifact processing reached a resource limit. Select an artifact within the reported limits and retry."
+    );
   if (reason === "path")
     return (
       detail ??
@@ -470,8 +492,12 @@ const artifactMessage = ({
   if (reason === "unavailable" && details?.unpacked === true)
     return `ASAR unpacked companion bytes are unavailable for ${details.logicalPath}. Select the archive in place with its .unpacked directory beside it, then retry.`;
   if (reason === "unavailable")
-    return "Artifact processing is unavailable for the current target or host. Check artifact support and required tools.";
-  if (reason === "integrity" && INTEGRITY_POLICY_OPERATIONS.has(operation))
+    return "Artifact processing is unavailable. Review the reported availability reason and resolve that condition before retrying.";
+  if (
+    reason === "integrity" &&
+    details !== undefined &&
+    INTEGRITY_POLICY_OPERATIONS.has(operation)
+  )
     return `${
       details?.unpacked === true &&
       "calculatedSha256" in details &&
@@ -491,6 +517,8 @@ const evidenceFileMessage = ({
 }: EvidenceFileError): string => {
   if (published !== undefined)
     return "The output file was published, but staging cleanup remains incomplete.";
+  if (reason === "path-limit")
+    return "Filesystem path-length constraints prevented reading or atomic publication at the selected path. Choose a shorter local path.";
   if (reason === "missing")
     return operation === "read"
       ? "Evidence file does not exist at the selected path. Check the path and try again."

@@ -25,6 +25,7 @@ import { jsonObjectSchema } from "../../src/domain/jsonValue.js";
 import { il2cppMetadataSchema } from "../../src/domain/il2cpp/il2cppMetadata.js";
 import {
   createIl2cppMetadataFixture,
+  createLinkedIl2cppMetadataFixture,
   FIXTURE_IMAGES,
   FIXTURE_METHODS,
   FIXTURE_TYPES,
@@ -32,6 +33,8 @@ import {
 import {
   createElfFixture,
   createIl2cppBinaryFixture,
+  createIl2cppDyldBindFixture,
+  createIl2cppRegistrationTailFixture,
   createUniversalFixture,
   FIXTURE_BINARY_BASE,
   FIXTURE_METHOD_ADDRESSES,
@@ -432,7 +435,7 @@ const assertRetainedNativeSelections = async (
 it("queries compact retained metadata through the real SDK with exact row identities and fields", async () => {
   const root = await createTestTempDirectory("rea-il2cpp-sdk-selection-");
   const path = join(root, "global-metadata.dat");
-  const fixture = createIl2cppMetadataFixture({ version: 31 });
+  const fixture = createLinkedIl2cppMetadataFixture({ version: 31 });
   await writeFile(path, fixture.bytes);
   const binaryPath = join(root, "GameAssembly.dylib");
   const binaryBytes = createIl2cppBinaryFixture();
@@ -765,7 +768,7 @@ cliTest(
     const root = await createTestTempDirectory("rea-il2cpp-binary-");
     const path = join(root, "global-metadata.dat");
     const binaryPath = join(root, "GameAssembly.dylib");
-    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
     await writeFile(
       binaryPath,
       createUniversalFixture([
@@ -852,12 +855,271 @@ cliTest(
 );
 
 cliTest(
+  "keeps a dyld-bound method slot unresolved through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-dyld-bind-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "GameAssembly.dylib");
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
+    await writeFile(binaryPath, createIl2cppDyldBindFixture(0n));
+
+    const result = await runFileCli(cli, {
+      arguments: [
+        "inspect-il2cpp-metadata",
+        path,
+        "--binary",
+        binaryPath,
+        "--json",
+      ],
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const report = parseCliMetadata(result.json);
+    expect(report.method_addresses[1]).toEqual({
+      state: "unknown",
+      address: null,
+      rva: null,
+    });
+    expect(report.method_addresses[4]).toEqual({
+      state: "no-body",
+      address: null,
+      rva: null,
+    });
+
+    const { client, call } = await connectLocalToolsMcp();
+    const response = await call("inspect_il2cpp_metadata", {
+      path,
+      binary_path: binaryPath,
+      detail: "complete",
+    });
+    expect(response.isError, JSON.stringify(response)).not.toBe(true);
+    expect(
+      parseCliMetadata(response.structuredContent).method_addresses,
+    ).toEqual(report.method_addresses);
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "retains unknown dyld-bound type names and source identity through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-type-bind-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "GameAssembly.dylib");
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
+    const inspect = async (bytes: Buffer) => {
+      await writeFile(binaryPath, bytes);
+      const output = await runFileCli(cli, {
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--json",
+        ],
+      });
+      expect(output.exitCode, output.stderr).toBe(0);
+      const report = parseCliMetadata(output.json);
+      expect(report.binary?.artifact).toEqual({
+        path: binaryPath,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        bytes: bytes.length,
+      });
+      expect(await readFile(binaryPath)).toEqual(bytes);
+      return report;
+    };
+    const control = await inspect(createIl2cppBinaryFixture());
+    expect(control.return_types[0]?.name).toBe(FIXTURE_RETURN_TYPE_NAME);
+    const { client, call } = await connectLocalToolsMcp();
+    for (const raw of [
+      0n,
+      FIXTURE_BINARY_BASE + 0x980n,
+      FIXTURE_BINARY_BASE + 0x9b0n,
+    ]) {
+      const report = await inspect(createIl2cppDyldBindFixture(raw, 0x900));
+      for (const collection of [
+        "return_types",
+        "field_types",
+        "parameter_types",
+      ] as const)
+        expect(report[collection]).toEqual(
+          control[collection].map((row) =>
+            row.type === 0 ? { ...row, name: null } : row,
+          ),
+        );
+      expect(report.methods).toEqual(control.methods);
+      expect(report.method_addresses).toEqual(control.method_addresses);
+      expect(report.limitations).toContainEqual(
+        expect.stringContaining("unresolved type-table slot"),
+      );
+      // One transport round trip covers the nullable name contract; all stored
+      // placeholder variants above cross the real CLI workflow.
+      if (raw === 0n) {
+        const response = await call("inspect_il2cpp_metadata", {
+          path,
+          binary_path: binaryPath,
+          detail: "complete",
+        });
+        expect(response.isError, JSON.stringify(response)).not.toBe(true);
+        expect(parseCliMetadata(response.structuredContent)).toEqual(report);
+      }
+    }
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "links ABI count padding and declared zero-fill registration tails through CLI and MCP",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory(
+      "rea-il2cpp-registration-layout-",
+    );
+    const path = join(root, "global-metadata.dat");
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
+    const { client, call } = await connectLocalToolsMcp();
+    for (const tailBytes of [0, 8, 16] as const) {
+      const bytes = createIl2cppRegistrationTailFixture(tailBytes);
+      bytes.fill(0xff, 0x604, 0x608);
+      const binaryPath = join(root, `registration-${tailBytes}.dylib`);
+      await writeFile(binaryPath, bytes);
+      const output = await runFileCli(cli, {
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--json",
+        ],
+      });
+      expect(output.exitCode, output.stderr).toBe(0);
+      const report = parseCliMetadata(output.json);
+      expect(report.binary).toMatchObject({
+        code_gen_modules_field: "0x100000600",
+        types_field: "0x100000fb0",
+        types_count: 4,
+        artifact: {
+          path: binaryPath,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          bytes: bytes.length,
+        },
+      });
+      expect(report.return_types.map((row) => row.name)).toEqual(
+        Array.from({ length: 5 }, () => FIXTURE_RETURN_TYPE_NAME),
+      );
+      expect(report.method_addresses.map((row) => row.state)).toEqual([
+        "code",
+        "code",
+        "code",
+        "code",
+        "no-body",
+      ]);
+      if (tailBytes === 16) {
+        const response = await call("inspect_il2cpp_metadata", {
+          path,
+          binary_path: binaryPath,
+          detail: "complete",
+        });
+        expect(response.isError, JSON.stringify(response)).not.toBe(true);
+        expect(parseCliMetadata(response.structuredContent)).toEqual(report);
+      }
+      expect(await readFile(binaryPath)).toEqual(bytes);
+    }
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
+  "keeps nested IL2CPP generic arguments on their declaring type components",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-nested-generics-");
+    const cases = [
+      {
+        name: "top-level",
+        metadata: createLinkedIl2cppMetadataFixture(),
+        binary: createIl2cppBinaryFixture(),
+        expected: "System.Größe<int>[]",
+      },
+      {
+        name: "nested-own-parameter",
+        metadata: createLinkedIl2cppMetadataFixture({
+          typeNames: { 0: "Outer`1", 1: "Inner`2" },
+          typeNamespaces: { 0: "Game", 1: "" },
+          genericTypeArgumentCounts: { 0: 1, 1: 2 },
+        }),
+        binary: createIl2cppBinaryFixture({
+          genericDefinitionTypeIndex: 1,
+          genericArgumentTypeIndices: [3, 3],
+        }),
+        expected: "Game.Outer<int>+Inner<int>[]",
+      },
+      {
+        name: "nested-inherited-only",
+        metadata: createLinkedIl2cppMetadataFixture({
+          typeNames: { 0: "Outer`1", 1: "Leaf`1" },
+          typeNamespaces: { 0: "Game", 1: "" },
+          genericTypeArgumentCounts: { 0: 1, 1: 1 },
+        }),
+        binary: createIl2cppBinaryFixture({
+          genericDefinitionTypeIndex: 1,
+          genericArgumentTypeIndices: [3],
+        }),
+        expected: "Game.Outer<int>+Leaf[]",
+      },
+    ] as const;
+    const { client, call } = await connectLocalToolsMcp();
+    for (const entry of cases) {
+      const path = join(root, `${entry.name}.dat`);
+      const binaryPath = join(root, `${entry.name}.dylib`);
+      await writeFile(path, entry.metadata.bytes);
+      await writeFile(binaryPath, entry.binary);
+      const cliResult = await runFileCli(cli, {
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--json",
+        ],
+      });
+      expect(cliResult.exitCode, cliResult.stderr).toBe(0);
+      const cliReport = parseCliMetadata(cliResult.json);
+      expect(cliReport.return_types[0]?.name).toBe(entry.expected);
+      expect(
+        cliReport.field_types.some((row) => row.name === entry.expected),
+      ).toBe(true);
+      expect(
+        cliReport.parameter_types.some((row) => row.name === entry.expected),
+      ).toBe(true);
+
+      const response = await call("inspect_il2cpp_metadata", {
+        path,
+        binary_path: binaryPath,
+        detail: "complete",
+      });
+      expect(response.isError, JSON.stringify(response)).not.toBe(true);
+      const mcpReport = parseCliMetadata(response.structuredContent);
+      expect(mcpReport.return_types[0]?.name).toBe(entry.expected);
+      expect(
+        mcpReport.field_types.some((row) => row.name === entry.expected),
+      ).toBe(true);
+      expect(
+        mcpReport.parameter_types.some((row) => row.name === entry.expected),
+      ).toBe(true);
+    }
+    await client.ping();
+  },
+  30000,
+);
+
+cliTest(
   "marks a module array found through an x86-64 instruction as derived",
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-il2cpp-inlined-");
     const path = join(root, "global-metadata.dat");
     const binaryPath = join(root, "GameAssembly.so");
-    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
     await writeFile(
       binaryPath,
       createElfFixture(
@@ -897,7 +1159,7 @@ cliTest(
     const binaryPath = join(root, "libil2cpp.so");
     const seeds = join(root, "seeds.tsv");
     const shifted = join(root, "shifted.tsv");
-    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
     await writeFile(binaryPath, createElfFixture(createIl2cppBinaryFixture()));
     const run = (output: string, extra: readonly string[] = []) =>
       runFileCli(cli, {
@@ -979,6 +1241,73 @@ cliTest(
   },
 );
 
+cliTest(
+  "keeps IL2CPP rank-one arrays distinct from vectors in CLI type rows",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-il2cpp-array-kind-");
+    const path = join(root, "global-metadata.dat");
+    const binaryPath = join(root, "GameAssembly.dylib");
+    await writeFile(
+      path,
+      createLinkedIl2cppMetadataFixture({ version: 31 }).bytes,
+    );
+
+    const makeBinary = (kind: "vector" | "array", rank = 1) => {
+      const bytes = createIl2cppBinaryFixture();
+      // Type record 0 is the returned type; slot 3 is the fixture's `int`.
+      const typeRecord = 0x980;
+      const intType = FIXTURE_BINARY_BASE + 0x9b0n;
+      if (kind === "vector") {
+        bytes.writeBigUInt64LE(intType, typeRecord);
+        return bytes;
+      }
+      // ARRAY points to Il2CppArrayType: element pointer, then rank byte.
+      const arrayType = 0xb00;
+      bytes.writeBigUInt64LE(
+        FIXTURE_BINARY_BASE + BigInt(arrayType),
+        typeRecord,
+      );
+      bytes.writeUInt32LE(0x14 << 16, typeRecord + 8);
+      bytes.writeBigUInt64LE(intType, arrayType);
+      bytes.writeUInt8(rank, arrayType + 8);
+      return bytes;
+    };
+
+    const inspect = async (binary: Buffer) => {
+      await writeFile(binaryPath, binary);
+      const result = await runFileCli(cli, {
+        arguments: [
+          "inspect-il2cpp-metadata",
+          path,
+          "--binary",
+          binaryPath,
+          "--json",
+        ],
+      });
+      return result;
+    };
+
+    const vector = await inspect(makeBinary("vector"));
+    expect(vector.exitCode, vector.stderr).toBe(0);
+    const vectorType = parseCliMetadata(vector.json).return_types[0];
+    expect(vectorType?.name).toBe("int[]");
+
+    const rankOne = await inspect(makeBinary("array", 1));
+    expect(rankOne.exitCode, rankOne.stderr).toBe(0);
+    const rankOneType = parseCliMetadata(rankOne.json).return_types[0];
+    expect(rankOneType?.name).toBe("int[*]");
+    expect(rankOneType?.type).toBe(vectorType?.type);
+
+    const rankTwo = await inspect(makeBinary("array", 2));
+    expect(rankTwo.exitCode, rankTwo.stderr).toBe(0);
+    expect(parseCliMetadata(rankTwo.json).return_types[0]?.name).toBe("int[,]");
+
+    const malformed = await inspect(makeBinary("array", 0));
+    expect(malformed.exitCode).not.toBe(0);
+    expect(JSON.stringify(malformed.json)).toContain("array rank is zero");
+  },
+);
+
 cliTest.skipIf(process.platform === "win32")(
   "refuses a Ghidra seed path below a regular file as caller input",
   async ({ cli }) => {
@@ -986,7 +1315,7 @@ cliTest.skipIf(process.platform === "win32")(
     const path = join(root, "global-metadata.dat");
     const binaryPath = join(root, "libil2cpp.so");
     const parent = join(root, "regular-file");
-    await writeFile(path, createIl2cppMetadataFixture().bytes);
+    await writeFile(path, createLinkedIl2cppMetadataFixture().bytes);
     await writeFile(binaryPath, createElfFixture(createIl2cppBinaryFixture()));
     await writeFile(parent, "unchanged");
     const result = await runFileCli(cli, {

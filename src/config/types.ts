@@ -1,4 +1,4 @@
-import type { LogLevel } from "../logger.js";
+import type { LogLevel } from "./processStart.js";
 import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
 import type { AnalysisProviderSelector } from "../contracts/providerSelection.js";
 
@@ -18,6 +18,8 @@ export interface AppConfig {
   readonly ghidraInstallDir: string | undefined;
   readonly ghidraJavaHome: string | undefined;
   readonly ghidraStartupTimeoutMs: number;
+  /** Per-function native decompiler limit; absent leaves decompiles unbounded. */
+  readonly ghidraDecompileTimeoutSeconds?: number;
   readonly ghidraLanguageOverride?: GhidraLanguageOverride;
   readonly ghidraDisabledAnalyzers?: readonly string[];
   readonly ghidraSeedFile?: string;

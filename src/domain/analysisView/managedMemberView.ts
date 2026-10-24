@@ -68,9 +68,11 @@ export const managedMemberSummarySchema = z.strictObject({
   nesting_read: member.nesting_read,
   artifact: member.artifact,
   module: member.module,
+  assembly: member.assembly,
   metadata: member.metadata,
   identity_scope: member.identity_scope,
   selection: member.selection.unwrap(),
+  method_rows: member.method_rows,
   coverage: member.coverage,
   user_strings: z
     .strictObject({
@@ -96,6 +98,7 @@ export const managedMembersViewContextSchema = z.strictObject({
   nesting_read: member.nesting_read,
   identity_scope: member.identity_scope,
   selection: member.selection.unwrap(),
+  method_rows: member.method_rows,
   source_metadata_status: member.metadata.shape.status,
   source_coverage: member.coverage,
 });
@@ -277,6 +280,7 @@ export const projectManagedMemberView = (
     nesting_read: report.nesting_read,
     identity_scope: report.identity_scope,
     selection: report.selection,
+    method_rows: report.method_rows,
     source_metadata_status: report.metadata.status,
     source_coverage:
       view.collection === "user_strings" && report.user_strings !== null

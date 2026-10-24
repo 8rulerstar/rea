@@ -30,6 +30,52 @@ const analyze = (source: string, budget?: number) => {
   return complete(scan.finishSteps());
 };
 
+it.each(["true", "(true as const)", "INDEX"])(
+  "retains an index route with flag %s",
+  (flag) => {
+    const facts = analyze(
+      `const INDEX=true;createBrowserRouter([{index:${flag},Component:Home}]);`,
+    );
+    expect(facts.candidates.map(({ path }) => path)).toEqual(["/"]);
+    expect(facts.unresolved).toEqual([]);
+  },
+);
+
+it.each([
+  "createBrowserRouter([{index:INDEX,Component:Home}]);const INDEX=true;",
+  "const INDEX=runtime;createBrowserRouter([{index:INDEX,Component:Home}]);",
+])("retains unknown index flags without inventing a route: %s", (source) => {
+  const facts = analyze(source);
+  expect(facts.candidates).toEqual([]);
+  expect(facts.unresolved).toEqual([
+    expect.objectContaining({
+      reason: expect.stringContaining("index-route flag"),
+    }),
+  ]);
+});
+
+it("keeps a known false index flag absent", () => {
+  const facts = analyze(
+    "const INDEX=false;createBrowserRouter([{index:INDEX,Component:Home}]);",
+  );
+  expect(facts.candidates).toEqual([]);
+  expect(facts.unresolved).toEqual([]);
+});
+
+it("keeps module references out of Next page declarations and retains unknown runtime applicability", () => {
+  const facts = analyze(
+    `import Page from './components/app/string-only/page.js';const ordinary=require('./components/app/module-only/page.js');const page='app/unproven/page.js';`,
+  );
+  expect(facts.candidates).toEqual([]);
+  expect(facts.unresolved).toMatchObject([
+    { mechanism: "next-app-chunk", reason: expect.stringContaining("context") },
+  ]);
+  const after = analyze(
+    `const page='app/reports/page.js';globalThis.TURBOPACK=[];`,
+  );
+  expect(after.candidates.map(({ path }) => path)).toEqual(["/reports"]);
+});
+
 it("joins router children and preserves each segment's source", () => {
   const facts = analyze(
     `createBrowserRouter([{path:'/reports',children:[{path:':id?',children:[{path:'settings'}]}]}]);`,
@@ -244,7 +290,12 @@ it.each([
   ["app/blog/_draft/page.js", undefined],
   ["app/(group)/_private/nested/page.tsx", undefined],
   ["app/%5Fcomponents/page.tsx", "/_components"],
-  ["app/blog/%5fdraft/page.js", "/blog/_draft"],
+  ["app/blog/%5fdraft/page.js", "/blog/%5fdraft"],
+  ["app/%61/page.tsx", "/%61"],
+  ["https://example.test/app/%61/page.tsx", undefined],
+  ["app/a/page.tsx", "/a"],
+  ["app/100%/page.tsx", "/100%"],
+  ["app/team%2Fadmin/page.tsx", "/team%2Fadmin"],
   ["static/chunks/app/(account)/reports/[id]/page-deadbeef.js", "/reports/:id"],
   ["app/docs/[...slug]/page.js", "/docs/:slug+"],
   ["app/(account)/reports/[id]/page.tsx", "/reports/:id"],
@@ -255,7 +306,10 @@ it.each([
 ] as const)(
   "interprets Next App Router path %s without claiming reachability",
   (value, expected) => {
-    const route = classifyNextAppRoutePath(value);
+    const route = classifyNextAppRoutePath(value, {
+      kind: "source-literal",
+      runtime: "next",
+    });
     expect(route?.kind === "known" ? route.path : undefined).toBe(expected);
   },
 );
@@ -652,7 +706,7 @@ it("keeps callable bodies independent of navigation data ownership", () => {
 });
 
 it.each([
-  "const modulePath='app/feed/(.)photo/page.tsx';",
+  "globalThis.TURBOPACK=[];const modulePath='app/feed/(.)photo/page.tsx';",
   "globalThis.TURBOPACK=[];const modulePath='/app/feed/(.)photo/page.tsx';",
 ] as const)("retains intercepted module paths as unknown: %s", (source) => {
   const facts = analyze(source);
@@ -660,7 +714,9 @@ it.each([
   expect(facts.unresolved).toEqual([
     expect.objectContaining({
       mechanism: "next-app-chunk",
-      reason: expect.stringContaining("intercepted"),
+      reason: expect.stringContaining(
+        source.includes("='/app/") ? "context" : "intercepted",
+      ),
     }),
   ]);
 });
@@ -668,7 +724,12 @@ it.each([
 it.each(["app/(.)photo/_private/page.tsx", "app/_private/(.)photo/page.tsx"])(
   "keeps private pages excluded before interpreting %s",
   (value) => {
-    expect(classifyNextAppRoutePath(value)).toBeUndefined();
+    expect(
+      classifyNextAppRoutePath(value, {
+        kind: "source-literal",
+        runtime: "next",
+      }),
+    ).toBeUndefined();
   },
 );
 

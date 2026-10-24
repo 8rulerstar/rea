@@ -1,25 +1,24 @@
 import { z } from "zod";
 
-import { artifactComparisonResultSchema } from "./artifactComparison.js";
 import { uniqueSorted } from "./canonicalOrdering.js";
 import {
   compositeKey,
   compareUnicodeCodePoints,
 } from "./unicodeCodePointOrder.js";
+import { comparisonSourceEvidenceIds } from "./comparisonSourceEvidence.js";
 import {
-  assertComparisonFindingLinks,
-  comparisonSourceEvidenceIds,
-} from "./comparisonSourceEvidence.js";
+  readComparisonResult,
+  type ParsedComparisonEvidence,
+} from "./comparisonEvidenceResult.js";
 import { evidenceSchema, type Evidence } from "./evidence.js";
-import { AnalysisInputError } from "./analysisErrorCore.js";
+import type { AnalysisInputError } from "./analysisErrorCore.js";
 import { EvidenceIntegrityError } from "./evidenceErrors.js";
 import { analysisInputErrorFromIssues } from "./inputIssueProjection.js";
-import { readEvidence, readEvidencePayload } from "./evidenceValidation.js";
+import { readEvidence } from "./evidenceValidation.js";
 import {
   hasComparisonEvidenceIdentity,
   isComparisonEvidenceOperation,
 } from "./comparisonEvidenceIdentity.js";
-import { functionComparisonResultSchema } from "./functionComparisonSchemas.js";
 import {
   comparisonStatusSchema,
   processCaptureComparisonSchema,
@@ -96,22 +95,6 @@ export const changedBehaviorResultSchema = z
 export type ChangedBehaviorResult = z.infer<typeof changedBehaviorResultSchema>;
 type Finding = z.infer<typeof findingSchema>;
 type RuntimeStatus = z.infer<typeof processCaptureComparisonSchema>["status"];
-type ParsedComparison =
-  | {
-      readonly operation: "compare_process_captures";
-      readonly evidence: Evidence;
-      readonly result: z.infer<typeof processCaptureComparisonSchema>;
-    }
-  | {
-      readonly operation: "compare_functions";
-      readonly evidence: Evidence;
-      readonly result: z.infer<typeof functionComparisonResultSchema>;
-    }
-  | {
-      readonly operation: "compare_artifacts";
-      readonly evidence: Evidence;
-      readonly result: z.infer<typeof artifactComparisonResultSchema>;
-    };
 
 /** Find observed runtime changes and separately report static change candidates. */
 interface FoundChangedBehavior {
@@ -128,10 +111,14 @@ export const findChangedBehavior = (input: unknown): FoundChangedBehavior => {
     .strictObject({ comparisons: z.array(z.unknown()).min(1) })
     .safeParse(input);
   if (!envelope.success)
-    throw inputSchemaError(
+    throw analysisInputErrorFromIssues(
+      OPERATION,
+      envelope.error.issues,
       input,
-      envelope.error,
-      "Provide at least one comparison Evidence item.",
+      {
+        cause: envelope.error,
+        userMessage: "Provide at least one comparison Evidence item.",
+      },
     );
   const { comparisons } = envelope.data;
   const evidence = comparisons.map((item, index) =>
@@ -196,7 +183,7 @@ const parseComparisonEvidence = (
   input: unknown,
   fullInput: unknown,
   index: number,
-): ParsedComparison => {
+): ParsedComparisonEvidence => {
   const parsedEvidence = readEvidence(input);
   if (!parsedEvidence.ok) throw parsedEvidence.error;
   const evidence = parsedEvidence.value;
@@ -219,49 +206,12 @@ const parseComparisonEvidence = (
     throw evidenceIntegrityError(
       "Comparison Evidence must cite both selected source observations",
     );
-  return parseResult(evidence, operation);
-};
-
-const parseResult = (
-  evidence: Evidence,
-  operation:
-    | "compare_process_captures"
-    | "compare_artifacts"
-    | "compare_functions",
-): ParsedComparison => {
-  if (operation === "compare_process_captures") {
-    const result = readEvidencePayload(
-      processCaptureComparisonSchema,
-      evidence.normalized_result,
-    );
-    if (!result.ok) throw result.error;
-    return { operation, evidence, result: result.value };
-  }
-  if (operation === "compare_functions") {
-    const result = readEvidencePayload(
-      functionComparisonResultSchema,
-      evidence.normalized_result,
-    );
-    if (!result.ok) throw result.error;
-    assertComparisonFindingLinks(
-      evidence,
-      result.value.dimensions.flatMap(({ evidence_links: links }) => links),
-    );
-    return { operation, evidence, result: result.value };
-  }
-  const result = readEvidencePayload(
-    artifactComparisonResultSchema,
-    evidence.normalized_result,
-  );
+  const result = readComparisonResult(evidence, operation);
   if (!result.ok) throw result.error;
-  assertComparisonFindingLinks(
-    evidence,
-    result.value.changes.flatMap(({ evidence_links: links }) => links),
-  );
-  return { operation, evidence, result: result.value };
+  return result.value;
 };
 
-const findingsFor = (comparison: ParsedComparison): Finding[] => {
+const findingsFor = (comparison: ParsedComparisonEvidence): Finding[] => {
   if (comparison.operation === "compare_process_captures")
     return processFindings(comparison);
   if (comparison.operation === "compare_functions")
@@ -271,7 +221,7 @@ const findingsFor = (comparison: ParsedComparison): Finding[] => {
 
 const processFindings = (
   comparison: Extract<
-    ParsedComparison,
+    ParsedComparisonEvidence,
     { readonly operation: "compare_process_captures" }
   >,
 ): Finding[] => {
@@ -303,7 +253,7 @@ const processFindings = (
 
 const functionFindings = (
   comparison: Extract<
-    ParsedComparison,
+    ParsedComparisonEvidence,
     { readonly operation: "compare_functions" }
   >,
 ): Finding[] => {
@@ -330,7 +280,7 @@ const functionFindings = (
 
 const artifactFindings = (
   comparison: Extract<
-    ParsedComparison,
+    ParsedComparisonEvidence,
     { readonly operation: "compare_artifacts" }
   >,
 ): Finding[] => {
@@ -428,38 +378,15 @@ const firstDuplicateIndex = (values: readonly string[]): number | undefined => {
 
 const OPERATION = "find_changed_behavior";
 
-const inputSchemaError = (
-  input: unknown,
-  cause: z.ZodError,
-  userMessage: string,
-): AnalysisInputError => {
-  const projected = analysisInputErrorFromIssues(
-    OPERATION,
-    cause.issues,
-    input,
-    { cause },
-  );
-  return new AnalysisInputError(
-    OPERATION,
-    { cause, userMessage },
-    projected.issues,
-  );
-};
-
 const callerInputError = (
   input: unknown,
   path: readonly (string | number)[],
   message: string,
-): AnalysisInputError => {
-  const projected = analysisInputErrorFromIssues(OPERATION, [], input, {
+): AnalysisInputError =>
+  analysisInputErrorFromIssues(OPERATION, [], input, {
+    userMessage: message,
     additionalIssues: [{ path, reason: "invalid_value", message }],
   });
-  return new AnalysisInputError(
-    OPERATION,
-    { userMessage: message },
-    projected.issues,
-  );
-};
 
 const evidenceIntegrityError = (message: string): EvidenceIntegrityError =>
   new EvidenceIntegrityError(message, { userMessage: message });

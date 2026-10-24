@@ -758,6 +758,18 @@ it.each([
     { code: true, apple: true, package: false, runtime: false },
   ],
   [
+    "scripts/ci/qualified-package-envelope.mjs",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
+    "scripts/ci/prepare-npm-publication.mjs",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
+    "scripts/ci/npm-release-state.mjs",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
     "tests/boundary/filesystem/windowsNpxRegistration.test.ts",
     { code: true, package: true, runtime: true, apple: false },
   ],
@@ -1233,6 +1245,50 @@ it.each([
   [
     "tests/conformance/readiness/javascript-cli/package.json",
     { code: true, fixtures: false, readiness: true, package: false },
+  ],
+  [
+    "scripts/verify-reconstruction-readiness.mjs",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "scripts/lib/cli-process-environment.mjs",
+    {
+      code: true,
+      package: true,
+      runtime: true,
+      javascript_recovery: true,
+      readiness: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadiness.ts",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadinessExample.ts",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadiness.test.ts",
+    { code: true, readiness: false, runtime: false, package: false },
   ],
   [
     "tests/conformance/ghidra/no-return.c",

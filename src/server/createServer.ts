@@ -1,3 +1,4 @@
+import { pcapCaptureHostSupported } from "../domain/pcap/pcapAnalysis.js";
 import { createGpuCodeObjectsService } from "../composition/gpu.js";
 import { registerGpuCodeObjectsTools } from "./registerGpuCodeObjectsTools.js";
 import type { PacketCaptureService } from "../application/captures/PacketCaptureService.js";
@@ -24,15 +25,18 @@ import { captureProviderEnvironment } from "./providerEnvironment.js";
 import {
   createElfNotesService,
   createPeCertificatesService,
+  createPeImportsService,
   createNativeExportsService,
   createPeResourcesService,
 } from "../composition/binaryDiagnostics.js";
 import type { ElfNotesService } from "../application/binaryDiagnostics/ElfNotesService.js";
 import type { PeCertificatesService } from "../application/binaryDiagnostics/PeCertificatesService.js";
+import type { PeImportsService } from "../application/binaryDiagnostics/PeImportsService.js";
 import type { PeResourcesService } from "../application/binaryDiagnostics/PeResourcesService.js";
 import type { NativeExportsService } from "../application/binaryDiagnostics/NativeExportsService.js";
 import { registerElfNotesTool } from "./registerElfNotesTool.js";
 import { registerPeCertificatesTool } from "./registerPeCertificatesTool.js";
+import { registerPeImportsTool } from "./registerPeImportsTool.js";
 import { registerPeResourcesTool } from "./registerPeResourcesTool.js";
 import { registerNativeExportsTool } from "./registerNativeExportsTool.js";
 import type { EvmInterfaceService } from "../application/evm/EvmInterfaceService.js";
@@ -98,6 +102,7 @@ import type { CompactInputSchemaPresentation } from "./EvidenceMcpServer.js";
 import { isAbsolute } from "node:path";
 
 import type { BinarySessionPort } from "../application/binary/BinarySessionPort.js";
+import { investigationEvidenceLookup } from "../application/investigation/InvestigationEvidence.js";
 import type { BrowserObservationPort } from "../application/BrowserObservationPort.js";
 import type { BrowserScenarioCapturePort } from "../application/BrowserScenarioCapturePort.js";
 import type { ElectronActiveObservationPort } from "../application/javascript/ElectronActiveObservationPort.js";
@@ -279,6 +284,7 @@ const installSessionToolAvailability = (
   // Each provider owns its verified host; discovery and execution share it.
   const verifiedHost = {
     packetCapture: tsharkHostSupported(platform),
+    pcapCapture: pcapCaptureHostSupported(platform),
     signalRecording: sigrokHostSupported(platform),
     evmInterface: evmHostSupported(platform, arch),
     pwntools: pwntoolsHostSupported(platform, arch),
@@ -294,6 +300,10 @@ const installSessionToolAvailability = (
   const basePolicy = sessionAvailabilityPolicy(options.availabilityPolicy, {
     optionalProviderLoadFailures: options.optionalProviderLoadFailures,
     hostUnsupported: {
+      pcapCapture: outsideVerifiedHost(
+        options.pcapAnalysis,
+        verifiedHost.pcapCapture,
+      ),
       packetCapture: outsideVerifiedHost(
         options.packetCapture,
         verifiedHost.packetCapture,
@@ -466,6 +476,7 @@ export const createServer = (
   const nativeExports = createNativeExportsService();
   const elfNotes = createElfNotesService();
   const peCertificates = createPeCertificatesService();
+  const peImports = createPeImportsService();
   const electronFuses = options.electronFuses ?? createElectronFuseService();
   const pythonPyc = options.pythonPyc ?? createPythonPycService();
   const webNetworkCapture =
@@ -578,6 +589,7 @@ export const createServer = (
       nativeExports.close(),
       elfNotes.close(),
       peCertificates.close(),
+      peImports.close(),
       electronFuses.close(),
       pythonPyc.close(),
       webNetworkCapture.close(),
@@ -647,6 +659,7 @@ export const createServer = (
     nativeExports,
     elfNotes,
     peCertificates,
+    peImports,
     electronFuses,
     pythonPyc,
     webNetworkCapture,
@@ -885,6 +898,7 @@ const registerConfiguredAnalysisTools = (
     nativeExports,
     elfNotes,
     peCertificates,
+    peImports,
     pythonPyc,
     webNetworkCapture,
     artifactResources,
@@ -899,7 +913,7 @@ const registerConfiguredAnalysisTools = (
 ): void => {
   registerAndroidTools(
     server,
-    new AndroidAnalysisService(android),
+    new AndroidAnalysisService(android, recordEvidence),
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -941,6 +955,7 @@ const registerConfiguredAnalysisTools = (
     nativeExports,
     toolLogger,
     recordEvidence,
+    evidenceById,
     withAdmittedAnalysis,
   );
   registerElfNotesTool(
@@ -953,6 +968,13 @@ const registerConfiguredAnalysisTools = (
   registerPeCertificatesTool(
     server,
     peCertificates,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerPeImportsTool(
+    server,
+    peImports,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -995,6 +1017,7 @@ const registerConfiguredAnalysisTools = (
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
+    evidenceById,
   );
   registerErlangTools(
     server,
@@ -1002,6 +1025,7 @@ const registerConfiguredAnalysisTools = (
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
+    evidenceById,
   );
   registerWasmTools(
     server,
@@ -1094,11 +1118,7 @@ const createSessionRecorders = (
   session: BinarySessionPort | undefined,
 ) => ({
   evidenceById:
-    session === undefined
-      ? undefined
-      : (evidenceId: string) =>
-          session.evidenceForAnalysis?.(evidenceId) ??
-          session.evidenceById(evidenceId),
+    session === undefined ? undefined : investigationEvidenceLookup(session),
   activeTarget:
     session === undefined ? undefined : () => session.activeTarget(),
   recordEvidence:
@@ -1125,6 +1145,7 @@ interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly nativeExports: NativeExportsService;
   readonly elfNotes: ElfNotesService;
   readonly peCertificates: PeCertificatesService;
+  readonly peImports: PeImportsService;
   readonly electronFuses: ElectronFuseService;
   readonly pythonPyc: PythonPycService;
   readonly webNetworkCapture: WebNetworkCaptureService;

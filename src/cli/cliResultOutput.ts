@@ -1,13 +1,10 @@
 import { constants } from "node:buffer";
 import type { Writable } from "node:stream";
 
-import { Filter, Formatter } from "incur";
+import { Filter } from "incur";
 import { estimateTokenCount } from "tokenx";
 
-import {
-  parseCliOutputArguments,
-  validateCliOutputArguments,
-} from "../cliOutput.js";
+import type { ParsedCliOutputArguments } from "../cliOutput.js";
 import {
   cliOperationFailureIdentity,
   cliOperationFailurePayload,
@@ -18,8 +15,12 @@ import {
   projectAnalysisError,
   type AnalysisErrorProjection,
 } from "../domain/analysisErrorProjection.js";
+import { formatCliOutput } from "./cliOutputFormatter.js";
+import { jsonLinesErrorRecord } from "./jsonLines.js";
+import { writeCliJsonLines } from "./jsonLinesOutput.js";
 import {
   jsonOutputParts,
+  isTerminalOutput,
   writeJsonOutput,
   writeOutputText,
 } from "./jsonOutput.js";
@@ -42,6 +43,13 @@ export interface CliResultOutput {
   readonly handled: boolean;
   readonly failed: boolean;
   readonly error: AnalysisErrorProjection | undefined;
+  /** Start another completed invocation on a reusable command registry. */
+  begin(options: ParsedCliOutputArguments): void;
+  /** SDK generators retain their own streaming event protocol. */
+  delegateStreaming(): void;
+  /** Retain one-shot SDK output until the SDK supplies its authoritative status. */
+  captureSdkOutput(text: string): boolean;
+  finishSdkOutput(exitCode: number): Promise<void>;
   write(value: unknown, metadata: CliResultOutputMetadata): Promise<boolean>;
   /** Recover only before any delegated stdout has been written. */
   recoverFormattingFailure(cause: unknown): Promise<boolean>;
@@ -72,8 +80,10 @@ const wrapCommand = (
       typeof result === "object" &&
       result !== null &&
       Symbol.asyncIterator in result
-    )
+    ) {
+      output.delegateStreaming();
       return result;
+    }
     return Promise.resolve(result).then(async (value: unknown) => {
       if (
         typeof value === "object" &&
@@ -102,16 +112,18 @@ const wrapCommand = (
 
 /** Preserve Incur output controls and stream JSON while framing failures. */
 export const createCliResultOutput = (
-  arguments_: readonly string[],
+  initialOptions: ParsedCliOutputArguments,
   destination: Writable,
 ): CliResultOutput | undefined => {
-  const options = parseCliOutputArguments(arguments_);
-  if (options.parseError || !validateCliOutputArguments(arguments_).ok)
-    return undefined;
-  const format = options.format as "json" | "jsonl" | "yaml" | "toon" | "md";
+  let options = initialOptions;
+  if (!options.validation.ok) return undefined;
+  let format = options.format as "json" | "jsonl" | "yaml" | "toon" | "md";
   let handled = false;
   let failed = false;
   let error: AnalysisErrorProjection | undefined;
+  let streaming = false;
+  const sdkParts: string[] = [];
+  let sdkCompletion: Promise<void> | undefined;
   let completed:
     | {
         readonly metadata: CliResultOutputMetadata;
@@ -164,7 +176,10 @@ export const createCliResultOutput = (
       : error;
     // Recovery must remain actionable even when a token window/count was
     // requested. Do not apply those controls to this small typed failure.
-    const text = Formatter.format(document, format);
+    const text = formatCliOutput(
+      format === "jsonl" ? jsonLinesErrorRecord(document) : document,
+      format,
+    );
     handled = true;
     try {
       await writeOutputText(destination, `${text}\n`);
@@ -197,6 +212,61 @@ export const createCliResultOutput = (
     get error() {
       return error;
     },
+    begin(nextOptions) {
+      options = nextOptions;
+      format = options.format as typeof format;
+      handled = false;
+      failed = false;
+      error = undefined;
+      completed = undefined;
+      streaming = false;
+      sdkParts.length = 0;
+      sdkCompletion = undefined;
+    },
+    delegateStreaming() {
+      streaming = true;
+    },
+    captureSdkOutput(text) {
+      if (format !== "jsonl" || streaming || handled) return false;
+      // Incur already materializes one-shot documents. Retain references only;
+      // generator events bypass this buffer and remain incremental.
+      if (text.length > 0) sdkParts.push(text);
+      return true;
+    },
+    finishSdkOutput(exitCode) {
+      return (sdkCompletion ??= (async () => {
+        const parts = sdkParts.splice(0);
+        try {
+          if (parts.length === 0) {
+            // SDK writes outside the JSONL buffer still share this destination.
+            // A write callback runs after earlier queued writes have completed,
+            // so the launcher's explicit exit cannot discard a pending pipe tail.
+            await writeOutputText(destination, "");
+            return;
+          }
+          if (exitCode === 0) {
+            for (const part of parts) await writeOutputText(destination, part);
+          } else {
+            const text = parts.join("");
+            let result: unknown = text;
+            try {
+              result = JSON.parse(text);
+            } catch {
+              /* Preserve non-JSON SDK diagnostics verbatim. */
+            }
+            await writeJsonOutput(
+              jsonLinesErrorRecord(result),
+              destination,
+              "jsonl",
+            );
+          }
+        } catch (cause: unknown) {
+          handled = true;
+          failed = true;
+          throw cause;
+        }
+      })());
+    },
     write,
     recoverFormattingFailure,
   };
@@ -213,94 +283,71 @@ export const createCliResultOutput = (
       ? Filter.parse(options.filterOutput)
       : undefined;
     const operationFailure =
-      options.fullOutput || filterPaths !== undefined
+      format === "jsonl" || options.fullOutput || filterPaths !== undefined
         ? cliOperationFailurePayload(value)
         : undefined;
     const failure = options.fullOutput ? operationFailure : undefined;
+    const ownsFilteredOutput =
+      operationFailure === undefined &&
+      filterPaths !== undefined &&
+      filterPaths.length > 0;
     // Incur owns suppressed human presentation, but a filter must never erase
     // the typed failure that this boundary already owns.
     if (
       operationFailure === undefined &&
       metadata.renderOutput === false &&
+      format !== "jsonl" &&
       !options.fullOutput &&
       !options.tokenCount
     )
       return false;
-    const filtered: unknown =
+    const selected: unknown =
       operationFailure ??
-      (filterPaths === undefined ? value : Filter.apply(value, filterPaths));
+      (filterPaths === undefined
+        ? value
+        : applyCliOutputFilter(value, filterPaths));
+    const filtered =
+      (format === "json" || format === "jsonl") &&
+      ownsFilteredOutput &&
+      Array.isArray(selected)
+        ? normalizeJsonArrayValues(selected)
+        : selected;
     const ownsSuccessfulTokenWindow =
       operationFailure === undefined &&
       options.tokenWindow &&
       !options.tokenCount &&
       format !== "json" &&
       format !== "jsonl";
+    // Delegate other human formats to Incur. Markdown stays here so admission
+    // and emitted table text use the same safe formatter.
     if (
-      operationFailure === undefined &&
-      filterPaths !== undefined &&
-      filterPaths.length > 0 &&
-      (format === "json" || format === "jsonl") &&
-      Array.isArray(filtered)
-    )
-      normalizeFilteredJsonArrays(filtered);
-    // Leave successful non-JSON rendering to Incur. This owner handles typed
-    // failures when full output is requested or a data filter would erase the
-    // failure projection.
-    if (
+      format !== "md" &&
       format !== "json" &&
       format !== "jsonl" &&
       operationFailure === undefined &&
+      !ownsFilteredOutput &&
       !ownsSuccessfulTokenWindow
     )
       return false;
-    if (options.tokenCount) {
-      // Incur/tokenx materialize JSON. Measure its UTF-16 expansion before
-      // allowing that allocation, independently of UTF-8 bytes. Other formats
-      // retain Incur's materializing behavior.
-      const tokenValue = failure ?? filtered;
-      let characters = 0;
-      if (
-        tokenValue !== undefined &&
-        tokenValue !== null &&
-        typeof tokenValue !== "function" &&
-        typeof tokenValue !== "symbol"
-      ) {
-        if (format === "json" || format === "jsonl") {
-          for (const part of jsonOutputParts(
-            tokenValue,
-            format,
-            format === "json",
-          ))
-            characters += part.length;
-          characters = Math.max(0, characters - 1);
-        }
-      }
-      if (characters <= constants.MAX_STRING_LENGTH) {
-        const count = estimateTokenCount(Formatter.format(tokenValue, format));
-        handled = true;
-        try {
-          await writeOutputText(destination, `${count}\n`);
-          return true;
-        } catch (cause: unknown) {
-          failed = true;
-          throw cause;
-        }
-      }
-      error = projectAnalysisError(
-        new AnalysisResourceConstraintError(
-          metadata.command,
-          "memory",
-          "Token counting requires a formatted string larger than the runtime permits.",
+    if (format === "jsonl") {
+      handled = true;
+      try {
+        error = await writeCliJsonLines(
           {
-            formatted_characters: characters,
-            max_string_characters: constants.MAX_STRING_LENGTH,
+            ...options,
+            source: value,
+            selected: filtered,
+            operationFailure,
+            command: metadata.command,
+            duration: metadata.duration,
           },
-          {
-            remediationAction:
-              "Remove --token-count to stream the complete JSON result, or narrow it with --filter-output.",
-          },
-        ),
-      );
+          destination,
+        );
+      } catch (cause: unknown) {
+        failed = true;
+        throw cause;
+      }
+      return true;
     }
     const meta = {
       command: metadata.command,
@@ -329,8 +376,68 @@ export const createCliResultOutput = (
           typeof filtered === "symbol"
         ? {}
         : filtered;
+    if (options.tokenCount) {
+      // Incur/tokenx materialize JSON. Measure its UTF-16 expansion before
+      // allowing that allocation, independently of UTF-8 bytes. Other formats
+      // retain Incur's materializing behavior.
+      const tokenValue = document;
+      let characters = 0;
+      if (
+        tokenValue !== undefined &&
+        tokenValue !== null &&
+        typeof tokenValue !== "function" &&
+        typeof tokenValue !== "symbol"
+      ) {
+        if (format === "json") {
+          for (const part of jsonOutputParts(
+            tokenValue,
+            format,
+            isTerminalOutput(destination),
+          ))
+            characters += part.length;
+        }
+      }
+      if (characters <= constants.MAX_STRING_LENGTH) {
+        let formatted: string;
+        if (format === "json") {
+          // Reuse the writer's exact representation after its capacity admission.
+          // tokenx requires one string; retain only this bounded formatted value.
+          formatted = "";
+          for (const part of jsonOutputParts(
+            tokenValue,
+            format,
+            isTerminalOutput(destination),
+          ))
+            formatted += part;
+        } else formatted = formatCliOutput(tokenValue, format);
+        const count = estimateTokenCount(formatted);
+        handled = true;
+        try {
+          await writeOutputText(destination, `${count}\n`);
+          return true;
+        } catch (cause: unknown) {
+          failed = true;
+          throw cause;
+        }
+      }
+      error = projectAnalysisError(
+        new AnalysisResourceConstraintError(
+          metadata.command,
+          "memory",
+          "Token counting requires a formatted string larger than the runtime permits.",
+          {
+            formatted_characters: characters,
+            max_string_characters: constants.MAX_STRING_LENGTH,
+          },
+          {
+            remediationAction:
+              "Remove --token-count to stream the complete JSON result, or narrow it with --filter-output.",
+          },
+        ),
+      );
+    }
     if (ownsSuccessfulTokenWindow) {
-      const formatted = Formatter.format(filtered, format);
+      const formatted = formatCliOutput(filtered, format);
       const window = sliceTextByTokenWindow(
         formatted,
         options.tokenOffset ?? 0,
@@ -342,10 +449,10 @@ export const createCliResultOutput = (
         return false;
 
       const sliced = window.truncated
-        ? `${window.text}\n[truncated: showing tokens ${options.tokenOffset ?? 0}–${window.end} of ${window.total}]`
+        ? `${window.text}\n[truncated: showing tokens ${window.start}–${window.end} of ${window.total}]`
         : formatted;
       const outputDocument = options.fullOutput
-        ? Formatter.format(
+        ? formatCliOutput(
             window.truncated
               ? {
                   ok: true,
@@ -378,16 +485,26 @@ export const createCliResultOutput = (
     }
     // Once writing starts, a failed destination must not receive a second
     // document from Incur's error formatter.
-    const failureText =
-      operationFailure !== undefined && format !== "json" && format !== "jsonl"
-        ? Formatter.format(document, format)
+    const formattedText =
+      format === "md" ||
+      ((operationFailure !== undefined || ownsFilteredOutput) &&
+        format !== "json")
+        ? formatCliOutput(document, format)
         : undefined;
+    if (
+      format === "md" &&
+      formattedText === "" &&
+      !options.fullOutput &&
+      !ownsFilteredOutput &&
+      operationFailure === undefined
+    )
+      return false;
     handled = true;
     try {
-      if (failureText !== undefined) {
+      if (formattedText !== undefined) {
         // Incur's error sentinel only carries code/message/retryable. Render
-        // the full caller-visible failure at this output boundary.
-        await writeOutputText(destination, `${failureText}\n`);
+        // the owned projection or caller-visible failure at this boundary.
+        await writeOutputText(destination, `${formattedText}\n`);
       } else {
         await writeJsonOutput(
           error === undefined
@@ -416,32 +533,142 @@ const fullFailureEnvelope = (
 ): Readonly<Record<string, unknown>> => {
   if (tokenLimit === undefined && tokenOffset === undefined)
     return { ok: false, error: failure, meta };
-  const formatted = Formatter.format(failure, format);
+  const formatted = formatCliOutput(failure, format);
   const offset = tokenOffset ?? 0;
   const window = sliceTextByTokenWindow(formatted, offset, tokenLimit);
   if (!window.truncated) return { ok: false, error: failure, meta };
   const nextOffset = window.end < window.total ? window.end : undefined;
   return {
     ok: false,
-    error: `${window.text}\n[truncated: showing tokens ${offset}–${window.end} of ${window.total}]`,
+    error: `${window.text}\n[truncated: showing tokens ${window.start}–${window.end} of ${window.total}]`,
     meta: { ...meta, ...(nextOffset === undefined ? {} : { nextOffset }) },
   };
 };
 
-/** Filter.apply owns these mapped arrays; an empty path list returns the source. */
-const normalizeFilteredJsonArrays = (selection: unknown[]): void => {
-  const pending = [selection];
-  while (pending.length > 0) {
-    const array = pending.pop()!;
-    for (let index = 0; index < array.length; index += 1) {
-      const value: unknown = array[index];
-      if (
-        value === undefined ||
-        typeof value === "function" ||
-        typeof value === "symbol"
-      )
-        array[index] = null;
-      else if (Array.isArray(value)) pending.push(value);
+type FilterPaths = ReturnType<typeof Filter.parse>;
+type FilterPath = FilterPaths[number];
+
+/** Apply Incur's parsed path grammar while merging sibling array selections. */
+const applyCliOutputFilter = (value: unknown, paths: FilterPaths): unknown => {
+  if (paths.length === 0) return value;
+  if (Array.isArray(value))
+    return value.map((item) => applyCliOutputFilter(item, paths));
+  if (
+    paths.length === 1 &&
+    paths[0]?.length === 1 &&
+    paths[0][0] !== undefined &&
+    "key" in paths[0][0]
+  ) {
+    const key = paths[0][0].key;
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !Object.hasOwn(value, key)
+    )
+      return undefined;
+    const selected = (value as Record<string, unknown>)[key];
+    return typeof selected !== "object" || selected === null
+      ? selected
+      : { [key]: selected };
+  }
+  return projectObjectPaths(value, paths);
+};
+
+/** Build a fresh object projection; a path ending at a key selects its subtree. */
+const projectObjectPaths = (value: unknown, paths: FilterPaths): unknown => {
+  if (typeof value !== "object" || value === null) return {};
+  const byKey = new Map<string, FilterPath[]>();
+  for (const path of paths) {
+    const [segment, ...tail] = path;
+    if (segment === undefined || !("key" in segment)) continue;
+    const siblings = byKey.get(segment.key) ?? [];
+    siblings.push(tail);
+    byKey.set(segment.key, siblings);
+  }
+
+  const result = new Map<string, unknown>();
+  for (const key of [...byKey.keys()].sort()) {
+    const siblings = byKey.get(key)!;
+    if (!Object.hasOwn(value, key)) continue;
+    const child = (value as Record<string, unknown>)[key];
+    if (child === undefined) continue;
+    // Selecting a parent retains its complete original subtree and dominates
+    // any narrower selections below it, independent of path order.
+    if (siblings.some((path) => path.length === 0)) {
+      result.set(key, child);
+      continue;
+    }
+    const slicePaths = siblings.filter(
+      (path) => path[0] !== undefined && "start" in path[0],
+    );
+    if (slicePaths.length > 0 && Array.isArray(child)) {
+      result.set(key, projectArraySlices(child, slicePaths));
+      continue;
+    }
+    const objectPaths = siblings.filter(
+      (path) => path[0] !== undefined && "key" in path[0],
+    );
+    if (objectPaths.length > 0 && typeof child === "object" && child !== null)
+      result.set(key, projectObjectPaths(child, objectPaths));
+  }
+  return Object.fromEntries(result);
+};
+
+/** Union sliced rows by their original index, then emit them in source order. */
+const projectArraySlices = (
+  source: readonly unknown[],
+  paths: readonly FilterPath[],
+): unknown[] => {
+  const selected = new Map<number, FilterPath[]>();
+  for (const path of paths) {
+    const [slice, ...tail] = path;
+    if (slice === undefined || !("start" in slice)) continue;
+    const start = normalizeSliceIndex(slice.start, source.length);
+    const end = normalizeSliceIndex(slice.end, source.length);
+    for (let index = start; index < end; index += 1) {
+      const siblings = selected.get(index) ?? [];
+      siblings.push(tail);
+      selected.set(index, siblings);
     }
   }
+  return [...selected.keys()]
+    .sort((left, right) => left - right)
+    .map((index) => {
+      const siblings = selected.get(index)!;
+      const item = source[index];
+      if (siblings.some((path) => path.length === 0)) return item;
+      return projectObjectPaths(item, siblings);
+    });
+};
+
+const normalizeSliceIndex = (index: number, length: number): number => {
+  const integer = Number.isNaN(index) ? 0 : Math.trunc(index);
+  return integer < 0
+    ? Math.max(length + integer, 0)
+    : Math.min(integer, length);
+};
+
+/**
+ * The streaming JSON writer requires JSON values in arrays. Copy only array
+ * branches that need normalization so a parent selection never mutates its
+ * source value.
+ */
+const normalizeJsonArrayValues = (source: unknown[]): unknown[] => {
+  let result: unknown[] | undefined;
+  for (let index = 0; index < source.length; index += 1) {
+    const value: unknown = source[index];
+    const normalized =
+      value === undefined ||
+      typeof value === "function" ||
+      typeof value === "symbol"
+        ? null
+        : Array.isArray(value)
+          ? normalizeJsonArrayValues(value)
+          : value;
+    if (normalized !== value) {
+      result ??= source.slice();
+      result[index] = normalized;
+    }
+  }
+  return result ?? source;
 };

@@ -6,6 +6,7 @@ import {
   peCertificateFixture,
   peWithoutCertificateTableFixture,
   pkcs7SignedDataFixture,
+  pkcs7SignedDataIndefiniteEnvelopeFixture,
 } from "../../src/native/pe/PeCertificates.fixture.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 import { cliTest } from "../support/cli/cliFixture.js";
@@ -26,6 +27,31 @@ cliTest(
     expect(
       evidence.normalized_result.entries[0]?.pkcs7?.certificates[0]?.serial_hex,
     ).toBe("11223344");
+  },
+);
+
+cliTest(
+  "inspects SignedData with an indefinite constructed ContentInfo envelope",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-pe-cert-ber-cli-");
+    const path = join(root, "ber-signed.exe");
+    const payload = pkcs7SignedDataIndefiniteEnvelopeFixture();
+    await writeFile(path, peCertificateFixture(false, payload));
+
+    const result = await cli.run({
+      arguments: ["inspect-pe-certificates", path, "--json"],
+    });
+
+    expect(result.exitCode, result.stderr).toBe(0);
+    const evidence = toolContract("inspect_pe_certificates").outputSchema.parse(
+      result.json,
+    );
+    const entry = evidence.normalized_result.entries[0];
+    expect(entry?.pkcs7?.certificates[0]).toMatchObject({
+      serial_hex: "11223344",
+    });
+    expect(entry?.payload.bytes).toBe(payload.length);
+    expect(entry?.pkcs7?.certificates[0]?.location.bytes).toBeGreaterThan(0);
   },
 );
 
@@ -65,7 +91,7 @@ cliTest("reports a truncated PE as invalid input", async ({ cli }) => {
 });
 
 cliTest(
-  "rejects TeletexString names without returning corrupted identity text",
+  "reports TeletexString compatibility text with its decoding limitation",
   async ({ cli }) => {
     const root = await createTestTempDirectory("rea-pe-cert-cli-teletex-");
     const path = join(root, "teletex.exe");
@@ -78,19 +104,16 @@ cliTest(
     const result = await cli.run({
       arguments: ["inspect-pe-certificates", path, "--json"],
     });
-    expect(result.exitCode).toBe(1);
-    expect(result.json).toMatchObject({
-      code: "invalid_request",
-      details: {
-        operation: "inspect_pe_certificates",
-        issues: [
-          {
-            message: expect.stringContaining(
-              "Unsupported certificate name encoding (DER tag 0x14)",
-            ),
-          },
-        ],
-      },
-    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const evidence = toolContract("inspect_pe_certificates").outputSchema.parse(
+      result.json,
+    );
+    expect(
+      evidence.normalized_result.entries[0]?.pkcs7?.certificates[0]?.issuer
+        .text,
+    ).toBe("commonName=Âe, organizationName=REA Tests");
+    expect(evidence.normalized_result.limitations).toContain(
+      "TeletexString values use OpenSSL's ISO-8859-1 compatibility mapping; this is not a full T.61 decoder.",
+    );
   },
 );

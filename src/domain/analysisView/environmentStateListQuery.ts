@@ -1,7 +1,10 @@
 import type { JsonValue } from "../jsonValue.js";
 import { compareUnicodeCodePoints as compare } from "../unicodeCodePointOrder.js";
+import { literalSubstringPredicate } from "../analysisSearch.js";
 import {
   isObject,
+  recordedItemCount,
+  formatItemCount,
   pointerTo,
   renderStateList,
   replaceAt,
@@ -106,18 +109,16 @@ const holds = (field: JsonValue | undefined, value: string): boolean => {
 };
 
 const contains = (
-  entity: StateEntity,
   fields: readonly string[],
   term: string,
-): boolean => {
-  const needle = term.toLowerCase();
-  return (
-    needle === "" ||
+): ((entity: StateEntity) => boolean) => {
+  if (term === "") return () => true;
+  const matches = literalSubstringPredicate(term, false);
+  return (entity) =>
     fields.some((field) => {
       const value = entity.fields[field];
-      return typeof value === "string" && value.toLowerCase().includes(needle);
-    })
-  );
+      return typeof value === "string" && matches(value);
+    });
 };
 
 const normalized = (name: string): string =>
@@ -205,9 +206,7 @@ const readCall = (
       );
     else if (parameter.role === "search") {
       if (!plainSearch(value)) return undefined;
-      call.selections.push((entity) =>
-        contains(entity, parameter.fields, value),
-      );
+      call.selections.push(contains(parameter.fields, value));
     } else if (parameter.role === "sort") call.sort = value;
     else if (parameter.role === "direction") {
       if (!DIRECTIONS.has(value.toLowerCase())) return undefined;
@@ -368,13 +367,13 @@ const isUrl = (value: string): boolean =>
  * other than URLs, which a name or slug often repeats; an item the term matched only in URLs adds those.
  */
 const searchFields = (items: readonly JsonObject[], term: string): string[] => {
-  const needle = term.toLowerCase();
-  if (needle === "") return [];
+  if (term === "") return [];
+  const matchesTerm = literalSubstringPredicate(term, false);
   const fields = new Set<string>();
   for (const item of items) {
     const matching = Object.keys(item).filter((field) => {
       const value = item[field];
-      return typeof value === "string" && value.toLowerCase().includes(needle);
+      return typeof value === "string" && matchesTerm(value);
     });
     const plain = matching.filter((field) => !isUrl(item[field] as string));
     for (const field of plain.length > 0 ? plain : matching) fields.add(field);
@@ -572,13 +571,11 @@ export const learnQuery = (
 export const queryTotalCount = (
   value: JsonValue | undefined,
 ): number | undefined => {
-  const count =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^(?:0|[1-9]\d*)$/u.test(value)
-        ? Number(value)
-        : undefined;
-  return count !== undefined && Number.isSafeInteger(count) && count >= 0
+  const count = recordedItemCount(value);
+  return count !== undefined &&
+    Number.isSafeInteger(count) &&
+    count >= 0 &&
+    (typeof value !== "string" || String(count) === value)
     ? count
     : undefined;
 };
@@ -597,11 +594,7 @@ export const renderQueryList = (
       isObject(base) &&
       Object.hasOwn(base, name) &&
       queryTotalCount(base[name]) !== undefined
-        ? replaceAt(
-            body,
-            pointerTo(name),
-            typeof base[name] === "string" ? String(total) : total,
-          )
+        ? replaceAt(body, pointerTo(name), formatItemCount(total, base[name]!))
         : body,
     renderStateList(view, base, items),
   );

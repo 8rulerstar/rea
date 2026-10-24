@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import type { EnvironmentExportResult } from "../application/environment/environmentExport.js";
 import type { EnvironmentSource } from "../application/environment/environmentSource.js";
@@ -15,7 +16,8 @@ import {
   mcpHttpListenerPortSchema,
   type McpHttpEndpoint,
 } from "../config/mcpHttpEndpoint.js";
-import type { AnalysisError } from "../domain/analysisErrorBase.js";
+import { AnalysisError } from "../domain/analysisErrorBase.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { StreamableHttpListenError } from "../server/http/streamableHttpListenError.js";
 import {
   AnalysisCancelledError,
@@ -215,16 +217,10 @@ const serveEnvironmentCommand = async (
     if (!(cause instanceof StreamableHttpListenError)) throw cause;
     return cliError(transportError(endpoint.value, cause));
   }
-  let failure: StreamableHttpListenError | undefined;
-  try {
-    failure = await Promise.race([untilAborted(signal), listenerFailed]);
-  } finally {
-    await served.close();
-  }
-  if (failure !== undefined)
-    return cliError(transportError(endpoint.value, failure));
-  return {
-    status: "stopped",
+  const failure = await Promise.race([untilAborted(signal), listenerFailed]);
+  const listenerError =
+    failure === undefined ? undefined : transportError(endpoint.value, failure);
+  const observation = {
     url: served.url,
     environment: served.card.name,
     tools: served.card.capabilities.tools.length,
@@ -232,6 +228,25 @@ const serveEnvironmentCommand = async (
     manifest_evidence_id: source.manifestEvidenceId,
     state: report,
   };
+  try {
+    await served.close();
+  } catch (cause: unknown) {
+    if (!(cause instanceof AnalysisError)) throw cause;
+    if (listenerError !== undefined)
+      return cliError(
+        analysisErrorWithCleanupFailure(
+          listenerError,
+          cause,
+          CLI_COMMANDS.environmentServe,
+        ).bindCleanupDependencies([cause]),
+      );
+    cause.retainDiagnostics({
+      shutdown_observation: { status: "shutdown_requested", ...observation },
+    });
+    return cliError(cause);
+  }
+  if (listenerError !== undefined) return cliError(listenerError);
+  return { status: "stopped", ...observation };
 };
 
 interface ExportArguments {
@@ -379,16 +394,13 @@ const registerExportCommand = (cli: CliInstance, logger: Logger): void => {
       "Export an environment manifest and its capture Evidence as an agent environment bundle folder the agentenv framework runs with agent-env run",
     args: z.object({
       manifest: manifestArgument,
-      directory: z
-        .string()
-        .describe(
-          "Bundle directory to create; must be absent or empty, nothing is overwritten",
-        ),
+      directory: localPathStringSchema.describe(
+        "Bundle directory to create; must be absent or empty, nothing is overwritten",
+      ),
     }),
     options: z.object({
       evidence: evidenceOption,
-      packageTarball: z
-        .string()
+      packageTarball: localPathStringSchema
         .optional()
         .describe(
           "Packed rea-agents tarball (npm pack) copied into the env folder and installed by the Dockerfile instead of the registry package pinned to this version",

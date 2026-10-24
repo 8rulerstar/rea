@@ -1,11 +1,14 @@
 import type { JsonObject } from "../../domain/analysisView/environmentStateRules.js";
+import type { FieldRule } from "../../domain/analysisView/environmentStateWriteRules.js";
 import {
   isUuid,
   readClock,
   type ClockFormat,
 } from "../../domain/analysisView/environmentStateWriteValues.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
+import type { ReplayedBody } from "./environmentSource.js";
 import {
+  ID_FIELD,
   IDENTITY_FIELD,
   keyedByLearnedIds,
   pairElements,
@@ -50,7 +53,11 @@ export interface Normalised {
 /** At most this many differences are kept per step. */
 export const STEP_DIFFERENCE_LIMIT = 20;
 const VALUE_CHARS = 120;
-const TIME_FIELD = /(at|time|date|timestamp|created|updated|modified)$/iu;
+const TIME_FIELD =
+  /(?:^|[_-])(?:at|time|date|timestamp|created|updated|modified)$/iu;
+const TIME_FIELD_CAMEL =
+  /(?:At|Time|Date|Timestamp|Created|Updated|Modified)$/u;
+const ID_LIST_FIELD = /^(ids|uuids|guids)$/u;
 
 const isObject = (value: JsonValue | undefined): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -68,12 +75,16 @@ const formatKey = (format: ClockFormat): string =>
     ? `epoch-${format.unit}`
     : `iso${format.separator}${String(format.fraction)}${format.zone === "" ? "" : format.zone === "Z" ? "Z" : "offset"}`;
 
-/** The format of a clock value: an ISO-8601 string, or an epoch number under a time-named field or as an array item. */
+/** ISO text has its own clock syntax; numeric epochs require a time-named field. */
 const clockFormat = (
   value: JsonValue,
   key: string | undefined,
 ): string | undefined => {
-  if (typeof value === "number" && key !== undefined && !TIME_FIELD.test(key))
+  if (
+    typeof value === "number" &&
+    (key === undefined ||
+      (!TIME_FIELD.test(key) && !TIME_FIELD_CAMEL.test(key)))
+  )
     return undefined;
   const clock = readClock(value);
   return clock === undefined ? undefined : formatKey(clock.format);
@@ -91,16 +102,42 @@ const characterClasses = (text: string): string =>
     .sort()
     .join("");
 
-/** Two values each side generated on its own: both UUIDs, or one length of eight or more with the same character classes and a digit. */
-const generatedPair = (live: string, env: string): boolean =>
-  (isUuid(live) && isUuid(env)) ||
-  (live.length === env.length &&
+/** A confirmed response field's rule, and the pointer within that field (`*` marks actual array traversal). */
+interface Generation {
+  readonly rule: FieldRule;
+  readonly pointer: string;
+}
+
+/** Whether a confirmed generation rule applies here and both strings retain its generated format. */
+const generatedPair = (
+  live: string,
+  env: string,
+  generation: Generation | undefined,
+): boolean => {
+  if (generation === undefined) return false;
+  const { rule, pointer } = generation;
+  if (rule.rule === "renewed")
+    return rule.pointers.includes(pointer) && isUuid(live) && isUuid(env);
+  if (pointer !== "") return false;
+  if (
+    rule.rule === "unique" ||
+    (rule.rule === "identity" && rule.generator === "uuid")
+  )
+    return isUuid(live) && isUuid(env);
+  if (rule.rule !== "sequence" && rule.rule !== "identity") return false;
+  return (
+    live.length === env.length &&
     live.length >= 8 &&
     /\d/u.test(live) &&
     /\d/u.test(env) &&
-    characterClasses(live) === characterClasses(env));
+    characterClasses(live) === characterClasses(env)
+  );
+};
 
 class Differ {
+  readonly #rules: ReadonlyMap<string, FieldRule>;
+  readonly #generatedToEnv = new Map<string, string>();
+  readonly #generatedToLive = new Map<string, string>();
   readonly differences: Difference[] = [];
   readonly normalised: Normalised = {
     ids: 0,
@@ -117,11 +154,37 @@ class Differ {
       readonly scope: string | undefined;
       readonly at: string;
       readonly identity: boolean;
+      /** Parsed rules of the confirmed write whose entity response is being compared. */
+      readonly rules: readonly FieldRule[];
     },
-  ) {}
+  ) {
+    this.#rules = new Map(entity.rules.map((rule) => [rule.field, rule]));
+  }
 
   add(difference: Difference): void {
     this.differences.push(difference);
+  }
+
+  /** One answer's generated identities must rename consistently in both directions. */
+  #pairGenerated(live: string, env: string, rule: FieldRule): boolean {
+    const uuid =
+      rule.rule === "unique" ||
+      rule.rule === "renewed" ||
+      (rule.rule === "identity" && rule.generator === "uuid");
+    const identity = (value: string) =>
+      uuid ? `uuid:${value.toLowerCase()}` : `string:${value}`;
+    const liveKey = identity(live);
+    const envKey = identity(env);
+    const knownEnv = this.#generatedToEnv.get(liveKey);
+    const knownLive = this.#generatedToLive.get(envKey);
+    if (
+      (knownEnv !== undefined && knownEnv !== envKey) ||
+      (knownLive !== undefined && knownLive !== liveKey)
+    )
+      return false;
+    this.#generatedToEnv.set(liveKey, envKey);
+    this.#generatedToLive.set(envKey, liveKey);
+    return true;
   }
 
   /** Whether a value compares within the call's collection, as an entity's own identity or a create's bare id does; other ids compare by the probe's mapping. */
@@ -151,10 +214,29 @@ class Differ {
     live: JsonValue,
     env: JsonValue,
     pointer: string,
-    at: { readonly key?: string; readonly own?: boolean } = {},
+    at: {
+      readonly key?: string;
+      readonly own?: boolean;
+      readonly clockKey?: string | undefined;
+    } = {},
+    generation?: Generation,
   ): void {
+    const key = at.clockKey ?? at.key;
+    const liveClock = clockFormat(live, key);
+    const envClock = clockFormat(env, key);
+    const generatedMatch =
+      generation !== undefined &&
+      typeof live === "string" &&
+      typeof env === "string" &&
+      liveClock === undefined &&
+      envClock === undefined &&
+      !this.map.hasLive(live) &&
+      !this.map.hasEnv(env) &&
+      generatedPair(live, env, generation)
+        ? this.#pairGenerated(live, env, generation.rule)
+        : undefined;
     if (live === env) {
-      if (this.#reassigned(live, pointer, at))
+      if (generatedMatch === false || this.#reassigned(live, pointer, at))
         this.add({
           category: "value",
           pointer,
@@ -163,21 +245,27 @@ class Differ {
         });
       return;
     }
-    const { key } = at;
+    const field = at.key;
     if (
       (typeof live === "string" || typeof live === "number") &&
       (typeof env === "string" || typeof env === "number")
     ) {
-      const mapped = this.map.env(
-        live,
-        this.#inCollection(pointer, at) ? this.entity.scope : undefined,
-      );
+      const mapsAsId =
+        (field !== undefined && ID_FIELD.test(field)) ||
+        this.#inCollection(pointer, at) ||
+        (typeof live === "string" &&
+          field !== undefined &&
+          this.map.isStateReference(live, field));
+      const mapped = mapsAsId
+        ? this.map.env(
+            live,
+            this.#inCollection(pointer, at) ? this.entity.scope : undefined,
+          )
+        : undefined;
       if (mapped !== undefined && String(mapped) === String(env)) {
         this.normalised.ids += 1;
         return;
       }
-      const liveClock = clockFormat(live, key);
-      const envClock = clockFormat(env, key);
       if (liveClock !== undefined && envClock !== undefined) {
         if (liveClock === envClock) this.normalised.clocks += 1;
         else
@@ -189,13 +277,7 @@ class Differ {
           });
         return;
       }
-      if (
-        typeof live === "string" &&
-        typeof env === "string" &&
-        !this.map.hasLive(live) &&
-        !this.map.hasEnv(env) &&
-        generatedPair(live, env)
-      ) {
+      if (generatedMatch === true) {
         this.normalised.generated += 1;
         return;
       }
@@ -208,9 +290,28 @@ class Differ {
     });
   }
 
-  array(live: JsonValue[], env: JsonValue[], pointer: string): void {
+  array(
+    live: JsonValue[],
+    env: JsonValue[],
+    pointer: string,
+    clockKey: string | undefined,
+    generation: Generation | undefined,
+  ): void {
     const own = pointer === this.entity.at;
-    if (this.sameItems(live, env, pointer)) return;
+    if (this.sameItems(live, env, pointer)) {
+      // Equal/reordered scalar sets still establish unchanged generated pairs;
+      // otherwise another field could split an alias hidden by this fast path.
+      if (generation !== undefined)
+        for (const [index, item] of live.entries())
+          this.scalar(
+            item,
+            item,
+            `${pointer}/${String(index)}`,
+            { own, clockKey },
+            { ...generation, pointer: `${generation.pointer}/*` },
+          );
+      return;
+    }
     const pairs = pairElements(live, env);
     if (live.length !== env.length || pairs.length !== live.length)
       this.add({
@@ -225,9 +326,18 @@ class Differ {
     )
       this.add({ category: "order", pointer });
     for (const [left, right] of pairs)
-      this.value(live[left]!, env[right]!, `${pointer}/${String(left)}`, {
-        own,
-      });
+      this.value(
+        live[left]!,
+        env[right]!,
+        `${pointer}/${String(left)}`,
+        {
+          own,
+          clockKey,
+        },
+        generation === undefined
+          ? undefined
+          : { ...generation, pointer: `${generation.pointer}/*` },
+      );
   }
 
   /** Arrays of scalars holding the same items in another order differ only in order, as sets an application returns unordered do. */
@@ -236,8 +346,17 @@ class Differ {
       item === null || typeof item !== "object";
     if (live.length !== env.length || !live.every(scalar) || !env.every(scalar))
       return false;
-    // Live ids compare in the environment's terms, as scalar values do.
-    const mapped = live.map((item) => translateValue(item, this.map));
+    // Only identifier lists or known string identifiers are translated; numeric measurements stay literal.
+    const field = pointer.slice(pointer.lastIndexOf("/") + 1);
+    const mapped = live.map((item) => {
+      if (
+        (typeof item === "string" && this.map.isStateReference(item, field)) ||
+        ((typeof item === "number" || typeof item === "string") &&
+          ID_LIST_FIELD.test(field))
+      )
+        return translateValue(item, this.map);
+      return item;
+    });
     const key = (items: JsonValue[]): string =>
       JSON.stringify(items.map((item) => JSON.stringify(item)).sort());
     if (key(mapped) !== key(env)) return false;
@@ -254,12 +373,15 @@ class Differ {
     env: JsonObject,
     pointer: string,
     own = false,
+    generation?: Generation,
   ): void {
     const self = own || pointer === this.entity.at;
     // An object keyed by ids compares each member under the environment's key; any other compares field by field.
     const keyed = keyedByLearnedIds(live, env, this.map);
     const envKey = (key: string): string => {
-      const mapped = keyed ? this.map.env(key) : undefined;
+      const mapped = keyed
+        ? this.map.env(key, self ? this.entity.scope : undefined)
+        : undefined;
       return mapped !== undefined && Object.hasOwn(env, String(mapped))
         ? String(mapped)
         : key;
@@ -276,7 +398,25 @@ class Differ {
         });
       else {
         matched.add(other);
-        this.value(value, env[other]!, child, { key, own: self });
+        const rule = self ? this.#rules.get(key) : undefined;
+        this.value(
+          value,
+          env[other]!,
+          child,
+          {
+            key,
+            own: self,
+            keyed: self && keyed,
+          },
+          rule !== undefined
+            ? { rule, pointer: "" }
+            : generation === undefined
+              ? undefined
+              : {
+                  ...generation,
+                  pointer: `${generation.pointer}/${escapePointer(key)}`,
+                },
+        );
       }
     }
     for (const [key, value] of Object.entries(env))
@@ -293,12 +433,24 @@ class Differ {
     live: JsonValue,
     env: JsonValue,
     pointer: string,
-    at: { readonly key?: string; readonly own?: boolean } = {},
+    at: {
+      readonly key?: string;
+      readonly own?: boolean;
+      readonly keyed?: boolean;
+      readonly clockKey?: string | undefined;
+    } = {},
+    generation?: Generation,
   ): void {
     if (Array.isArray(live) && Array.isArray(env))
-      this.array(live, env, pointer);
+      this.array(live, env, pointer, at.clockKey ?? at.key, generation);
     else if (isObject(live) && isObject(env))
-      this.object(live, env, pointer, at.own === true && at.key === undefined);
+      this.object(
+        live,
+        env,
+        pointer,
+        at.own === true && (at.key === undefined || at.keyed === true),
+        generation,
+      );
     else if (
       Array.isArray(live) ||
       Array.isArray(env) ||
@@ -311,16 +463,14 @@ class Differ {
         live: shown(live),
         env: shown(env),
       });
-    else this.scalar(live, env, pointer, at);
+    else this.scalar(live, env, pointer, at, generation);
   }
 }
 
 /** One answer: its status, and its JSON body, its text, or null without one. */
 export interface Answer {
   readonly status: number | null;
-  readonly body: JsonValue;
-  /** Set when the body was over the replay limit, so only a prefix is known. */
-  readonly cut?: boolean;
+  readonly body: ReplayedBody;
   /** Set when the probe did not record the body, so only the status is known. */
   readonly unobserved?: boolean;
 }
@@ -334,12 +484,14 @@ export const compareAnswers = (
     readonly scope?: string;
     readonly at?: string;
     readonly identity?: boolean;
+    readonly rules?: readonly FieldRule[];
   } = {},
 ): { readonly differences: Difference[]; readonly normalised: Normalised } => {
   const differ = new Differ(map, {
     scope: entity.scope,
     at: entity.at ?? "",
     identity: entity.identity === true,
+    rules: entity.rules ?? [],
   });
   if (live.status !== env.status)
     differ.add({
@@ -348,8 +500,50 @@ export const compareAnswers = (
       live: String(live.status),
       env: String(env.status),
     });
-  if (live.cut === true) differ.normalised.large_bodies += 1;
+  if (
+    live.body.kind === "cut" ||
+    (live.body.kind === "base64" && !live.body.whole)
+  )
+    differ.normalised.large_bodies += 1;
   else if (live.unobserved === true) differ.normalised.unobserved_bodies += 1;
-  else differ.value(live.body, env.body, "");
+  else if (
+    (live.body.kind === "none" &&
+      env.body.kind === "json" &&
+      env.body.value === null) ||
+    (env.body.kind === "none" &&
+      live.body.kind === "json" &&
+      live.body.value === null)
+  ) {
+    // The existing answer contract treats an absent body and JSON null alike.
+  } else if (live.body.kind === "base64" || env.body.kind === "base64") {
+    const bytes = (body: ReplayedBody): Buffer | undefined => {
+      if (body.kind === "base64") return Buffer.from(body.encoded, "base64");
+      if (body.kind === "text") return Buffer.from(body.text, "utf8");
+      return undefined;
+    };
+    const liveBytes = bytes(live.body);
+    const envBytes = bytes(env.body);
+    if (
+      liveBytes === undefined ||
+      envBytes === undefined ||
+      !liveBytes.equals(envBytes)
+    )
+      differ.add({
+        category: "value",
+        pointer: "",
+        live: shown(live.body),
+        env: shown(env.body),
+      });
+  } else if (live.body.kind !== env.body.kind)
+    differ.add({
+      category: "value",
+      pointer: "",
+      live: shown(live.body),
+      env: shown(env.body),
+    });
+  else if (live.body.kind === "json" && env.body.kind === "json")
+    differ.value(live.body.value, env.body.value, "");
+  else if (live.body.kind === "text" && env.body.kind === "text")
+    differ.value(live.body.text, env.body.text, "");
   return { differences: differ.differences, normalised: differ.normalised };
 };

@@ -1,14 +1,12 @@
 import type { ByteEntropyService } from "../application/binaryDiagnostics/ByteEntropyService.js";
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 
-import {
-  requireAnalysisViewRetention,
-  summarizeRetainedAnalysis,
-} from "../application/analysisView/AnalysisViewService.js";
+import { retainedSummaryDelivery } from "./retainedSummaryDelivery.js";
 import type { EvidenceLookup } from "../application/EvidenceInputResolver.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import { toolContract } from "../contracts/toolContracts.js";
 import type { Logger } from "pino";
+import { deliverEvidenceResult } from "./contractToolHandler.js";
 import { logToolExecution } from "./toolLogging.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import type { WithAdmittedAnalysis } from "./analysisAdmission.js";
@@ -24,7 +22,10 @@ export const registerByteEntropyTool = (
   withAdmittedAnalysis: WithAdmittedAnalysis | undefined,
 ): void => {
   const contract = toolContract("inspect_byte_entropy");
-  const retention = { recordEvidence, evidenceById };
+  const delivery = retainedSummaryDelivery(new Set([contract.name]), {
+    recordEvidence,
+    evidenceById,
+  });
   server.registerTool(
     contract.name,
     toolRegistrationOptions(contract),
@@ -39,28 +40,26 @@ export const registerByteEntropyTool = (
             logger,
             contract.name,
             async () => {
-              if (detail === "summary") {
-                const ready = requireAnalysisViewRetention(
-                  contract.name,
-                  retention,
-                );
-                if (!ready.ok) return ready;
-              }
+              const parameters = { detail };
+              const ready = delivery.preflight(contract.name, parameters);
+              if (!ready.ok) return ready;
               const inspected = await entropyService.inspect(request, {
                 signal: context.mcpReq.signal,
               });
-              return detail === "summary" && inspected.ok
-                ? summarizeRetainedAnalysis(inspected.value, retention)
+              return inspected.ok
+                ? delivery.projectEvidence(
+                    contract.name,
+                    parameters,
+                    inspected.value,
+                  )
                 : inspected;
             },
           );
-          if (!result.ok)
-            return server.delivery.toCallToolResult(result, contract);
-          const recorded = recordEvidence?.(result.value);
-          return server.delivery.toEvidenceToolResult(
-            result.value,
+          return deliverEvidenceResult(
+            server,
+            result,
             contract,
-            recorded,
+            recordEvidence,
           );
         },
       ),

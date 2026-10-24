@@ -1,4 +1,7 @@
-import type { ArtifactAdmissionLimit } from "../domain/artifactOperationError.js";
+import type {
+  ArtifactAdmissionLimit,
+  ArtifactLimitBoundary,
+} from "../domain/artifactOperationError.js";
 import type {
   ArtifactIntegrityClaim,
   ArtifactIntegrityDetails,
@@ -18,9 +21,6 @@ import type {
   AnalysisPartialObservation,
 } from "../domain/analysisErrorBase.js";
 
-/** Which bound a `limit` failure hit, so callers need not infer it. */
-export type ArtifactReaderBoundary = "file-size" | "capacity" | "memory";
-
 export interface ArtifactReaderFailureOptions extends ErrorOptions {
   readonly cancellation?: { readonly reason: unknown } | undefined;
   readonly cleanup?: AnalysisCleanupObservation | undefined;
@@ -28,7 +28,7 @@ export interface ArtifactReaderFailureOptions extends ErrorOptions {
   readonly cleanupLeases?: readonly AnalysisCleanupLease[] | undefined;
   readonly partialObservation?: AnalysisPartialObservation | undefined;
   /** The constrained resource bound for a limit failure. */
-  readonly boundary?: ArtifactReaderBoundary;
+  readonly boundary?: ArtifactLimitBoundary;
   /** Named admission whose recovery must not be inferred from other limit text. */
   readonly admission?: ArtifactAdmissionLimit;
 }
@@ -36,6 +36,8 @@ export interface ArtifactReaderFailureOptions extends ErrorOptions {
 /** Archive-neutral entry metadata. Reader adapters never choose output paths. */
 export interface ArtifactEntry {
   readonly path: string;
+  /** Exact reader-source spelling when its admitted path omits source syntax. */
+  readonly sourcePath?: string;
   readonly kind: "file" | "directory" | "symlink" | "slice" | "metadata";
   readonly declaredSize: number | null;
   readonly compressedSize: number | null;
@@ -155,6 +157,8 @@ export interface ArtifactTraversalOmission {
 export interface ArtifactReaderTraversal {
   readonly status: ArtifactInventoryCoverage["status"];
   readonly limitations: readonly string[];
+  /** Number of directory entries examined, including names omitted before decoding. */
+  readonly examinedEntries?: number;
 }
 
 /** Per-iterator observation sink; adapters report intentional omissions without shared state. */
@@ -194,7 +198,7 @@ export class ArtifactReaderFailure extends Error {
   readonly cleanupLeases: readonly AnalysisCleanupLease[] | undefined;
   readonly partialObservation: AnalysisPartialObservation | undefined;
   /** The constrained bound for a `limit` reason, when the reader knows it. */
-  readonly boundary: ArtifactReaderBoundary | undefined;
+  readonly boundary: ArtifactLimitBoundary | undefined;
   /** Named admission for a limit whose public recovery is owned by the producer. */
   readonly admission: ArtifactAdmissionLimit | undefined;
 

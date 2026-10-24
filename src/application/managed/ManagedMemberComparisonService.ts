@@ -11,7 +11,6 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
-import { EvidenceIntegrityError } from "../../domain/evidenceErrors.js";
 import { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { createEvidence, type Evidence } from "../../domain/evidence.js";
 import {
@@ -20,12 +19,16 @@ import {
 } from "../BinaryTargetResolver.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import { inspectManagedMembersBytes } from "../../dotnet/ManagedMemberInspector.js";
-import { readManagedSnapshot } from "../../dotnet/ManagedSnapshot.js";
+import {
+  readManagedSnapshot,
+  verifyManagedSourceIdentity,
+} from "../../dotnet/ManagedSnapshot.js";
+import { managedInspectionInputFailure } from "../../dotnet/ManagedReaderFailure.js";
 import {
   MANAGED_STATIC_PROVIDER,
   MANAGED_WORKFLOW_PROVIDER,
-} from "../InvestigationProviders.js";
-import { requestInputError } from "../workflowInputError.js";
+} from "../../domain/investigationProviders.js";
+import { analysisInputErrorFromIssues } from "../../domain/inputIssueProjection.js";
 
 const managedMemberComparisonRequestSchema = z.strictObject({
   left: z.unknown(),
@@ -45,7 +48,11 @@ export const executeManagedMemberComparison = (
   const operation = "compare_managed_members";
   const request = managedMemberComparisonRequestSchema.safeParse(input);
   if (!request.success)
-    return err(requestInputError(operation, request.error, input));
+    return err(
+      analysisInputErrorFromIssues(operation, request.error.issues, input, {
+        cause: request.error,
+      }),
+    );
   const left = readManagedMemberEvidence(request.data.left, "left");
   if (!left.ok) return left;
   const right = readManagedMemberEvidence(request.data.right, "right");
@@ -111,9 +118,10 @@ export const compareManagedMemberPaths = async (
     if (!rightTarget.ok) return err(rightTarget.error);
     const inspectTarget = async (
       target: BinaryTarget,
-      selectedPath: string,
+      inputField: "leftPath" | "rightPath",
     ) => {
       const { path } = target;
+      const selectedPath = input[inputField];
       let snapshot: Awaited<ReturnType<typeof readManagedSnapshot>>;
       try {
         snapshot = await readSnapshot(
@@ -126,15 +134,24 @@ export const compareManagedMemberPaths = async (
         if (failure !== undefined) throw failure;
         throw cause;
       }
-      if (snapshot.sha256 !== target.sha256)
-        throw new EvidenceIntegrityError(
-          `Managed artifact digest changed after open: expected ${target.sha256}, observed ${snapshot.sha256} at ${target.path}`,
+      const admitted = verifyManagedSourceIdentity(target, snapshot, operation);
+      if (!admitted.ok) throw admitted.error;
+      // Member comparison never reads literals or spends their decode budget.
+      let inspection: ReturnType<typeof inspectManagedMembersBytes>;
+      try {
+        inspection = inspectManagedMembersBytes(snapshot.bytes, target, {
+          userStrings: false,
+        });
+      } catch (cause: unknown) {
+        throw (
+          managedInspectionInputFailure(
+            operation,
+            selectedPath,
+            cause,
+            inputField,
+          ) ?? cause
         );
-      // Member comparison never reads literals, so it does not spend the
-      // decode budget on them.
-      const inspection = inspectManagedMembersBytes(snapshot.bytes, target, {
-        userStrings: false,
-      });
+      }
       const evidence = createEvidence(target, MANAGED_STATIC_PROVIDER, {
         operation: "inspect_managed_members",
         parameters: {},
@@ -145,9 +162,9 @@ export const compareManagedMemberPaths = async (
       });
       return { inspection, evidence };
     };
-    const left = await inspectTarget(leftTarget.value, input.leftPath);
+    const left = await inspectTarget(leftTarget.value, "leftPath");
     partialEvidence = left.evidence;
-    const right = await inspectTarget(rightTarget.value, input.rightPath);
+    const right = await inspectTarget(rightTarget.value, "rightPath");
     const result = compareManagedMembers(
       {
         evidenceId: left.evidence.evidence_id,

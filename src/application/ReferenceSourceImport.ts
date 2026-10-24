@@ -119,7 +119,7 @@ const createShouldExclude =
         : kind === "unknown"
           ? [path, `${path}/`]
           : [path];
-    const firstMatch = (matcher: typeof secrets) => {
+    const firstMatch = (matcher: Pick<typeof secrets, "test">) => {
       const results = patternPaths.map((patternPath) =>
         matcher.test(patternPath),
       );
@@ -181,6 +181,7 @@ export const importReferenceSource = async (
     readReferenceSource(root, resources, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       shouldExclude,
+      beforeDirectory: prepared.value.beforeDirectory,
     }),
     readReferenceSourceVcs(root, resources, options.signal),
   ]);
@@ -210,7 +211,7 @@ export const importReferenceSource = async (
   );
 
   const { entries, relationships, parseFailures, limitations } =
-    parseReferenceSourceEntries(read, filePaths, options.signal);
+    parseReferenceSourceEntries(read, filePaths, exclusions, options.signal);
 
   if (isAborted(options.signal)) return err(cancelled(read));
 

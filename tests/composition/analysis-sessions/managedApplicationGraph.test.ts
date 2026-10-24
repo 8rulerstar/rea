@@ -4,7 +4,7 @@ import { projectManagedApplicationGraphEvidence } from "../../../src/application
 import { managedApplicationGraphReferenceInputSchema } from "../../../src/contracts/managed/managedWorkflowToolContracts.js";
 import { MANAGED_APPLICATION_GRAPH_EXAMPLE } from "../../../src/contracts/managed/managedWorkflowExamples.js";
 import { traceApplicationFeatureEvidence } from "../../../src/application/javascript/JavaScriptApplicationWorkflowService.js";
-import { MANAGED_STATIC_PROVIDER } from "../../../src/application/InvestigationProviders.js";
+import { MANAGED_STATIC_PROVIDER } from "../../../src/domain/investigationProviders.js";
 import { createEvidence, parseEvidence } from "../../../src/domain/evidence.js";
 import { parseJavaScriptApplicationGraph } from "../../../src/domain/javascript/javascriptApplicationGraph.js";
 import { managedApplicationGraphResultSchema } from "../../../src/domain/managed/managedApplicationGraph.js";
@@ -42,10 +42,7 @@ const memberGraph = (bytes: Buffer) => {
     parseEvidence(projection.value).normalized_result,
   );
   const graph = parseJavaScriptApplicationGraph(result.graph);
-  const labels = new Map(
-    graph.nodes.map((node) => [node.node_id, node.observations[0]?.label]),
-  );
-  return { members, memberEvidence, result, graph, labels };
+  return { members, memberEvidence, result, graph };
 };
 
 const createManagedInteropEvidence = () => {
@@ -209,7 +206,7 @@ describe("managed application graph projection", () => {
       true,
     );
     if (!trace.ok) throw new Error("trace failed");
-    expect(trace.value.normalized_result).toMatchObject({
+    expect(trace.value.result).toMatchObject({
       source_evidence_id: parsed.evidence_id,
       summary: { matched_seeds: 1 },
     });
@@ -828,32 +825,40 @@ describe("managed call and field-access relations", () => {
     });
 
   it("links in-module calls and field accesses once per source and target", () => {
-    const { members, memberEvidence, result, graph, labels } =
+    const { members, memberEvidence, result, graph } =
       memberGraph(relationsFixture());
     expect(members.call_edges).toHaveLength(10);
     expect(members.field_accesses).toHaveLength(6);
+    const memberTokens = new Map(
+      graph.nodes.map((node) => [
+        node.node_id,
+        node.observations[0]?.properties.token,
+      ]),
+    );
     const relation = (name: string) =>
       graph.edges
         .filter((edge) => edge.relation === name)
         .map((edge) => ({
-          source: labels.get(edge.source_node_id),
-          target: labels.get(edge.target_node_id),
+          source: memberTokens.get(edge.source_node_id),
+          target: memberTokens.get(edge.target_node_id),
           properties: edge.properties,
           evidence_ids: edge.evidence.evidence_ids,
-        }))
-        .sort((left, right) =>
-          `${left.source}${left.target}` < `${right.source}${right.target}`
-            ? -1
-            : 1,
-        );
-    const [first, second] = members.methods.map(
-      ({ declaring_type, name }) => `${declaring_type}.${name}`,
-    );
-    const field = `${members.fields[0]?.declaring_type}.${members.fields[0]?.name}`;
+        }));
+    // These distinct metadata methods intentionally have the same display name.
+    expect(
+      members.methods.map(
+        ({ declaring_type, name }) => `${declaring_type}.${name}`,
+      ),
+    ).toEqual(["Fixture.Program.Main", "Fixture.Program.Main"]);
+    const [first, second] = members.methods.map(({ token }) => token);
+    expect(first).not.toBe(second);
+    const field = members.fields[0]?.token;
     const evidence_ids = [memberEvidence.evidence_id];
 
-    expect(relation("calls")).toEqual(
-      [
+    const calls = relation("calls");
+    expect(calls).toHaveLength(2);
+    expect(calls).toEqual(
+      expect.arrayContaining([
         {
           source: first,
           target: second,
@@ -874,14 +879,12 @@ describe("managed call and field-access relations", () => {
           },
           evidence_ids,
         },
-      ].sort((left, right) =>
-        `${left.source}${left.target}` < `${right.source}${right.target}`
-          ? -1
-          : 1,
-      ),
+      ]),
     );
+    const accesses = relation("accesses");
+    expect(accesses).toHaveLength(2);
     for (const source of [first, second])
-      expect(relation("accesses")).toContainEqual({
+      expect(accesses).toContainEqual({
         source,
         target: field,
         properties: {

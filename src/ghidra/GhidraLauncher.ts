@@ -24,7 +24,10 @@ import { DarwinProcessOwnershipInspectionError } from "../process/DarwinProcessR
 import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import { err, ok, type Result } from "../domain/result.js";
 import type { AnalysisCapturedOutput } from "../domain/analysisErrorBase.js";
-import { execFileOutputFailure } from "../process/ExecFileOutput.js";
+import {
+  execFileOutputFailure,
+  execFileFailureCapturedOutput,
+} from "../process/ExecFileOutput.js";
 import { boundedUtf8Text } from "../process/boundedUtf8Text.js";
 import { redactCapturedTransportCredential } from "../process/ProviderDiagnosticRedaction.js";
 import {
@@ -197,19 +200,7 @@ const ghidraLaunchCommandOutput = (
     return cause.capturedOutput;
   const failure = execFileOutputFailure(cause);
   if (failure === undefined) return undefined;
-  return {
-    stdout: failure.stdout,
-    stderr: failure.stderr,
-    truncated: failure.outputTruncated,
-    ...(failure.stdoutBytes === undefined
-      ? {}
-      : { stdout_bytes: failure.stdoutBytes }),
-    ...(failure.stderrBytes === undefined
-      ? {}
-      : { stderr_bytes: failure.stderrBytes }),
-    exit_code: typeof failure.code === "number" ? failure.code : null,
-    signal: failure.signal,
-  };
+  return execFileFailureCapturedOutput(failure);
 };
 
 /** Static coordinates for an extracted Ghidra release and packaged script. */
@@ -235,6 +226,8 @@ export interface GhidraHeadlessLauncherOptions {
   readonly languageOverride?: GhidraLanguageOverride;
   /** Auto-analyzers disabled before default auto-analysis, as configured. */
   readonly disabledAnalyzers?: readonly string[];
+  /** Per-function native decompiler limit passed to the bridge; absent is unbounded. */
+  readonly decompileTimeoutSeconds?: number;
   /** Caller seeds committed by the analysis profile, applied before analysis. */
   readonly analysisSeeds?: GhidraSeedCommitment;
   readonly analysisExtensions?: readonly GhidraExtension[];
@@ -349,6 +342,11 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
           target_sha256: session.targetSha256,
           provider_version: session.providerVersion,
           profile_digest: session.profileDigest,
+          ...(this.options.decompileTimeoutSeconds === undefined
+            ? {}
+            : {
+                decompile_timeout_seconds: this.options.decompileTimeoutSeconds,
+              }),
           ...(extensions.length === 0
             ? {}
             : { analysis_extensions: extensions }),

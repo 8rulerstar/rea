@@ -71,6 +71,7 @@ const unknownBody = {
 const identity = (fn: IdaFunction) => ({
   address: fn.address,
   name: fn.name,
+  symbol: null,
   classification: null,
   body: unknownBody,
 });
@@ -120,12 +121,20 @@ export class IdaOperationRunner {
     tool: string,
     args: Readonly<Record<string, JsonValue>>,
   ): Promise<JsonValue> {
-    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted)
+      throw new AnalysisCancelledError(tool, {
+        cause: this.options.signal.reason,
+      });
     const scoped =
       this.database === undefined ? args : { ...args, database: this.database };
-    const result = await this.connection.call(tool, scoped);
+    const result = await this.connection.call(tool, scoped, {
+      signal: this.options.signal,
+    });
     this.raw.push({ tool, arguments: scoped, result });
-    if (this.options.signal?.aborted) throw new AnalysisCancelledError(tool);
+    if (this.options.signal?.aborted)
+      throw new AnalysisCancelledError(tool, {
+        cause: this.options.signal.reason,
+      });
     return result;
   }
 
@@ -166,6 +175,19 @@ export class IdaOperationRunner {
    * addresses were reported by IDA itself.
    */
   async resolve(query: string, requestedBy?: string): Promise<IdaFunction> {
+    if (query.startsWith("file-offset:"))
+      throw new AnalysisInputError(
+        requestedBy ?? "procedure_address",
+        undefined,
+        [
+          {
+            path: ["procedure"],
+            reason: "invalid_value",
+            message:
+              "IDA does not support file-offset: procedure selectors. Select Ghidra for source-file coordinates or supply an IDA analysis address or exact procedure name.",
+          },
+        ],
+      );
     if (this.protocol !== "legacy") {
       const item = modernLookupSchema.parse(
         await this.call("lookup_funcs", { queries: [query] }),
@@ -557,7 +579,7 @@ export class IdaOperationRunner {
       }
     }
     const querySet = new Set(queries);
-    if (this.protocol === "native" && querySet.size > 0) {
+    if (this.protocol !== "legacy" && querySet.size > 0) {
       const rows = modernLookupBatchSchema.parse(
         await this.call("lookup_funcs", { queries: [...querySet] }),
       );
@@ -568,7 +590,7 @@ export class IdaOperationRunner {
         rows.some((row) => !querySet.has(row.query))
       )
         throw new AnalysisProtocolError(
-          "Native IDA returned an inconsistent callee lookup batch.",
+          "IDA returned an inconsistent callee lookup batch.",
         );
       for (const query of querySet) {
         const resolved = identity(

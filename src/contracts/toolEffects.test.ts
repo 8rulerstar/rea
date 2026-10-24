@@ -32,6 +32,7 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
   inspect_desktop_application:
     "states that directory triage performs no target execution",
   inspect_pe_certificates: "states that it does not execute the image",
+  inspect_pe_imports: "states that it does not execute the image",
   inspect_go_binary: "reads embedded metadata without executing the target",
   inspect_rust_binary:
     "reads an embedded dependency list without executing the target",
@@ -113,6 +114,19 @@ const declaresForeignAuthority = (name: string): boolean => {
 };
 
 describe("tool effects", () => {
+  it("declares the web bundle worker's private file and child process effects", () => {
+    const contract = TOOL_CONTRACTS.find(
+      ({ name }) => name === "analyze_web_bundle",
+    );
+    expect(contract?.effects).toMatchObject({
+      mutatesSession: true,
+      accessesNetwork: true,
+      launchesProcess: true,
+      writesFilesystem: true,
+      executesForeignCode: false,
+      mutatesTarget: false,
+    });
+  });
   it("audits every public tool exactly once", () => {
     expect(Object.keys(TOOL_EFFECTS).sort()).toEqual(
       TOOL_CONTRACTS.map(({ name }) => name).sort(),
@@ -151,6 +165,7 @@ describe("tool effects", () => {
       "capture_electron_scenario",
       "capture_native_ui_scenario",
       "capture_process_scenario",
+      "close_frida_session",
       "close_gdb_session",
       "close_rizin_debug_session",
       "cutter_command",
@@ -225,5 +240,13 @@ describe("tool effects", () => {
       expect(contract.annotations, contract.name).toEqual(
         annotationsFromEffects(contract.effects),
       );
+  });
+});
+
+it("advertises signature inspection's temporary snapshot filesystem writes", () => {
+  expect(TOOL_EFFECTS.inspect_signature).toMatchObject({
+    writesFilesystem: true,
+    mutatesTarget: false,
+    launchesProcess: true,
   });
 });

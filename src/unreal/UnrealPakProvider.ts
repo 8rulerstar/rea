@@ -3,13 +3,15 @@ import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
 import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
 import {
   ArtifactFileCleanupFailure,
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
   ArtifactFileCancelled,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
   assertArtifactReadActive,
 } from "../artifacts/ArtifactFileOperation.js";
 import { readStableArtifactRanges } from "../artifacts/readStableArtifact.js";
+import { isSelectedRegularFileError } from "../filesystem/RegularFile.js";
 import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import type { ExecutionOptions } from "../application/AnalysisProvider.js";
 import type { UnrealPakPort } from "../application/unreal/UnrealPakPort.js";
@@ -74,16 +76,26 @@ const LIMITATIONS = [
 ];
 
 const failureForPrimary = (
-  cause: unknown,
+  facts: ArtifactFilePrimaryFacts,
   path: string,
   outputBytes: number,
 ): AnalysisError => {
-  if (cause instanceof AnalysisError) return cause;
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
+  const { cause, origin } = facts;
+  if (origin === "owned-or-classified" && cause instanceof AnalysisError)
+    return cause;
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "integrity"
+  )
     return new AnalysisArtifactChangedError(OPERATION, path, cause.message, {
       cause,
     });
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "cancelled"
+  )
     return new AnalysisCancelledError(OPERATION, {
       cause: artifactFileCancellationCause(cause),
     });
@@ -123,7 +135,11 @@ const failureForPrimary = (
       },
     ]);
   }
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "limit")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "limit"
+  )
     return new AnalysisResourceConstraintError(
       OPERATION,
       "file-size",
@@ -131,7 +147,11 @@ const failureForPrimary = (
       { maximum_input_bytes: Number.MAX_SAFE_INTEGER },
       { cause },
     );
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "path")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "path"
+  )
     return new AnalysisInputError(OPERATION, { cause }, [
       { path: ["path"], reason: "invalid_format", message: cause.message },
     ]);
@@ -140,11 +160,7 @@ const failureForPrimary = (
       return new AnalysisAccessDeniedError(OPERATION, path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],
@@ -168,7 +184,7 @@ const failureFor = (
   outputBytes: number,
 ): AnalysisError => {
   const primary = failureForPrimary(
-    artifactFilePrimaryFailure(cause),
+    artifactFilePrimaryFacts(cause),
     path,
     outputBytes,
   );

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { JsonValue } from "../jsonValue.js";
+import { readRecordedDateTime } from "../offsetDateTime.js";
 
 /** How a recorded clock value is spelled: ISO-8601 with its separator, fraction digits and zone, or an epoch number. */
 export type ClockFormat =
@@ -18,55 +19,50 @@ interface ClockReading {
   readonly format: ClockFormat;
 }
 
-const ISO_INSTANT =
-  /^(\d{4})-(\d{2})-(\d{2})([T ])(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2})?$/u;
 const MINUTE_MS = 60_000;
 
 /** Minutes east of UTC that a zone suffix names; none and `Z` are UTC. */
-const zoneMinutes = (zone: string): number => {
+const zoneMinutes = (zone: string): number | undefined => {
   if (zone === "" || zone === "Z") return 0;
+  if (!/^[+-]\d{2}:?\d{2}$/u.test(zone)) return undefined;
   const digits = zone.slice(1).replace(":", "");
-  const minutes =
-    Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4) || "0");
+  const hours = Number(digits.slice(0, 2));
+  const remainder = Number(digits.slice(2, 4));
+  if (hours > 23 || remainder > 59) return undefined;
+  const minutes = hours * 60 + remainder;
   return zone.startsWith("-") ? -minutes : minutes;
+};
+
+/** Whether a stored ISO clock format has a supported RFC 3339 offset suffix. */
+export const isClockZone = (zone: string): boolean =>
+  zoneMinutes(zone) !== undefined;
+
+const zoneMinutesForFormat = (zone: string): number => {
+  const minutes = zoneMinutes(zone);
+  if (minutes === undefined)
+    throw new TypeError(`Invalid clock zone in a derived format: ${zone}`);
+  return minutes;
 };
 
 /** The instant of an ISO-8601 date-time and how it is spelled, or undefined when it is not one. */
 const readIsoClock = (value: string): ClockReading | undefined => {
-  const match = ISO_INSTANT.exec(value);
-  if (match === null) return undefined;
-  const [year, month, day, separator, hour, minute, second] = match
-    .slice(1, 8)
-    .map((part) => (part === "T" || part === " " ? part : Number(part)));
-  const fraction = match[8] ?? "";
-  const zone = match[9] ?? "";
-  const local = Date.UTC(
-    year as number,
-    (month as number) - 1,
-    day as number,
-    hour as number,
-    minute as number,
-    second as number,
-    Number(`${fraction}000`.slice(0, 3)),
-  );
-  // Date.UTC rolls invalid fields over; the round trip refuses them.
-  const rolled = new Date(local);
+  const reading = readRecordedDateTime(value);
   if (
-    rolled.getUTCFullYear() !== year ||
-    rolled.getUTCMonth() !== (month as number) - 1 ||
-    rolled.getUTCDate() !== day ||
-    rolled.getUTCHours() !== hour ||
-    rolled.getUTCMinutes() !== minute
+    reading === undefined ||
+    !reading.spelling.secondsPresent ||
+    reading.spelling.fractionDigits > 9
   )
     return undefined;
+  const { instant, spelling } = reading;
   return {
-    ms: local - zoneMinutes(zone) * MINUTE_MS,
-    subMillisecond: Number(fraction.padEnd(9, "0").slice(3)),
+    ms:
+      instant.epochSecond * 1000 + Number(`${instant.fraction}000`.slice(0, 3)),
+    subMillisecond: Number(instant.fraction.padEnd(9, "0").slice(3)),
     format: {
       kind: "iso",
-      separator: separator as "T" | " ",
-      fraction: fraction.length,
-      zone,
+      separator: spelling.separator,
+      fraction: spelling.fractionDigits,
+      zone: spelling.zone,
     },
   };
 };
@@ -102,14 +98,20 @@ const isoText = (
   separator: string,
   digits: string,
   zone: string,
-): string =>
-  `${pad(at.getUTCFullYear(), 4)}-${pad(at.getUTCMonth() + 1, 2)}-${pad(at.getUTCDate(), 2)}${separator}${pad(at.getUTCHours(), 2)}:${pad(at.getUTCMinutes(), 2)}:${pad(at.getUTCSeconds(), 2)}${digits === "" ? "" : `.${digits}`}${zone}`;
+): string | undefined => {
+  const year = at.getUTCFullYear();
+  if (!Number.isInteger(year) || year < 0 || year > 9999) return undefined;
+  return `${pad(year, 4)}-${pad(at.getUTCMonth() + 1, 2)}-${pad(at.getUTCDate(), 2)}${separator}${pad(at.getUTCHours(), 2)}:${pad(at.getUTCMinutes(), 2)}:${pad(at.getUTCSeconds(), 2)}${digits === "" ? "" : `.${digits}`}${zone}`;
+};
 
-/** An instant spelled in a recorded clock format; fraction digits past milliseconds are zeros. */
-export const formatClock = (ms: number, format: ClockFormat): JsonValue => {
+/** An instant in a recorded format; undefined outside its four-digit ISO year range. Fraction digits past milliseconds are zeros. */
+export const formatClock = (
+  ms: number,
+  format: ClockFormat,
+): JsonValue | undefined => {
   if (format.kind === "epoch")
     return format.unit === "s" ? Math.floor(ms / 1000) : ms;
-  const at = new Date(ms + zoneMinutes(format.zone) * MINUTE_MS);
+  const at = new Date(ms + zoneMinutesForFormat(format.zone) * MINUTE_MS);
   const digits = `${pad(at.getUTCMilliseconds(), 3)}${"0".repeat(9)}`.slice(
     0,
     format.fraction,
@@ -128,7 +130,7 @@ export const respellClock = (
 ): JsonValue => {
   const clock = readClock(value);
   if (clock === undefined) return value;
-  if (format.kind === "epoch") return formatClock(clock.ms, format);
+  if (format.kind === "epoch") return formatClock(clock.ms, format) ?? value;
   const millis = ((clock.ms % 1000) + 1000) % 1000;
   // An epoch value's fraction is its milliseconds, without trailing zeros.
   const digits =
@@ -138,12 +140,16 @@ export const respellClock = (
           0,
           clock.format.fraction,
         );
-  const at = new Date(clock.ms - millis + zoneMinutes(format.zone) * MINUTE_MS);
-  return isoText(
-    at,
-    format.separator,
-    digits.padEnd(format.fraction, "0"),
-    format.zone,
+  const at = new Date(
+    clock.ms - millis + zoneMinutesForFormat(format.zone) * MINUTE_MS,
+  );
+  return (
+    isoText(
+      at,
+      format.separator,
+      digits.padEnd(format.fraction, "0"),
+      format.zone,
+    ) ?? value
   );
 };
 
@@ -238,6 +244,22 @@ export const slugOf = (text: string): string =>
 const isAlphanumeric = (character: string | undefined): boolean =>
   character !== undefined && /[\p{L}\p{N}]/u.test(character);
 
+/** Source offsets stay UTF-16, while delimiter classification reads complete code points. */
+const previousCharacter = (text: string, at: number): string | undefined => {
+  if (at === 0) return undefined;
+  const last = text.charCodeAt(at - 1);
+  if (last >= 0xdc00 && last <= 0xdfff && at > 1) {
+    const first = text.charCodeAt(at - 2);
+    if (first >= 0xd800 && first <= 0xdbff) return text.slice(at - 2, at);
+  }
+  return text[at - 1];
+};
+
+const nextCharacter = (text: string, at: number): string | undefined => {
+  const point = text.codePointAt(at);
+  return point === undefined ? undefined : String.fromCodePoint(point);
+};
+
 /** Start offsets of `token` in `text` where neither neighbour is a letter or digit. */
 export const delimitedOffsets = (text: string, token: string): number[] => {
   const offsets: number[] = [];
@@ -245,7 +267,8 @@ export const delimitedOffsets = (text: string, token: string): number[] => {
   let at = text.indexOf(token);
   while (at >= 0) {
     const delimited =
-      !isAlphanumeric(text[at - 1]) && !isAlphanumeric(text[at + token.length]);
+      !isAlphanumeric(previousCharacter(text, at)) &&
+      !isAlphanumeric(nextCharacter(text, at + token.length));
     if (delimited) offsets.push(at);
     // A rejected match may overlap a delimited one, so the search moves on by one character.
     at = text.indexOf(token, at + (delimited ? token.length : 1));

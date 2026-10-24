@@ -1,4 +1,5 @@
 import type { MatchNativeFunctionsInput } from "../../contracts/native/functionMatchingContracts.js";
+import { digestCanonicalValue } from "../../domain/canonicalDigest.js";
 import { AnalysisInputError } from "../../domain/analysisErrorCore.js";
 import type { Evidence } from "../../domain/evidence.js";
 import { readEvidence } from "../../domain/evidenceValidation.js";
@@ -8,6 +9,8 @@ import {
   type EvidenceLookup,
 } from "../EvidenceInputResolver.js";
 import type { NativeMatchingAdmission } from "./NativeMatchingAdmission.js";
+
+import { nativeMatchingInputError } from "./NativeMatchingInputError.js";
 
 const INVENTORY_OPERATIONS = ["list_procedures"] as const;
 const OBSERVATION_OPERATIONS = [
@@ -31,7 +34,10 @@ export const resolveNativeMatchingSources = async (
   readonly sources: readonly Evidence[];
 }> => {
   const sources = new Map<string, Evidence>();
-  const resolve = async (input: unknown): Promise<Evidence> => {
+  const resolve = async (
+    input: unknown,
+    path?: readonly (string | number)[],
+  ): Promise<Evidence> => {
     const reference = retainedEvidenceReferenceSchema.safeParse(input);
     let raw = input;
     if (reference.success) {
@@ -41,7 +47,15 @@ export const resolveNativeMatchingSources = async (
     }
     await admission.admit(raw);
     const checked = readEvidence(raw);
-    if (!checked.ok) throw checked.error;
+    if (!checked.ok)
+      throw path !== undefined && !reference.success
+        ? nativeMatchingInputError(
+            input,
+            path,
+            admission.operation,
+            checked.error,
+          )
+        : checked.error;
     const evidence = checked.value;
     const cached = sources.get(evidence.evidence_id);
     if (cached !== undefined) return cached;
@@ -53,12 +67,13 @@ export const resolveNativeMatchingSources = async (
     path: readonly (string | number)[],
     operations: readonly string[],
   ): Promise<Evidence> => {
-    const evidence = await resolve(raw);
+    const evidence = await resolve(raw, path);
     if (
       evidence.predicate_type !== "rea.analysis" ||
-      !operations.includes(evidence.operation)
+      !operations.includes(evidence.operation) ||
+      evidence.subject === null
     ) {
-      const message = `Expected rea.analysis ${operations.join(" or ")} Evidence, received ${evidence.predicate_type} ${evidence.operation}`;
+      const message = `Expected artifact-bound rea.analysis ${operations.join(" or ")} Evidence, received ${evidence.predicate_type} ${evidence.operation}`;
       throw new AnalysisInputError(
         admission.operation,
         { userMessage: message },
@@ -72,6 +87,7 @@ export const resolveNativeMatchingSources = async (
   const observations = async (
     inputs: readonly unknown[],
     field: "left_observations" | "right_observations",
+    inventory: Evidence,
   ): Promise<Evidence[]> => {
     const result: Evidence[] = [];
     const seen = new Set<string>();
@@ -81,6 +97,24 @@ export const resolveNativeMatchingSources = async (
         [field, index],
         OBSERVATION_OPERATIONS,
       );
+      if (
+        digestCanonicalValue(record.subject) !==
+          digestCanonicalValue(inventory.subject) ||
+        digestCanonicalValue(record.provider) !==
+          digestCanonicalValue(inventory.provider) ||
+        digestCanonicalValue(record.analysis_profile) !==
+          digestCanonicalValue(inventory.analysis_profile) ||
+        (record.parameters.document ?? null) !==
+          (inventory.parameters.document ?? null)
+      ) {
+        const message =
+          "Select an observation from the inventory's exact target, provider, analysis profile and document context.";
+        throw new AnalysisInputError(
+          admission.operation,
+          { userMessage: message },
+          [{ path: [field, index], reason: "invalid_value", message }],
+        );
+      }
       if (!seen.has(record.evidence_id)) {
         seen.add(record.evidence_id);
         result.push(record);
@@ -91,10 +125,12 @@ export const resolveNativeMatchingSources = async (
   const leftObservations = await observations(
     input.left_observations,
     "left_observations",
+    left,
   );
   const rightObservations = await observations(
     input.right_observations,
     "right_observations",
+    right,
   );
   const directLinks = [...sources.keys()].sort();
   for (const source of sources.values())

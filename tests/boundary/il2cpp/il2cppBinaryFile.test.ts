@@ -1,4 +1,9 @@
 import { Il2cppBinaryFormatFailure } from "../../../src/il2cpp/Il2cppBinaryFormat.js";
+import { readBinaryContainer } from "../../../src/native/metadata/readBinaryContainer.js";
+import {
+  openImageSteps,
+  readUInt32,
+} from "../../../src/il2cpp/Il2cppBinaryImage.js";
 import { expect, it } from "vitest";
 import {
   linkIl2cppBinary,
@@ -8,6 +13,8 @@ import { readIl2cppMetadataForLinking } from "../../../src/il2cpp/Il2cppMetadata
 import {
   createElfFixture,
   createIl2cppBinaryFixture,
+  createIl2cppDyldBindFixture,
+  createIl2cppRegistrationTailFixture,
   createUniversalFixture,
   createSplitPointerPeFixture,
   FIXTURE_BINARY_BASE,
@@ -15,10 +22,13 @@ import {
   FIXTURE_RETURN_TYPE_NAME,
   type Il2cppBinaryFixtureOptions,
 } from "../../fixtures/il2cpp/binary.js";
-import { createIl2cppMetadataFixture } from "../../fixtures/il2cpp/metadata.js";
+import {
+  createIl2cppMetadataFixture,
+  createLinkedIl2cppMetadataFixture,
+} from "../../fixtures/il2cpp/metadata.js";
 
 const { metadata, link: facts } = readIl2cppMetadataForLinking(
-  createIl2cppMetadataFixture().bytes,
+  createLinkedIl2cppMetadataFixture().bytes,
 );
 const expectedAddress = (value: bigint | "no-body" | "unknown") =>
   typeof value === "bigint"
@@ -40,6 +50,27 @@ const failure = (bytes: Buffer, architecture?: string) => {
     throw cause;
   }
   throw new Error("expected a link failure");
+};
+const addElfLoadAlias = (
+  bytes: Buffer,
+  fileOffset: number,
+  address: bigint,
+  size: number,
+) => {
+  const withAlias = Buffer.from(bytes);
+  const count = withAlias.readUInt16LE(56);
+  const at = 64 + count * 56;
+  withAlias.writeUInt16LE(count + 1, 56);
+  withAlias.writeUInt32LE(1, at);
+  withAlias.writeUInt32LE(7, at + 4);
+  withAlias.writeBigUInt64LE(BigInt(fileOffset), at + 8);
+  withAlias.writeBigUInt64LE(address, at + 16);
+  withAlias.writeBigUInt64LE(address, at + 24);
+  const mappingSize = size === 0 ? withAlias.length : size;
+  withAlias.writeBigUInt64LE(BigInt(mappingSize), at + 32);
+  withAlias.writeBigUInt64LE(BigInt(mappingSize), at + 40);
+  withAlias.writeBigUInt64LE(0x1000n, at + 48);
+  return withAlias;
 };
 
 it("links methods to code through module tokens, not metadata order", () => {
@@ -76,6 +107,72 @@ it("links methods to code through module tokens, not metadata order", () => {
   );
 });
 
+it.each([
+  ["an identical range", 0, FIXTURE_BINARY_BASE, 0],
+  ["a containing subrange", 0x400, FIXTURE_BINARY_BASE + 0x400n, 0x80],
+] as const)(
+  "counts one registration through %s only once",
+  (_, offset, address, size) => {
+    const bytes = addElfLoadAlias(
+      createElfFixture(createIl2cppBinaryFixture()),
+      offset,
+      address,
+      size,
+    );
+
+    expect(link(bytes).method_addresses).toEqual(expectedAddresses);
+  },
+);
+
+it("still rejects distinct CodeRegistration module table fields", () => {
+  expect(
+    failure(
+      createElfFixture(
+        createIl2cppBinaryFixture({ duplicateCodeRegistration: true }),
+      ),
+    ),
+  ).toEqual({ reason: "code-registration-not-found", kind: "malformed" });
+});
+
+it("still rejects distinct MetadataRegistration fields", () => {
+  expect(
+    failure(
+      createElfFixture(
+        createIl2cppBinaryFixture({ duplicateMetadataRegistration: true }),
+      ),
+    ),
+  ).toEqual({ reason: "metadata-registration-not-found", kind: "malformed" });
+});
+
+it("rejects reused MethodDef tokens within an image but preserves cross-image reuse and folded addresses", () => {
+  const duplicateTokens = Uint32Array.from(facts.methodTokens);
+  duplicateTokens[1] = duplicateTokens[0]!;
+  expect(() =>
+    linkIl2cppBinary(createIl2cppBinaryFixture(), metadata, {
+      ...facts,
+      methodTokens: duplicateTokens,
+    }),
+  ).toThrow(
+    expect.objectContaining({
+      reason: "invalid-method-token",
+      kind: "malformed",
+    }),
+  );
+
+  // The fixture deliberately reuses MethodDef row ids in its second image.
+  expect(link(createIl2cppBinaryFixture()).method_addresses).toEqual(
+    expectedAddresses,
+  );
+
+  // Distinct rows may still point at the same native address after folding.
+  const folded = createIl2cppBinaryFixture();
+  folded.writeBigUInt64LE(folded.readBigUInt64LE(0x308), 0x300);
+  const linkedFolded = link(folded);
+  expect(linkedFolded.method_addresses[0]?.address).toBe(
+    linkedFolded.method_addresses[1]?.address,
+  );
+});
+
 it("requires an explicit slice of a universal Mach-O and reads only that slice", () => {
   const thin = createIl2cppBinaryFixture();
   const universal = createUniversalFixture([
@@ -90,6 +187,37 @@ it("requires an explicit slice of a universal Mach-O and reads only that slice",
   expect(failure(universal, "ppc64").reason).toBe("slice-not-found");
   expect(failure(thin, "arm64").reason).toBe("slice-not-found");
 });
+
+it.each(["thin", "universal"] as const)(
+  "links a %s x86-64 Mach-O while retaining the reader's amd64 spelling",
+  (format) => {
+    const thin = createIl2cppBinaryFixture();
+    thin.writeUInt32LE(0x01000007, 4);
+    thin.writeUInt32LE(3, 8);
+    const bytes =
+      format === "thin"
+        ? thin
+        : createUniversalFixture([
+            { cpu: 0x0100000c, bytes: createIl2cppBinaryFixture() },
+            { cpu: 0x01000007, bytes: thin },
+          ]);
+    // Match the selected FAT declaration to CPU_SUBTYPE_X86_64_ALL in its header.
+    if (format === "universal") bytes.writeUInt32BE(3, 8 + 20 + 4);
+    const original = Buffer.from(bytes);
+    const linked = link(bytes, format === "thin" ? undefined : "amd64");
+    expect(linked).toMatchObject({
+      format: "macho",
+      architecture: "amd64",
+      code_gen_modules_field: FIXTURE_BINARY_BASE + 0x600n,
+      code_gen_modules_array: FIXTURE_BINARY_BASE + 0x500n,
+    });
+    expect(linked.method_addresses).toEqual(expectedAddresses);
+    expect(linked.return_types).toEqual(
+      link(createIl2cppBinaryFixture()).return_types,
+    );
+    expect(bytes).toEqual(original);
+  },
+);
 
 it.each<
   [string, Il2cppBinaryFixtureOptions, string, "unsupported" | "malformed"]
@@ -143,6 +271,38 @@ it("reports type indices without names for metadata version 27", () => {
   expect(rows.every((row) => row.name === null)).toBe(true);
   expect(link(createIl2cppBinaryFixture()).return_types[0]?.name).toBe(
     FIXTURE_RETURN_TYPE_NAME,
+  );
+});
+
+it("renders nested generic arguments on the components that declare them", () => {
+  const renderedName = (
+    typeNames: Readonly<Record<number, string>>,
+    genericTypeArgumentCounts: Readonly<Record<number, number>>,
+    genericArgumentTypeIndices: readonly number[],
+  ) => {
+    const { metadata: nestedMetadata, link: nestedFacts } =
+      readIl2cppMetadataForLinking(
+        createLinkedIl2cppMetadataFixture({
+          typeNames,
+          typeNamespaces: { 0: "Game", 1: "" },
+          genericTypeArgumentCounts,
+        }).bytes,
+      );
+    return linkIl2cppBinary(
+      createIl2cppBinaryFixture({
+        genericDefinitionTypeIndex: 1,
+        genericArgumentTypeIndices,
+      }),
+      nestedMetadata,
+      nestedFacts,
+    ).return_types[0]?.name;
+  };
+
+  expect(
+    renderedName({ 0: "Outer`1", 1: "Inner`2" }, { 0: 1, 1: 2 }, [3, 3]),
+  ).toBe("Game.Outer<int>+Inner<int>[]");
+  expect(renderedName({ 0: "Outer`1", 1: "Leaf`1" }, { 0: 1, 1: 1 }, [3])).toBe(
+    "Game.Outer<int>+Leaf[]",
   );
 });
 
@@ -321,6 +481,58 @@ it("links an ELF shared object after applying its RELATIVE relocations", () => {
   expect(link(elf)).toEqual({ ...fromMacho, format: "elf" });
 });
 
+it.each([183, 62])(
+  "links ELF relocations using the resolved PN_XNUM program count (machine %s)",
+  (machine) => {
+    const original = createElfFixture(createIl2cppBinaryFixture(), { machine });
+    const count = 65536;
+    const table = original.length;
+    const sectionZero = table + count * 56;
+    const extended = Buffer.concat([original, Buffer.alloc(count * 56 + 64)]);
+    // Keep mapped payload bytes untouched; the last declaration is beyond
+    // the raw 0xffff sentinel that the old relocation scan treated as a count.
+    original.copy(extended, table, 64, 120);
+    original.copy(extended, table + (count - 1) * 56, 120, 176);
+    extended.writeBigUInt64LE(BigInt(table), 32);
+    extended.writeBigUInt64LE(BigInt(sectionZero), 40);
+    extended.writeUInt16LE(0xffff, 56);
+    extended.writeUInt16LE(64, 58);
+    extended.writeUInt16LE(1, 60);
+    extended.writeUInt32LE(count, sectionZero + 44);
+    expect(link(extended).method_addresses).toEqual(
+      link(original).method_addresses,
+    );
+  },
+);
+
+it("ignores undefined PT_NULL fields while linking ELF relocations", () => {
+  const original = createElfFixture(createIl2cppBinaryFixture());
+  const bytes = Buffer.from(original);
+  bytes.writeUInt16LE(3, 56);
+  bytes.fill(0xff, 176, 232);
+  bytes.writeUInt32LE(0, 176);
+  expect(link(bytes).method_addresses).toEqual(link(original).method_addresses);
+});
+
+it.each(["outside", "misaligned", "duplicate"] as const)(
+  "refuses a %s dynamic declaration at relocation admission",
+  (shape) => {
+    const bytes = createElfFixture(createIl2cppBinaryFixture());
+    if (shape === "outside") bytes.writeBigUInt64LE(1n << 63n, 128);
+    else if (shape === "misaligned") bytes.writeBigUInt64LE(17n, 152);
+    else {
+      bytes.copy(bytes, 176, 120, 176);
+      bytes.writeUInt16LE(3, 56);
+    }
+    expect(() => readBinaryContainer(bytes)).not.toThrow();
+    expect(() => link(bytes)).toThrow(
+      shape === "duplicate"
+        ? "multiple PT_DYNAMIC segments"
+        : "PT_DYNAMIC is truncated or outside the file",
+    );
+  },
+);
+
 it.each([
   [{ dynamic: false }, "unsupported-container"],
   [{ machine: 243 }, "unsupported-container"],
@@ -399,6 +611,11 @@ it("rejects a recursive binary type graph without overflowing the JavaScript sta
 });
 
 it("guards a shared generic expansion before concatenating unchecked text", () => {
+  const expanded = readIl2cppMetadataForLinking(
+    createLinkedIl2cppMetadataFixture({
+      genericTypeArgumentCounts: { 3: 2 },
+    }).bytes,
+  );
   const bytes = Buffer.alloc(0x4000);
   createIl2cppBinaryFixture().copy(bytes);
   bytes.writeBigUInt64LE(BigInt(bytes.length), 64);
@@ -419,11 +636,17 @@ it("guards a shared generic expansion before concatenating unchecked text", () =
   }
   bytes.writeBigUInt64LE(prior, 0x900);
   const stopped = new Error("type text admission");
-  const steps = linkIl2cppBinarySteps(bytes, metadata, facts, undefined, {
-    beforeText: (size) => {
-      if (size > 1024) throw stopped;
+  const steps = linkIl2cppBinarySteps(
+    bytes,
+    expanded.metadata,
+    expanded.link,
+    undefined,
+    {
+      beforeText: (size) => {
+        if (size > 1024) throw stopped;
+      },
     },
-  });
+  );
   expect(() => {
     for (;;) {
       if (steps.next().done) break;
@@ -443,6 +666,110 @@ it("reports a symbol-relocated method slot as unknown rather than no-body", () =
   expect(linked.method_addresses[1]).toEqual(expectedAddress("unknown"));
   expect(linked.method_addresses[0]).toEqual(expectedAddresses[0]);
 });
+
+it.each([0n, FIXTURE_BINARY_BASE + 0x210n])(
+  "keeps a dyld-bound method slot unknown regardless of its raw word %s",
+  (raw) => {
+    const linked = link(createIl2cppDyldBindFixture(raw));
+    expect(linked.method_addresses[1]).toEqual(expectedAddress("unknown"));
+    expect(linked.method_addresses[0]).toEqual(expectedAddresses[0]);
+    expect(linked.method_addresses[4]).toEqual(expectedAddress("no-body"));
+  },
+);
+
+it("keeps unbound Mach-O method words classified from their values", () => {
+  const linked = link(createIl2cppBinaryFixture());
+  expect(linked.method_addresses[1]).toEqual(expectedAddresses[1]);
+  expect(linked.method_addresses[4]).toEqual(expectedAddress("no-body"));
+});
+it("refuses an unresolved inner type value instead of rendering its stored placeholder", () => {
+  expect(
+    failure(createIl2cppDyldBindFixture(FIXTURE_BINARY_BASE + 0x990n, 0x980)),
+  ).toEqual({
+    reason: "unsupported-pointer-encoding",
+    kind: "unsupported",
+  });
+});
+it.each([
+  [0x600, 2n, "code-registration-not-found"],
+  [0x408, 3n, "code-gen-modules-not-found"],
+  [0x850, 4n, "metadata-registration-not-found"],
+  [0x860, 4n, "metadata-registration-not-found"],
+  [0x988, 0x001d0000n, "unsupported-pointer-encoding"],
+] as const)("does not trust a dyld-owned scalar at %s", (slot, raw, reason) => {
+  expect(failure(createIl2cppDyldBindFixture(raw, slot)).reason).toBe(reason);
+});
+it.each([
+  [0x5f8, 0n, 2],
+  [0x5fc, 2n << 32n, "unknown"],
+  [0x600, 2n, "unknown"],
+  [0x604, 0n, 2],
+] as const)(
+  "uses the four-byte count span for a dyld bind at %s",
+  (slot, raw, expected) => {
+    const steps = openImageSteps(
+      createIl2cppDyldBindFixture(raw, slot),
+      undefined,
+    );
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    expect(readUInt32(step.value, FIXTURE_BINARY_BASE + 0x600n)).toBe(expected);
+  },
+);
+it.each([
+  [0x400, "code-gen-modules-not-found"],
+  [0x410, "code-gen-modules-not-found"],
+  [0x500, "code-registration-not-found"],
+  [0x608, "code-registration-not-found"],
+  [0x838, "metadata-registration-not-found"],
+] as const)(
+  "does not nominate a registration from dyld-owned word at %s",
+  (slot, reason) => {
+    const raw = createIl2cppBinaryFixture().readBigUInt64LE(slot);
+    expect(failure(createIl2cppDyldBindFixture(raw, slot)).reason).toBe(reason);
+  },
+);
+it.each([1, 0xff])(
+  "ignores ABI count padding byte %d without accepting a changed count",
+  (padding) => {
+    const bytes = createIl2cppBinaryFixture();
+    bytes.fill(padding, 0x604, 0x608);
+    expect(link(bytes)).toEqual(link(createIl2cppBinaryFixture()));
+    bytes.writeUInt32LE(3, 0x600);
+    expect(failure(bytes).reason).toBe("code-registration-not-found");
+  },
+);
+it.each([8, 16] as const)(
+  "rejects %d absent registration bytes without declared zero-fill",
+  (tailBytes) => {
+    expect(
+      failure(createIl2cppRegistrationTailFixture(tailBytes, false)).reason,
+    ).toBe("metadata-registration-not-found");
+  },
+);
+
+it.each([
+  ["PC32", 2],
+  ["ABS32", 10],
+] as const)(
+  "keeps a method pointer beside a non-overlapping %s relocation",
+  (_, kind) => {
+    const binary = createIl2cppBinaryFixture();
+    const adjacent = createElfFixture(binary, {
+      machine: 62,
+      unresolvedRelocations: [{ offset: 0x2fc, kind }],
+    });
+    expect(link(adjacent).method_addresses).toEqual(expectedAddresses);
+
+    const overlapping = createElfFixture(binary, {
+      machine: 62,
+      unresolvedRelocations: [{ offset: 0x300, kind }],
+    });
+    expect(link(overlapping).method_addresses[1]).toEqual(
+      expectedAddress("unknown"),
+    );
+  },
+);
 
 it("reads a relative relocation into a zero-filled pointer array as a known value", () => {
   const bytes = createElfFixture(createIl2cppBinaryFixture(), {
@@ -497,3 +824,59 @@ it("reads type attributes without requiring file-backed alignment padding", () =
     Array.from({ length: 5 }, () => "int"),
   );
 });
+
+it("ignores CodeRegistration count alignment padding", () => {
+  const bytes = createIl2cppBinaryFixture();
+  bytes.fill(0xff, 0x604, 0x608);
+  expect(link(bytes).method_addresses).toEqual(expectedAddresses);
+});
+
+it.each([0, 8, 16])(
+  "finds registration with %s file-backed trailing zero bytes",
+  (tail) => {
+    const original = createIl2cppBinaryFixture();
+    const bytes = Buffer.alloc(0x1000 + tail);
+    original.copy(bytes);
+    original.copy(bytes, 0xf90, 0x800, 0x880);
+    bytes.fill(0, 0x800, 0x880);
+    bytes.writeBigUInt64LE(0x2000n, 64);
+    bytes.writeBigUInt64LE(BigInt(bytes.length), 80);
+    const linked = link(bytes);
+    expect(linked.types_field).toBe(FIXTURE_BINARY_BASE + 0xfc0n);
+    expect(linked.method_addresses).toEqual(expectedAddresses);
+    expect(linked.return_types).toEqual(link(original).return_types);
+    if (tail === 0) {
+      const missingTail = Buffer.from(bytes);
+      missingTail.writeBigUInt64LE(BigInt(bytes.length), 64);
+      expect(failure(missingTail).reason).toBe(
+        "metadata-registration-not-found",
+      );
+    }
+  },
+);
+
+it.each([0n, FIXTURE_BINARY_BASE + 0x980n, FIXTURE_BINARY_BASE + 0x9b0n])(
+  "retains unknown dyld-bound type names regardless of raw word %s",
+  (raw) => {
+    const control = link(createIl2cppBinaryFixture());
+    expect(control.return_types[0]).toEqual({
+      type: 0,
+      name: FIXTURE_RETURN_TYPE_NAME,
+    });
+    expect(control.method_addresses).toEqual(expectedAddresses);
+    const bytes = createIl2cppDyldBindFixture(raw, 0x900);
+    const linked = link(bytes);
+    for (const collection of [
+      "return_types",
+      "field_types",
+      "parameter_types",
+    ] as const)
+      expect(linked[collection]).toEqual(
+        control[collection].map((row) =>
+          row.type === 0 ? { type: row.type, name: null } : row,
+        ),
+      );
+    expect(linked.method_addresses).toEqual(control.method_addresses);
+    expect(bytes.readBigUInt64LE(0x900)).toBe(raw);
+  },
+);

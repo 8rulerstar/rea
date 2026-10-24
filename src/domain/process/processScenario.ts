@@ -45,12 +45,43 @@ const environmentName = z
         ? `${reservedRunIdEnvironmentName} is reserved by the process adapter`
         : "Environment names cannot contain '=' or NUL",
   });
+const unsupportedPtyEnvironmentName = "__proto__";
+const ptyEnvironmentName = environmentName.regex(
+  environmentNamePattern(unsupportedPtyEnvironmentName),
+  {
+    error:
+      "The installed PTY backend cannot preserve the __proto__ environment name; pass it through /usr/bin/env instead.",
+  },
+);
 const childProcessString = z
   .string()
   .regex(
     /^[^\x00]*$/u,
     "Values passed to operating-system APIs cannot contain NUL",
   );
+const environmentRecordSchema = z.record(
+  ptyEnvironmentName,
+  childProcessString,
+);
+// z.record intentionally skips this key, so validate its presence before parsing.
+const processEnvironmentSchema = z
+  .unknown()
+  .superRefine((value, context) => {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      Object.hasOwn(value, unsupportedPtyEnvironmentName)
+    )
+      context.addIssue({
+        code: "custom",
+        path: [unsupportedPtyEnvironmentName],
+        message:
+          "The installed PTY backend cannot preserve the __proto__ environment name; pass it through /usr/bin/env instead.",
+      });
+  })
+  .pipe(environmentRecordSchema);
+processEnvironmentSchema._zod.toJSONSchema = () =>
+  z.toJSONSchema(environmentRecordSchema, { io: "input" });
 
 const fitsProcessTerminalCellBudget = (
   columns: number,
@@ -132,11 +163,15 @@ export const processComparisonContract = (
     : {}),
   limits: scenario.limits,
   normalization: scenario.normalization,
+  terminal_observation_version: "deferred-rendered-journal-v1",
+  ...(scenario.normalization.pids
+    ? { pid_normalization_version: "sampled-identifiers-v2" }
+    : {}),
   ...(scenario.normalization.paths
-    ? { path_normalization_version: "longest-original-paths-v1" }
+    ? { path_normalization_version: "path-component-boundaries-v2" }
     : {}),
   ...(scenario.normalization.ports
-    ? { port_normalization_version: "contextual-endpoints-v2" }
+    ? { port_normalization_version: "contextual-endpoints-v3" }
     : {}),
   ...(scenario.normalization.patterns.length > 0
     ? { pattern_normalization_version: "literal-replacements-v1" }
@@ -153,7 +188,7 @@ export const processScenarioSchema = z
     executable: childProcessString.min(1),
     arguments: z.array(childProcessString).default([]),
     working_directory: childProcessString.default("."),
-    environment: z.record(environmentName, childProcessString).default({}),
+    environment: processEnvironmentSchema.default({}),
     filesystem_observation_paths: z
       .array(childProcessString.min(1))
       .default([]),
@@ -312,7 +347,3 @@ const eventsOutOfOrder = (
 
 /** Parsed instructions and resource bounds for one process experiment. */
 export type ProcessScenario = z.infer<typeof processScenarioSchema>;
-
-/** Parse untrusted process scenario input and apply safe default budgets. */
-export const parseProcessScenario = (input: unknown): ProcessScenario =>
-  processScenarioSchema.parse(input);

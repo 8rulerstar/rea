@@ -1,7 +1,9 @@
+import { isSelectedRegularFileError } from "../../filesystem/RegularFile.js";
 import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
 import { readStableArtifact } from "../../artifacts/readStableArtifact.js";
 import {
-  artifactFilePrimaryFailure,
+  artifactFilePrimaryFacts,
+  type ArtifactFilePrimaryFacts,
   bindArtifactFileCleanup,
   artifactFileCancellationCause,
 } from "../../artifacts/ArtifactFileOperation.js";
@@ -16,6 +18,7 @@ import {
   AnalysisCancelledError,
   AnalysisInputError,
   AnalysisResourceConstraintError,
+  AnalysisUnsupportedTargetError,
 } from "../../domain/analysisErrorCore.js";
 import { fixedAllowanceOptions } from "../../domain/fixedAllowanceRemediation.js";
 import {
@@ -25,8 +28,12 @@ import {
 } from "../../domain/native/elfNotes.js";
 import { err, ok } from "../../domain/result.js";
 import { ProviderCleanupError } from "../../domain/providerCleanupError.js";
-import { ELF_NOTES_PROVIDER } from "../../application/InvestigationProviders.js";
-import { parseElfNotes } from "./ElfNoteParser.js";
+import { ELF_NOTES_PROVIDER } from "../../domain/investigationProviders.js";
+import { BinaryFormatFailure } from "../metadata/BinaryContainer.js";
+import {
+  ElfNoteSectionNameBudgetFailure,
+  parseElfNotes,
+} from "./ElfNoteParser.js";
 
 const OPERATION = "inspect_elf_notes";
 
@@ -84,7 +91,7 @@ export class ElfNotesProvider implements ElfNotesPort {
 }
 
 const NOTE_TEXT_BUDGET =
-  "The ELF note text, hash, and scan budget tied to the admitted image length";
+  "The ELF note text, hash, and scan budget fixed by the admitted image length plus decoded section names";
 
 const inputBudgetRemediation = (
   boundary: "file-size" | "capacity",
@@ -98,11 +105,53 @@ const inputBudgetRemediation = (
       ? `The image exceeds the ${String(MAX_INSPECT_ELF_NOTE_ENTRIES)}-entry note-table ceiling this operation accepts; select a smaller artifact.`
       : `Raise max_entries above ${String(input.max_entries)} or select a smaller artifact; the limit is the caller-selected note entry budget.`;
 
+const sectionNameBudgetRemediation = (
+  cause: ElfNoteSectionNameBudgetFailure,
+): string =>
+  cause.minimumMaxFileBytes <= BigInt(MAX_INSPECT_ELF_NOTE_FILE_BYTES)
+    ? `Raise max_file_bytes to at least ${String(cause.minimumMaxFileBytes)} bytes to admit the source and decoded ELF section names.`
+    : `The source and decoded ELF section names require ${String(cause.minimumMaxFileBytes)} bytes, above this operation's ${String(MAX_INSPECT_ELF_NOTE_FILE_BYTES)}-byte maximum; select an image with a smaller section-name table.`;
+
 const elfNotesFailurePrimary = (
-  cause: unknown,
+  facts: ArtifactFilePrimaryFacts,
   input: InspectElfNotesInput,
 ) => {
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "integrity")
+  const { cause, origin } = facts;
+  if (cause instanceof ElfNoteSectionNameBudgetFailure)
+    return new AnalysisResourceConstraintError(
+      OPERATION,
+      "memory",
+      cause.message,
+      {
+        max_file_bytes: cause.selectedMaxFileBytes,
+        minimum_required_bytes: cause.minimumMaxFileBytes.toString(),
+      },
+      {
+        cause,
+        retryable: false,
+        remediationAction: sectionNameBudgetRemediation(cause),
+      },
+    );
+  if (cause instanceof BinaryFormatFailure)
+    return cause.kind === "unsupported"
+      ? new AnalysisUnsupportedTargetError(
+          OPERATION,
+          input.path,
+          cause.message,
+          { cause },
+        )
+      : new AnalysisInputError(OPERATION, { cause }, [
+          {
+            path: ["path"],
+            reason: "invalid_format",
+            message: cause.message,
+          },
+        ]);
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "integrity"
+  )
     return new AnalysisArtifactChangedError(
       OPERATION,
       input.path,
@@ -111,15 +160,22 @@ const elfNotesFailurePrimary = (
         cause,
       },
     );
-  if (cause instanceof ArtifactReaderFailure && cause.reason === "cancelled")
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure &&
+    cause.reason === "cancelled"
+  )
     return new AnalysisCancelledError(OPERATION, {
       cause: artifactFileCancellationCause(cause),
     });
-  if (cause instanceof ArtifactReaderFailure) {
+  if (
+    origin === "owned-or-classified" &&
+    cause instanceof ArtifactReaderFailure
+  ) {
     if (cause.reason === "limit") {
       // Caller-selected read and entry budgets name the bound to raise.
       // The note text, hash, and scan ceiling equals the admitted image
-      // length, so host memory cannot raise it.
+      // length plus decoded section names, so host memory cannot raise it.
       const noteTextBudget = cause.boundary === "memory";
       return new AnalysisResourceConstraintError(
         OPERATION,
@@ -159,11 +215,7 @@ const elfNotesFailurePrimary = (
       return new AnalysisAccessDeniedError(OPERATION, input.path, cause.code, {
         cause,
       });
-    if (
-      ["ENOENT", "ENOTDIR", "ELOOP", "ENAMETOOLONG"].includes(
-        String(cause.code),
-      )
-    )
+    if (isSelectedRegularFileError(cause))
       return new AnalysisInputError(OPERATION, { cause }, [
         {
           path: ["path"],
@@ -174,7 +226,9 @@ const elfNotesFailurePrimary = (
   }
   return new ArtifactOperationError(
     OPERATION,
-    cause instanceof ArtifactReaderFailure ? cause.reason : "io",
+    origin === "owned-or-classified" && cause instanceof ArtifactReaderFailure
+      ? cause.reason
+      : "io",
     undefined,
     cause instanceof Error ? cause.message : "ELF note inspection failed.",
     { cause },
@@ -183,7 +237,7 @@ const elfNotesFailurePrimary = (
 
 const elfNotesFailure = (cause: unknown, input: InspectElfNotesInput) => {
   const primary = elfNotesFailurePrimary(
-    artifactFilePrimaryFailure(cause),
+    artifactFilePrimaryFacts(cause),
     input,
   );
   if (!(cause instanceof ArtifactReaderFailure) || cause.cleanup === undefined)
