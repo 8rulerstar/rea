@@ -209,7 +209,10 @@ it("decodes binary Hash128 and unknown object keys and appends dependency-only l
     },
   });
   // Admission sees the dependency-only location too.
-  expect(admitted).toEqual([{ keys: 3, locations: 2 }]);
+  expect(admitted).toEqual([
+    { keys: 3, locations: 0 },
+    { keys: 3, locations: 2 },
+  ]);
   expect(
     report.keys.map(({ kind, value, type_name }) => [kind, value, type_name]),
   ).toEqual([
@@ -415,7 +418,8 @@ it("checks a dynamic string before joining it and charges rows before retention"
     beforeText: () => events.push("text"),
     onRow: () => events.push("row"),
   });
-  expect(events[0]).toBe("rows 7/5");
+  // The key table is admitted first, then the final location count.
+  expect(events.slice(0, 2)).toEqual(["rows 7/0", "rows 7/5"]);
   expect(events.indexOf("text")).toBeLessThan(events.indexOf("row"));
   expect(events.filter((event) => event === "row")).toHaveLength(7 + 5 + 4);
 });

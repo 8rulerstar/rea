@@ -205,6 +205,23 @@ export const projectUnityAddressablesView = (
   const parsed = parseCatalogReport(parent);
   if (!parsed.ok) return parsed;
   const { report, counts } = parsed.value;
+  // An index past the key table names no key; it must not read as a key without locations.
+  const missingKey =
+    view.kind === "unity-addressables" && view.collection === "locations"
+      ? (view.key_indices ?? []).findIndex(
+          (index) => index >= report.keys.length,
+        )
+      : -1;
+  if (missingKey >= 0)
+    return err(
+      analysisViewInputError([
+        {
+          path: ["view", "key_indices", missingKey],
+          reason: "invalid_value",
+          message: `The catalog has ${report.keys.length} keys; key_indices must name one of them.`,
+        },
+      ]),
+    );
   if (
     parent.subject != null &&
     (parent.subject.format !== "file" ||

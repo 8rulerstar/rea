@@ -93,6 +93,10 @@ and prints a compact overview.
   catalog updates) are unknown.
 - No asset bundle is opened, so bundle contents and whether the recorded CRC
   matches a bundle file are not checked.
+- Binary locations are numbered in first-reference order: locations selected by
+  keys first, then records named only by dependency sets. There is no reverse
+  index from a bundle to the locations that depend on it; page `locations` and
+  invert `dependencies`.
 - Location data other than asset bundle request options reports its type name
   only. A binary object key or location data whose type record stores no class
   name reports `type_name: null` (unknown), not an empty name.

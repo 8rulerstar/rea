@@ -11,8 +11,9 @@ export const UNITY_ADDRESSABLES_FAILURE_REASONS = {
     "invalid-object-tag",
     "invalid-string",
     "string-chain-cycle",
+    "string-chain-overlap",
   ],
-  capacity: ["string-chain-capacity"],
+  capacity: [],
 } as const;
 export type UnityAddressablesFailureKind =
   keyof typeof UNITY_ADDRESSABLES_FAILURE_REASONS;

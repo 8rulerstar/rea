@@ -83,6 +83,18 @@ it.each([
   expect(view.items.map((item) => item.index)).toEqual(indices);
 });
 
+it("refuses a key index past the key table instead of returning no locations", () => {
+  const request = unityAddressablesViewRequestSchema.parse({
+    kind: "unity-addressables",
+    collection: "locations",
+    key_indices: [0, report.keys.length],
+  });
+  const result = projectUnityAddressablesView(parent(), request);
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(JSON.stringify(result.error)).toContain("key_indices");
+});
+
 it("filters keys by value and kind and pages with offset and limit", () => {
   expect(
     page({ collection: "keys", kinds: ["int32"] }).items.map(
