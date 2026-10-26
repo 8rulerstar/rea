@@ -61,6 +61,8 @@ export interface PakFixtureOptions {
   readonly emptyDirectoryName?: string;
   /** Version 10+: write directory names, empty ones too, without their closing slash. */
   readonly unslashedDirectories?: boolean;
+  /** Version 10+: the full directory index lists file `at` with another file's reference. */
+  readonly directoryReference?: { readonly at: number; readonly from: number };
   /** Version 10+: flip one bit of the first path hash. */
   readonly mismatchedPathHash?: boolean;
   /** Version 10+: compressed encoded records appended that no listing references. */
@@ -230,6 +232,16 @@ const unreferenced = (count: number) =>
     }),
   );
 
+/** The reference the full directory index lists for file `at`. */
+const listed = (
+  options: PakFixtureOptions,
+  references: readonly number[],
+  at: number,
+) =>
+  references[
+    options.directoryReference?.at === at ? options.directoryReference.from : at
+  ]!;
+
 /** Build one pak file; returns the bytes and the placed files for assertions. */
 export const createPakFixture = (options: PakFixtureOptions) => {
   const version = versionOf(options.layout);
@@ -307,7 +319,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
       const slash = file.path.lastIndexOf("/");
       const directory = `/${file.path.slice(0, options.unslashedDirectories === true ? slash : slash + 1)}`;
       const list = directories.get(directory) ?? [];
-      list.push([file.path.slice(slash + 1), references[at]!]);
+      list.push([file.path.slice(slash + 1), listed(options, references, at)]);
       directories.set(directory, list);
     });
     for (let at = 0; at < (options.emptyDirectories ?? 0); at++)

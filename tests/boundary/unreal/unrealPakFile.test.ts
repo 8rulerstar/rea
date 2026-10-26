@@ -643,6 +643,44 @@ describe("Unreal pak listings checked against each other", () => {
     ]);
   });
 
+  it("nulls a directory path whose repeated hash names other records", async () => {
+    const pak = await read(
+      createPakFixture({
+        layout: "v11",
+        files: [
+          { path: "A/x", size: 1 },
+          { path: "A/x", size: 2 },
+          { path: "B/y", size: 3 },
+        ],
+        directoryReference: { at: 1, from: 2 },
+      }).bytes,
+    );
+    expect(pak.entries.map((entry) => [entry.path, entry.size])).toEqual([
+      ["A/x", 1],
+      [null, 3],
+      ["B/y", 3],
+    ]);
+    const mismatches = pak.issues.filter(
+      (issue) => issue.kind === "path-hash-mismatch",
+    );
+    expect(mismatches).toHaveLength(1);
+    expect(mismatches[0]!.message).toContain("entries");
+  });
+
+  it("prices only listed records as entry rows, not unreferenced full records", async () => {
+    const seen: number[] = [];
+    await read(createPakFixture({ layout: "v11" }).bytes, {
+      ...LIMITS,
+      beforeEntries: (count) => {
+        seen.push(count);
+      },
+    });
+    // The fixture writes no full records; their count of zero must not be
+    // offered as rows, so only listing counts reach the caller.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain(0);
+  });
+
   it("reports no compression slot issue for records no listing references", async () => {
     const { bytes } = createPakFixture({
       layout: "v11",

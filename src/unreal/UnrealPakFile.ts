@@ -748,7 +748,8 @@ export const readUnrealPak = async (
     await pace();
   }
   const fullCount = index.u32();
-  checkEntryCount(fullCount, limits, "non-encoded entry list");
+  // Only listed records become rows; unreferenced ones are bounded by count alone.
+  checkCountLimit(fullCount, limits, "non-encoded entry list");
   const fullEntries: { bytes: Buffer; base: number }[] = [];
   // Pre-read with a cursor that reports nothing, then continue after it.
   const preRead = new Cursor(
@@ -808,8 +809,8 @@ export const readUnrealPak = async (
   const entries: UnrealPakEntry[] = [];
   let directoryIndex = null;
   let pathHashIndex = null;
-  /** Path hash to the reference the path hash index gives it; null once repeated. */
-  let referenceByHash: Map<string, number | null> | null = null;
+  /** Path hash to every reference the path hash index gives it. */
+  let referencesByHash: Map<string, Set<number>> | null = null;
   if (pathHashRegion !== null) {
     const phi = await readRegion(
       source,
@@ -822,19 +823,21 @@ export const readUnrealPak = async (
     );
     const phiCount = phi.u32();
     checkEntryCount(phiCount, limits, "path hash index");
-    const hashed = new Map<string, number | null>();
+    const hashed = new Map<string, Set<number>>();
     for (let at = 0; at < phiCount; at++) {
       const record = phi.at;
       const hash = phi.u64Hex();
       const reference = phi.i32();
-      if (hashed.has(hash)) {
+      const references = hashed.get(hash);
+      if (references === undefined) hashed.set(hash, new Set([reference]));
+      else {
         sink.report(
           "duplicate-path",
           record,
           `path hash index lists hash ${hash} again`,
         );
-        hashed.set(hash, null);
-      } else hashed.set(hash, reference);
+        references.add(reference);
+      }
       // Every reference must name a placed record, even when the full
       // directory index is the one that names the returned entries.
       const entry = resolve(reference, null, hash);
@@ -858,7 +861,7 @@ export const readUnrealPak = async (
       pruned_directories: pruned.directories,
       pruned_files: pruned.listed.length,
     };
-    referenceByHash = hashed;
+    referencesByHash = hashed;
   }
   if (directoryRegion !== null) {
     const fdi = await readRegion(
@@ -879,17 +882,18 @@ export const readUnrealPak = async (
     for (const { path, reference, record } of listed) {
       let named = path;
       // With both listings, the directory path must hash to a row of the path
-      // hash index that names the same record; otherwise the path is unknown.
-      if (path !== null && referenceByHash !== null && hashPath !== null) {
+      // hash index that names the same record; a repeated hash may name any of
+      // its records. Otherwise the path is unknown.
+      if (path !== null && referencesByHash !== null && hashPath !== null) {
         const hash = hashPath(path);
-        const hashedReference = referenceByHash.get(hash);
-        if (hashedReference !== null && hashedReference !== reference) {
+        const hashedReferences = referencesByHash.get(hash);
+        if (hashedReferences?.has(reference) !== true) {
           sink.report(
             "path-hash-mismatch",
             record,
-            hashedReference === undefined
+            hashedReferences === undefined
               ? `full directory index path ${path} hashes to ${hash}, which the path hash index does not hold`
-              : `full directory index path ${path} names entry ${reference}, but its hash ${hash} names entry ${hashedReference}`,
+              : `full directory index path ${path} names entry ${reference}, but its hash ${hash} names ${hashedReferences.size === 1 ? "entry" : "entries"} ${[...hashedReferences].join(", ")}`,
           );
           named = null;
         }
