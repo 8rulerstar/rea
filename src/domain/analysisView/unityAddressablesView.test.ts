@@ -83,6 +83,16 @@ it.each([
   expect(view.items.map((item) => item.index)).toEqual(indices);
 });
 
+it("treats repeated key indices like one selection of that key", () => {
+  const once = page({ collection: "locations", fields: [], key_indices: [3] });
+  const repeated = page({
+    collection: "locations",
+    fields: [],
+    key_indices: Array<number>(1024).fill(3),
+  });
+  expect(repeated.items).toEqual(once.items);
+});
+
 it("refuses a key index past the key table instead of returning no locations", () => {
   const request = unityAddressablesViewRequestSchema.parse({
     kind: "unity-addressables",

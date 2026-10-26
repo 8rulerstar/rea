@@ -159,11 +159,7 @@ const selection = (view: Request, report: Report) => {
   const keyed =
     view.key_indices === undefined
       ? undefined
-      : new Set(
-          view.key_indices.flatMap(
-            (index) => report.keys[index]?.locations ?? [],
-          ),
-        );
+      : keyedLocations(report, view.key_indices);
   const primary = set(view.primary_keys);
   const providers = set(view.provider_ids);
   const internal = set(view.internal_ids);
@@ -184,6 +180,18 @@ const selection = (view: Request, report: Report) => {
     (internal === undefined ||
       (row.internal_id !== null && internal.has(row.internal_id))) &&
     (dataKinds === undefined || dataKinds.has(row.data?.kind ?? "none"));
+};
+
+/** Walk each distinct key once, so repeated indices do not copy its locations again. */
+const keyedLocations = (
+  report: { keys: readonly { locations: readonly number[] }[] },
+  keyIndices: readonly number[],
+): Set<number> => {
+  const selected = new Set<number>();
+  for (const index of new Set(keyIndices))
+    for (const location of report.keys[index]?.locations ?? [])
+      selected.add(location);
+  return selected;
 };
 
 /** Reuse retained facts; source indices stay distinct from filtered page offsets. */

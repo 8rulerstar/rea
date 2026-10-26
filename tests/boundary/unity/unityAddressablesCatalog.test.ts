@@ -5,8 +5,10 @@ import type { UnityAddressablesReadOptions } from "../../../src/unity/UnityAddre
 import {
   ASSET_PROVIDER,
   BUNDLE_PROVIDER,
+  BUNDLE_OPTIONS,
   binaryCatalog,
   jsonCatalog,
+  jsonObject,
   sampleCatalog,
   type FixtureCatalog,
 } from "../../fixtures/unity/addressables.js";
@@ -505,4 +507,57 @@ it("reports a binary object type stored as no record as a null type name", () =>
   // An unreadable type stays unknown instead of becoming an empty class name.
   expect(report.keys[1]).toMatchObject({ kind: "object", type_name: null });
   expect(report.locations[0]!.data).toEqual({ kind: "other", type_name: null });
+});
+
+it("refuses overlapping binary location sets before copying them", () => {
+  // One key holds a large set; every other key points inside it at a length
+  // field written over one entry, so each reads another overlapping array.
+  const keys = Array.from({ length: 64 }, (_, index) => ({
+    key: { kind: "string" as const, value: `k${index}` },
+    locations: index === 0 ? Array<number>(2000).fill(0) : [0],
+  }));
+  const bytes = binaryCatalog({
+    keys,
+    locations: [
+      {
+        primaryKey: 0,
+        internalId: "a",
+        provider: ASSET_PROVIDER,
+        type: "UnityEngine.Object",
+      },
+    ],
+  });
+  const keysOffset = bytes.readUInt32LE(8);
+  const first = bytes.readUInt32LE(keysOffset + 4);
+  for (let index = 1; index < keys.length; index++) {
+    bytes.writeUInt32LE(4000, first + index * 8 - 4);
+    bytes.writeUInt32LE(first + index * 8, keysOffset + index * 8 + 4);
+  }
+  expect(failure(bytes).reason).toBe("location-set-overlap");
+});
+
+it("checks a multi-megabyte base64 table at constant stack", () => {
+  const bytes = jsonCatalog(sampleCatalog(), {
+    patch: (catalog) => {
+      const extra = Buffer.from(catalog.m_ExtraDataString as string, "base64");
+      // Unused trailing extra data: about 8.4 million base64 characters.
+      catalog.m_ExtraDataString = Buffer.concat([
+        extra,
+        Buffer.alloc(6_300_000),
+      ]).toString("base64");
+    },
+  });
+  expect(decode(bytes).format).toBe("json");
+}, 60_000);
+
+it("reports null bundle request options as malformed, not a reader error", () => {
+  const catalog = sampleCatalog();
+  const bytes = jsonCatalog(catalog, {
+    patch: (json) => {
+      json.m_ExtraDataString = Buffer.concat(
+        catalog.locations.map(() => jsonObject(BUNDLE_OPTIONS, "null")),
+      ).toString("base64");
+    },
+  });
+  expect(failure(bytes).reason).toBe("missing-field");
 });
