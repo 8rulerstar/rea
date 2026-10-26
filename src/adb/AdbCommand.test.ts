@@ -209,16 +209,41 @@ it.each([true, false])(
     if (result.ok) throw new Error("Expected a capture allowance refusal");
     const projected = projectAnalysisError(result.error);
     expect(projected.retryable).toBe(volatileOutput);
-    expect(projected.remediation.action).toContain(
-      "The adb output capture allowance",
-    );
-    expect(projected.remediation.action).toContain(
-      volatileOutput
-        ? "live output may change between requests"
-        : "Repeating the unchanged request fails the same way.",
-    );
+    expect(projected).toMatchObject({
+      code: "resource_constraint",
+      details: { reported_limits: { max_output_bytes: 1024 } },
+    });
+    expect(projected.details?.limit).toBeUndefined();
   },
 );
+
+it("reports the effective fixed adb deadline", async () => {
+  vi.mocked(execFileBytes).mockRejectedValueOnce(
+    Object.assign(new Error("deadline"), {
+      code: "ETIMEDOUT",
+      stdout: "",
+      stderr: "",
+      signal: null,
+      killed: true,
+    }),
+  );
+  const result = await runAdbCapture(
+    "pull_adb_file",
+    { device: "device" },
+    "/host/adb",
+    ["pull", "/remote"],
+    { timeoutMs: 600_000, maxOutputBytes: 1024 },
+    undefined,
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected an adb deadline");
+  const projected = projectAnalysisError(result.error);
+  expect(projected).toMatchObject({
+    code: "provider_timeout",
+    details: { timeout_ms: 600_000 },
+  });
+  expect(projected.details?.limit).toBeUndefined();
+});
 
 it("keeps a physical failure even when the later abort reason is that same error", async () => {
   const controller = new AbortController();

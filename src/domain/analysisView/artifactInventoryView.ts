@@ -23,6 +23,7 @@ import {
   validateArtifactInventorySubject,
   parseArtifactInspectionInventoryResult,
   parseArtifactInventoryResult,
+  ArtifactInventoryValidationError,
   type InventorySet,
 } from "../artifactInventoryEvidence.js";
 import type { ArtifactInspectionResult } from "../artifactInspection.js";
@@ -35,6 +36,7 @@ import {
   completeWithinViewCoverage,
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
+import { analysisViewResultInputError } from "./analysisViewParent.js";
 
 const page = {
   kind: z.literal("inventory"),
@@ -121,10 +123,13 @@ export const artifactInventorySummarySchema = z.strictObject({
   limitation_count: z.number().int().nonnegative(),
 });
 
-const inputError = (message: string): AnalysisInputError =>
+const inputError = (
+  field: "source" | "view",
+  message: string,
+): AnalysisInputError =>
   new AnalysisInputError("inspect_analysis_view", undefined, [
     {
-      path: ["source"],
+      path: [field],
       reason: "invalid_value",
       message,
     },
@@ -172,7 +177,7 @@ const parseSource = (
         cached.source.inventory.manifest,
       );
     } catch (cause: unknown) {
-      return sourceFailure(cause);
+      return sourceFailure(parent.normalizedResult, cause);
     }
     return ok(cached.source);
   }
@@ -208,14 +213,18 @@ const parseSourceUncached = (
       inspection: parsed.inspection,
     });
   } catch (cause: unknown) {
-    return sourceFailure(cause);
+    return sourceFailure(parent.normalizedResult, cause);
   }
 };
 
-const sourceFailure = (cause: unknown): Result<never, AnalysisError> => {
-  if (!(cause instanceof TypeError) && !(cause instanceof z.ZodError))
-    throw cause;
-  return err(inputError(cause.message));
+const sourceFailure = (
+  input: unknown,
+  cause: unknown,
+): Result<never, AnalysisError> => {
+  if (cause instanceof z.ZodError)
+    return err(analysisViewResultInputError(input, cause));
+  if (!(cause instanceof ArtifactInventoryValidationError)) throw cause;
+  return err(inputError("source", cause.message));
 };
 
 /** Project exact source records; exhausted pages cover available records, not runtime behavior. */
@@ -227,12 +236,16 @@ export const projectArtifactInventoryView = (
   if (operation !== "inventory_artifact" && operation !== "inspect_artifact")
     return err(
       inputError(
+        "source",
         "Inventory views require inventory_artifact or inspect_artifact Evidence.",
       ),
     );
   if (view.kind !== "summary" && view.kind !== "inventory")
     return err(
-      inputError("Artifact Evidence supports summary and inventory views."),
+      inputError(
+        "view",
+        "Artifact Evidence supports summary and inventory views.",
+      ),
     );
   const parsed = parseSource(parent);
   if (!parsed.ok) return parsed;
@@ -245,17 +258,15 @@ export const projectArtifactInventoryView = (
       inventory.occurrences.find((row) => row.logical_path === ".")
         ?.format_metadata ?? null;
   const rootMetadata = source.rootMetadata;
-  const includeCoverage =
+  // Producer traversal coverage is the owner's fact for every format; missing
+  // coverage would read as unknown, so every view carries it inline.
+  const sourceCoverage = { source_coverage: inventory.coverage };
+  const includeHashCounts =
     view.kind === "inventory" ||
     inventory.manifest.root_format === "godot-pck" ||
-    inventory.manifest.root_format === "pyinstaller";
-  const sourceCoverage = includeCoverage
-    ? { source_coverage: inventory.coverage }
-    : {};
-  const counts =
-    includeCoverage || view.kind === "summary"
-      ? inventoryCounts(source)
-      : undefined;
+    inventory.manifest.root_format === "pyinstaller" ||
+    inventory.manifest.root_format === "node-sea";
+  const counts = inventoryCounts(source);
   const limitations = uniqueSorted([
     ...parent.limitations,
     ...inventory.limitations,
@@ -272,14 +283,12 @@ export const projectArtifactInventoryView = (
     limitations,
     unknowns: [
       "Inventory does not establish application runtime behavior or complete format-specific analysis.",
-      ...(includeCoverage && inventory.coverage.status === "unknown"
+      ...(inventory.coverage.status === "unknown"
         ? [
             "Producer traversal coverage is unknown; missing matches do not prove source absence.",
           ]
         : []),
-      ...(includeCoverage &&
-      counts !== undefined &&
-      (counts.hashes.unavailable > 0 || counts.hashes["not-hashed"] > 0)
+      ...(counts.hashes.unavailable > 0 || counts.hashes["not-hashed"] > 0
         ? [
             "Content hashes are unknown for some recorded files; missing node IDs do not prove content absence.",
           ]
@@ -300,7 +309,6 @@ export const projectArtifactInventoryView = (
     | "unknowns"
   >;
   if (view.kind === "summary") {
-    const counts = inventoryCounts(source);
     const examined =
       inventory.nodes.length +
       inventory.occurrences.length +
@@ -325,7 +333,7 @@ export const projectArtifactInventoryView = (
             ? {}
             : { metadata: counts.kinds.metadata }),
         },
-        ...(includeCoverage
+        ...(includeHashCounts
           ? { available_hash_status_counts: counts.hashes }
           : {}),
         source_complete: inventory.complete,

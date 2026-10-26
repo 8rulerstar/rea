@@ -1,6 +1,13 @@
 import { z } from "zod";
+import type { ScenarioResponseBodyRetention } from "./scenarioCaptureRecords.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { parseExactJson } from "../exactJsonNumber.js";
+import { MAX_JSON_DEPTH, type JsonValue } from "../jsonValue.js";
+import {
+  compareOffsetDateTimeInstants,
+  readRecordedDateTime,
+  type OffsetDateTimeInstant,
+} from "../offsetDateTime.js";
 import { ok, type Result } from "../result.js";
 import {
   WEB_NETWORK_CAPTURE_LIMITS,
@@ -14,14 +21,20 @@ import {
 import { EnvironmentStateExtraction } from "./EnvironmentStateExtraction.js";
 import type { TemplateRule } from "./environmentManifestRules.js";
 import {
+  deeperThan,
+  hasPrototypeKey,
   isStateWrite,
+  STATE_BODY_LIMIT_BYTES,
   type ParsedBody,
+  type ParsedRequestBody,
   type StateRecordFacts,
   type StateTimeline,
 } from "./environmentStateRules.js";
 import {
   base64PrefixChars,
   readRecordedResponseBody,
+  recordedResponseBodyIsEmpty,
+  type RecordedResponseBody,
 } from "./recordedResponseBody.js";
 import {
   ENTRY_BYTES,
@@ -41,13 +54,41 @@ type StateFields = Pick<
   | "entities"
   | "documents"
   | "views"
+  | "writes"
+  | "write_clock"
   | "unknowns"
   | "coverage"
   | "limitations"
 >;
 
-/** Bodies beyond this many UTF-8 bytes are not parsed into state; their views stay recorded. */
-export const STATE_BODY_LIMIT_BYTES = 256 * 1024;
+/**
+ * Levels the state's own nesting adds above a recorded value: Evidence, a `data/get` reply and a
+ * JSON-RPC response hold a body's members about ten levels down, so a body must leave this much
+ * room under the JSON depth limit to be sealed and served.
+ */
+const STATE_NESTING_DEPTH = 16;
+
+/** A recorded response body as state JSON: a JSON-like media type, complete UTF-8 text within the state body limit, exact numbers and no `__proto__` member; otherwise undefined. */
+export const stateBodyJson = (
+  contentType: string | null,
+  body: RecordedResponseBody,
+): JsonValue | undefined => {
+  if (
+    contentType === null ||
+    !isJsonLike(mediaTypeEssence(contentType)) ||
+    body.bodyText === null ||
+    body.bodyEncoding === "base64" ||
+    body.bodyCut === true ||
+    Buffer.byteLength(body.bodyText, "utf8") > STATE_BODY_LIMIT_BYTES
+  )
+    return undefined;
+  const value = parseExactJson(body.bodyText);
+  return value === undefined ||
+    hasPrototypeKey(value) ||
+    deeperThan(value, MAX_JSON_DEPTH - STATE_NESTING_DEPTH)
+    ? undefined
+    : value;
+};
 
 const timingSchema = z.object({
   startedDateTime: z.string(),
@@ -60,13 +101,26 @@ const redactedWriteSchema = z.object({
 const contentSchema = z.object({
   response: z.object({ content: z.object({ text: z.string() }) }),
 });
+const requestSchema = z.object({
+  request: z.object({
+    postData: z.unknown().optional(),
+    bodySize: z.number().optional(),
+  }),
+});
+
+const requestContentSchema = z.object({
+  mimeType: z.string(),
+  text: z.string(),
+  params: z.array(z.unknown()).optional(),
+});
 
 interface RecordEntry {
   readonly facts: StateRecordFacts;
   /** Null for a write whose URL was redacted: its target is unknown, so it bounds every type. */
   readonly origin: string | null;
   readonly contentType: string;
-  readonly timed: boolean;
+  /** Exact ordering fact; request interval coordinates remain milliseconds. */
+  readonly startInstant: OffsetDateTimeInstant | undefined;
   readonly record: WebNetworkCaptureRecord;
 }
 
@@ -84,13 +138,14 @@ const UNKNOWNS: StateView["unknowns"] = [
   {
     kind: "state-transition",
     statement:
-      "The state is one snapshot from before the first related recorded write; it states no effects of writes.",
+      "The state is one snapshot from before the first related recorded write; write effects are modelled only from the calls the capture recorded, and served only where its later reads confirmed them.",
   },
 ];
 
 /** The manifest's grouping plus the record facts and bodies the init state is extracted from. */
 export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator {
   readonly #entries = new Map<number, RecordEntry>();
+  readonly #bodyReleases: (() => void)[] = [];
 
   constructor(
     maximumBytes = WEB_NETWORK_CAPTURE_LIMITS.outputBytes,
@@ -104,23 +159,51 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
     return false;
   }
 
-  override add(record: WebNetworkCaptureRecord): Result<void, AnalysisError> {
-    const grouped = super.add(record);
+  override add(
+    record: WebNetworkCaptureRecord,
+    scenarioResponseBody?: ScenarioResponseBodyRetention,
+  ): Result<void, AnalysisError> {
+    const grouped = super.add(record, scenarioResponseBody);
     if (!grouped.ok) return grouped;
     try {
       const line = readRecordedRequestLine(record.reported, true, this.scratch);
       if (line === null) return this.overBudget();
       const timing = timingSchema.safeParse(record.reported);
-      const start = timing.success
-        ? Date.parse(timing.data.startedDateTime)
-        : Number.NaN;
-      const timed = timing.success && Number.isFinite(start);
+      // Admit normalization and fraction parsing before materializing their strings.
+      if (
+        timing.success &&
+        !this.scratch(
+          RECORD_SCRATCH_BYTES +
+            textBytes(timing.data.startedDateTime.length + 6) * 3,
+        )
+      )
+        return this.overBudget();
+      const startInstant = timing.success
+        ? readRecordedDateTime(timing.data.startedDateTime)?.instant
+        : undefined;
+      // Keep the established millisecond interval policy independently of sorting.
+      const start =
+        startInstant === undefined
+          ? record.ordinal
+          : startInstant.epochSecond * 1000 +
+            Number(startInstant.fraction.slice(0, 3).padEnd(3, "0"));
+      // A fraction substring may retain its normalized timestamp's backing store,
+      // including trailing zeroes removed from the exact comparison value.
+      const instantBytes =
+        timing.success && startInstant !== undefined
+          ? ENTRY_BYTES + textBytes(timing.data.startedDateTime.length + 6)
+          : 0;
       if (line.kind === "excluded")
         return line.reason === "url-redacted"
           ? this.#redactedWrite(
               record,
-              timing.success && timed
-                ? { start, end: start + timing.data.time }
+              timing.success && startInstant !== undefined
+                ? {
+                    start,
+                    end: start + timing.data.time,
+                    startInstant,
+                    instantBytes,
+                  }
                 : undefined,
             )
           : ok(undefined);
@@ -128,6 +211,7 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       if (
         !this.retain(
           ENTRY_BYTES * 8 +
+            instantBytes +
             textBytes(
               line.method.length +
                 line.origin.length +
@@ -145,12 +229,15 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
           path: line.path,
           query: line.query === "" ? undefined : line.query,
           status: line.status,
-          start: timed ? start : record.ordinal,
-          end: timed ? start + timing.data.time : record.ordinal,
+          start,
+          end:
+            timing.success && startInstant !== undefined
+              ? start + timing.data.time
+              : record.ordinal,
         },
         origin: line.origin,
         contentType: line.rawMime,
-        timed,
+        startInstant,
         record,
       });
       return ok(undefined);
@@ -162,7 +249,14 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
   /** Keep a successful write whose URL was redacted, with an empty path whose root relates to every type. */
   #redactedWrite(
     record: WebNetworkCaptureRecord,
-    timing: { readonly start: number; readonly end: number } | undefined,
+    timing:
+      | {
+          readonly start: number;
+          readonly end: number;
+          readonly startInstant: OffsetDateTimeInstant;
+          readonly instantBytes: number;
+        }
+      | undefined,
   ): Result<void, AnalysisError> {
     const parsed = redactedWriteSchema.safeParse(record.reported);
     if (!parsed.success) return ok(undefined);
@@ -177,21 +271,29 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       end: timing?.end ?? record.ordinal,
     };
     if (!isStateWrite(facts)) return ok(undefined);
-    if (!this.retain(ENTRY_BYTES * 8 + textBytes(facts.method.length)))
+    if (
+      !this.retain(
+        ENTRY_BYTES * 8 +
+          textBytes(facts.method.length) +
+          (timing?.instantBytes ?? 0),
+      )
+    )
       return this.overBudget();
     this.#entries.set(record.ordinal, {
       facts,
       origin: null,
       contentType: "",
-      timed: timing !== undefined,
+      startInstant: timing?.startInstant,
       record,
     });
     return ok(undefined);
   }
 
-  /** Parse one retained response body as exact JSON, charging its decoding and tree as temporary work. */
+  /** Parse one retained response body as state JSON, charging its decoding and tree as temporary work. */
   #body(ordinal: number): ParsedBody | null {
+    this.#bodyReleases.push(this.temporaryCheckpoint());
     const entry = this.#entries.get(ordinal);
+    // A body that is not JSON-like is refused before its decoding is charged.
     if (entry === undefined || !isJsonLike(mediaTypeEssence(entry.contentType)))
       return { kind: "unusable" };
     const content = contentSchema.safeParse(entry.record.reported);
@@ -202,16 +304,54 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       return { kind: "unusable" };
     if (!this.temporary(RECORD_SCRATCH_BYTES + textBytes(length) * 4))
       return null;
-    const body = readRecordedResponseBody(entry.record, STATE_BODY_LIMIT_BYTES);
-    if (
-      body.bodyText === null ||
-      body.bodyEncoding === "base64" ||
-      body.bodyCut === true ||
-      Buffer.byteLength(body.bodyText, "utf8") > STATE_BODY_LIMIT_BYTES
-    )
-      return { kind: "unusable" };
-    const value = parseExactJson(body.bodyText);
+    const value = stateBodyJson(
+      entry.contentType,
+      readRecordedResponseBody(entry.record, STATE_BODY_LIMIT_BYTES),
+    );
     return value === undefined ? { kind: "unusable" } : { kind: "json", value };
+  }
+
+  /** Parse one recorded request body as state JSON, as response bodies are admitted. */
+  #withRequestBody<T>(
+    ordinal: number,
+    use: (body: ParsedRequestBody) => T,
+  ): T | null {
+    const entry = this.#entries.get(ordinal);
+    const request = requestSchema.safeParse(entry?.record.reported);
+    if (entry === undefined || !request.success)
+      return use({ kind: "unusable" });
+    const { postData, bodySize } = request.data.request;
+    if (postData === undefined)
+      return use({ kind: bodySize === 0 ? "absent" : "unusable" });
+    const parsed = requestContentSchema.safeParse(postData);
+    if (!parsed.success) return use({ kind: "unusable" });
+    const { mimeType, text, params } = parsed.data;
+    if (bodySize === 0 && text === "" && (params?.length ?? 0) === 0)
+      return use({ kind: "absent" });
+    if (
+      !isJsonLike(mediaTypeEssence(mimeType)) ||
+      Buffer.byteLength(text, "utf8") > STATE_BODY_LIMIT_BYTES
+    )
+      return use({ kind: "unusable" });
+    const release = this.temporaryCheckpoint();
+    try {
+      if (!this.temporary(RECORD_SCRATCH_BYTES + textBytes(text.length) * 4))
+        return null;
+      const value = stateBodyJson(mimeType, { bodyText: text });
+      return use(
+        value === undefined ? { kind: "unusable" } : { kind: "json", value },
+      );
+    } finally {
+      release();
+    }
+  }
+
+  /** Whether a record's response carried no body: a 204, or known decoded empty content. */
+  #emptyResponse(ordinal: number): boolean {
+    const entry = this.#entries.get(ordinal);
+    if (entry === undefined) return false;
+    if (entry.facts.status === 204) return true;
+    return recordedResponseBodyIsEmpty(entry.record);
   }
 
   /** Project the init state of the manifest's primary origin; records keep timeline order. */
@@ -226,16 +366,20 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       (entry) => entry.origin === null,
     ).length;
     const timeline: StateTimeline =
-      entries.length > 0 && entries.every((entry) => entry.timed)
+      entries.length > 0 &&
+      entries.every((entry) => entry.startInstant !== undefined)
         ? "recorded-start-time"
         : "record-order";
     const records = entries
-      .map((entry) => entry.facts)
       .sort((left, right) =>
         timeline === "record-order"
-          ? left.ordinal - right.ordinal
-          : left.start - right.start || left.ordinal - right.ordinal,
+          ? left.facts.ordinal - right.facts.ordinal
+          : compareOffsetDateTimeInstants(
+              left.startInstant!,
+              right.startInstant!,
+            ) || left.facts.ordinal - right.facts.ordinal,
       )
+      .map((entry) => entry.facts)
       .map((facts) =>
         timeline === "record-order"
           ? { ...facts, start: facts.ordinal, end: facts.ordinal }
@@ -247,8 +391,11 @@ export class EnvironmentStateAccumulator extends EnvironmentManifestAccumulator 
       timeline,
       budget: {
         body: (ordinal) => this.#body(ordinal),
+        withRequestBody: (ordinal, use) => this.#withRequestBody(ordinal, use),
+        emptyResponse: (ordinal) => this.#emptyResponse(ordinal),
         retain: (bytes) => this.retain(bytes),
-        release: () => this.releaseTemporary(),
+        checkpoint: () => this.retainedCheckpoint(),
+        release: () => this.#bodyReleases.pop()?.(),
       },
     }).run();
     if (state === null) return this.overBudget();

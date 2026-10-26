@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { parse } from "plist";
 
 import {
+  PlistNestingLimitError,
+  plistNestingLimitMessage,
+} from "./apple/plistValue.js";
+import {
   omitPrototypeKeys,
   parseXmlPropertyList as parseWithNumbers,
 } from "./propertyListKeys.js";
@@ -239,11 +243,22 @@ it("rejects XML nesting beyond the projection limit with the limit diagnostic", 
   // `plist` and the prototype-key traversal recurse once per level, so the
   // depth check must report the same bounded-resource error as the projection
   // instead of letting those recursive passes exhaust the call stack.
-  const limit = new RangeError("Plist exceeds 128 nesting levels");
+  const limit = new PlistNestingLimitError(128);
   expect(() => parseXmlPropertyList(nestedDictionaries(129))).toThrow(limit);
   expect(() => parseXmlPropertyList(nestedArrays(129))).toThrow(limit);
   expect(() => parseXmlPropertyList(nestedDictionaries(3000))).toThrow(limit);
   expect(() => parseXmlPropertyList(nestedArrays(4000))).toThrow(limit);
+  try {
+    parseXmlPropertyList(nestedDictionaries(129));
+    throw new Error("Expected default nesting refusal");
+  } catch (cause: unknown) {
+    expect(cause).toBeInstanceOf(RangeError);
+    expect(cause).toMatchObject({
+      _tag: "PlistNestingLimitError",
+      maximumDepth: 128,
+      message: plistNestingLimitMessage(),
+    });
+  }
 });
 
 it("decodes XML property lists exactly at the projection nesting limit", () => {
@@ -280,7 +295,7 @@ it.each(['"', "'"])(
       opening.repeat(3000) + "<string>x</string>" + "</dict>".repeat(3000),
     );
     expect(() => parseXmlPropertyList(text)).toThrow(
-      new RangeError("Plist exceeds 128 nesting levels"),
+      new PlistNestingLimitError(128),
     );
     expect(
       parseXmlPropertyList(
@@ -308,7 +323,7 @@ it("bounds nested plist wrappers before recursive decoding", () => {
   const text =
     "<plist>".repeat(3000) + "<string>x</string>" + "</plist>".repeat(3000);
   expect(() => parseXmlPropertyList(text)).toThrow(
-    new RangeError("Plist exceeds 128 nesting levels"),
+    new PlistNestingLimitError(128),
   );
   expect(
     parseXmlPropertyList(plist("<plist><string>x</string></plist>")).value,
@@ -347,7 +362,7 @@ describe("OpenStep plist nesting preflight", () => {
     "rejects %s nested OpenStep values with the shared depth limit",
     (depth) => {
       expect(() => parseXmlPropertyList(arrays(depth))).toThrow(
-        "Plist exceeds 128 nesting levels",
+        plistNestingLimitMessage(),
       );
     },
   );

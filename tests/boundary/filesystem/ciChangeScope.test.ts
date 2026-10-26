@@ -626,6 +626,12 @@ it.each([
     "tests/module/example.test.ts",
     { code: true, runtime: false, browser: false, package: false },
   ],
+  ["scripts/lib/release-proposal.mjs", { code: true, package: true }],
+  ["patches/release-please+17.3.0.patch", { code: true, package: true }],
+  [
+    "tests/boundary/filesystem/releaseProposal.test.ts",
+    { code: true, package: true },
+  ],
   ["website/src/index.ts", { code: false, website: true, package: false }],
   [
     "website/public/examples/notes-electron/preload.js",
@@ -660,7 +666,7 @@ it.each([
     {
       code: true,
       runtime: true,
-      package: false,
+      package: true,
       evm: false,
       browser: false,
     },
@@ -756,6 +762,18 @@ it.each([
   [
     "tests/boundary/cli/nativePlistCli.test.ts",
     { code: true, apple: true, package: false, runtime: false },
+  ],
+  [
+    "scripts/ci/qualified-package-envelope.mjs",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
+    "scripts/ci/prepare-npm-publication.mjs",
+    { code: true, package: true, runtime: true, apple: false },
+  ],
+  [
+    "scripts/ci/npm-release-state.mjs",
+    { code: true, package: true, runtime: true, apple: false },
   ],
   [
     "tests/boundary/filesystem/windowsNpxRegistration.test.ts",
@@ -1042,9 +1060,22 @@ it("keeps unrelated test script changes off the SQLite runtime matrix", async ()
 });
 
 it.each([
+  "src/apkSignature/ApkSignatureProvider.ts",
+  "src/domain/apkSignature/apkSignatureSchemes.ts",
+  "scripts/verify-apk-signature.mjs",
+])("selects the real APK signing lane for %s", async (path) => {
+  const { directory, base } = await fixture();
+  const head = await change(directory, [path]);
+  expect(await classify(directory, base, head)).toMatchObject({
+    apk_signature: true,
+  });
+});
+
+it.each([
   ["browser", "real-browser"],
   ["binary_layout", "real-binary-layout"],
   ["evm", "real-evm-interface"],
+  ["apk_signature", "real-apk-signature"],
   ["javascript_recovery", "real-javascript-recovery"],
   ["recorded_crash", "real-recorded-crash"],
   ["web_network", "real-web-network-captures"],
@@ -1155,7 +1186,7 @@ it.each([
     {
       code: true,
       runtime: true,
-      package: false,
+      package: true,
       browser: false,
       evm: false,
       sqlite: false,
@@ -1166,7 +1197,7 @@ it.each([
     {
       code: true,
       runtime: true,
-      package: false,
+      package: true,
       browser: false,
       evm: false,
     },
@@ -1220,6 +1251,50 @@ it.each([
   [
     "tests/conformance/readiness/javascript-cli/package.json",
     { code: true, fixtures: false, readiness: true, package: false },
+  ],
+  [
+    "scripts/verify-reconstruction-readiness.mjs",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "scripts/lib/cli-process-environment.mjs",
+    {
+      code: true,
+      package: true,
+      runtime: true,
+      javascript_recovery: true,
+      readiness: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadiness.ts",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadinessExample.ts",
+    {
+      code: true,
+      readiness: true,
+      fixtures: false,
+      runtime: false,
+      package: false,
+    },
+  ],
+  [
+    "tests/conformance/readiness/report/reconstructionReadiness.test.ts",
+    { code: true, readiness: false, runtime: false, package: false },
   ],
   [
     "tests/conformance/ghidra/no-return.c",
@@ -1287,6 +1362,30 @@ it.each([
     expect(await classify(directory, base, head)).toMatchObject({
       code: true,
       ...expected,
+    });
+  },
+);
+
+it.each(["knip:production", "lint:typed"])(
+  "keeps the %s analysis command within static checks",
+  async (script) => {
+    const { directory } = await fixture();
+    const base = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify({ scripts: { [script]: "node scripts/old.mjs" } }),
+    );
+    const head = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify({ scripts: { [script]: "node scripts/new.mjs" } }),
+    );
+    expect(await classify(directory, base, head)).toMatchObject({
+      code: true,
+      runtime: false,
+      package: false,
+      evm: false,
+      browser: false,
     });
   },
 );
@@ -1496,3 +1595,89 @@ it("never runs a manual-only verifier from an automatic workflow", async () => {
     ),
   ).toEqual([]);
 });
+
+it.each([
+  "scripts/run-typescript.mjs",
+  "scripts/run-typescript.d.mts",
+  "scripts/run-turbo.mjs",
+  "turbo.json",
+  "tsconfig.json",
+  "tsconfig.build.json",
+  "tsconfig.frida-verification.json",
+  "package-lock.json",
+  ".nvmrc",
+  ".npmrc",
+])("selects package hosts for compiler input %s", async (path) => {
+  const { directory, base } = await fixture();
+  const head = await change(directory, [path]);
+  const plan = await classify(directory, base, head);
+  expect(plan).toMatchObject({
+    tier: "fast",
+    code: true,
+    runtime: true,
+    package: true,
+  });
+  expect(plan.matrix).toEqual({
+    include: [
+      { os: "ubuntu-latest", platform: "linux", architecture: "x64" },
+      { os: "ubuntu-24.04-arm", platform: "linux", architecture: "arm64" },
+      { os: "macos-15", platform: "darwin", architecture: "arm64" },
+    ],
+  });
+});
+
+it.each(["typescript", "tsrs"])(
+  "selects fallback host checks when compiler dependency %s changes",
+  async (name) => {
+    const { directory } = await fixture();
+    const before = { name: "fixture", devDependencies: { [name]: "1.0.0" } };
+    const base = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify(before),
+    );
+    const head = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify({ ...before, devDependencies: { [name]: "2.0.0" } }),
+    );
+    expect(await classify(directory, base, head)).toMatchObject({
+      code: true,
+      runtime: true,
+      package: true,
+    });
+  },
+);
+
+it.each([
+  "compile",
+  "typecheck",
+  "build",
+  "build:cached",
+  "test:prepare",
+  "docs:prepare",
+  "verify:frida:bindings",
+  "prebuild:cached",
+  "postcompile",
+  "pretypecheck",
+])(
+  "selects fallback host checks when compiler command %s changes",
+  async (name) => {
+    const { directory } = await fixture();
+    const base = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify({ scripts: { [name]: "node scripts/old.mjs" } }),
+    );
+    const head = await change(
+      directory,
+      ["package.json"],
+      JSON.stringify({ scripts: { [name]: "node scripts/new.mjs" } }),
+    );
+    expect(await classify(directory, base, head)).toMatchObject({
+      code: true,
+      runtime: true,
+      package: true,
+    });
+  },
+);
