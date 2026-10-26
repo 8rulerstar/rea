@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { digestSchema } from "../digests.js";
-import { localPathStringSchema } from "../localPath.js";
+import { absoluteLocalPathStringSchema } from "../localPath.js";
 
 /** Little-endian int32 at offset zero of every binary content catalog. */
 export const UNITY_ADDRESSABLES_BINARY_MAGIC = 0x0de38942;
@@ -13,7 +13,7 @@ const rowIndex = count;
 
 /** One explicit local catalog; detail selects delivery, never decoding coverage. */
 export const inspectUnityAddressablesInputSchema = z.strictObject({
-  path: localPathStringSchema.describe(
+  path: absoluteLocalPathStringSchema.describe(
     "Absolute filesystem path to a Unity Addressables content catalog (catalog.json or catalog.bin)",
   ),
   detail: z
@@ -22,7 +22,7 @@ export const inspectUnityAddressablesInputSchema = z.strictObject({
     .describe(
       "summary (default) retains complete Evidence and returns identity and counts; complete returns every key, location and provider inline",
     ),
-  hash_path: localPathStringSchema
+  hash_path: absoluteLocalPathStringSchema
     .optional()
     .describe(
       "Absolute path to the caller-selected catalog.hash file to record next to the catalog; its text is reported, not recomputed",

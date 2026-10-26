@@ -1,4 +1,3 @@
-import { isAbsolute } from "node:path";
 import type { ExecutionOptions } from "../AnalysisProvider.js";
 import {
   requireAnalysisViewRetention,
@@ -27,24 +26,6 @@ const OPERATION = "inspect_unity_addressables";
 const NO_RETENTION: AnalysisViewRetention = {
   evidenceById: undefined,
   recordEvidence: undefined,
-};
-
-const relativePathError = (input: {
-  path: string;
-  hash_path?: string | undefined;
-}): AnalysisInputError | undefined => {
-  for (const field of ["path", "hash_path"] as const) {
-    const value = input[field];
-    if (value !== undefined && !isAbsolute(value))
-      return new AnalysisInputError(OPERATION, undefined, [
-        {
-          path: [field],
-          reason: "invalid_format",
-          message: "Expected an absolute filesystem path on this host.",
-        },
-      ]);
-  }
-  return undefined;
 };
 
 /** Shared exact input validation, artifact-bound Evidence and summary delivery for CLI and MCP. */
@@ -82,8 +63,6 @@ export class UnityAddressablesService {
           cause: input.error,
         }),
       );
-    const relative = relativePathError(input.data);
-    if (relative !== undefined) return err(relative);
     const { detail, ...providerInput } = input.data;
     if (detail === "summary") {
       const ready = requireAnalysisViewRetention(OPERATION, retention);
