@@ -70,7 +70,7 @@ cliTest(
         bundles: 2,
         dependency_edges: 4,
       });
-      expect(await readFile(path)).toEqual(bytes);
+      expect((await readFile(path)).equals(bytes)).toBe(true);
       await unlink(path);
       const page = await call("inspect_analysis_view", {
         source: {
