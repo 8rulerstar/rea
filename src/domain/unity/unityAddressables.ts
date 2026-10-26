@@ -55,7 +55,10 @@ export const unityAddressablesKeySchema = z.strictObject({
    * empty or null string).
    */
   value: z.string().nullable(),
-  /** Serialized class name of an object key; null otherwise. */
+  /**
+   * Serialized class name of an object key; null for other keys and for a
+   * binary object key whose type record stores no class name.
+   */
   type_name: z.string().nullable(),
   locations: z.array(rowIndex),
 });
@@ -74,8 +77,8 @@ const locationDataSchema = z.union([
   unityAddressablesBundleSchema,
   z.strictObject({
     kind: z.literal("other"),
-    /** Serialized class name; the payload is not decoded. */
-    type_name: z.string(),
+    /** Serialized class name, null when a binary type record stores none; the payload is not decoded. */
+    type_name: z.string().nullable(),
   }),
 ]);
 
@@ -164,7 +167,7 @@ const validateCatalogFacts = (
         message:
           "Object keys have no text value; other keys have one, except a binary string stored as no object.",
       });
-    if ((key.kind === "object") !== (key.type_name !== null))
+    if (key.kind !== "object" && key.type_name !== null)
       context.addIssue({
         code: "custom",
         path: ["keys", index, "type_name"],

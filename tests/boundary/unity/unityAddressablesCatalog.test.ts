@@ -462,3 +462,36 @@ it("reports a binary string stored as no object and missing record strings as nu
   expect(report.keys[4]).toMatchObject({ kind: "string", value: null });
   expect(report.locations[0]!.internal_id).toBeNull();
 });
+
+it("reports a binary object type stored as no record as a null type name", () => {
+  const catalog: FixtureCatalog = {
+    keys: [
+      { key: { kind: "string", value: "Prefabs/Crate" }, locations: [0] },
+      { key: { kind: "object", type_name: "Game.Key" }, locations: [] },
+    ],
+    locations: [
+      {
+        primaryKey: 0,
+        internalId: "Assets/Crate.prefab",
+        provider: ASSET_PROVIDER,
+        type: "UnityEngine.GameObject",
+        data: { other: "Game.LocationData" },
+      },
+    ],
+  };
+  const intact = decode(binaryCatalog(catalog));
+  expect(intact.keys[1]!.type_name).toBe("Game.Key");
+  expect(intact.locations[0]!.data).toEqual({
+    kind: "other",
+    type_name: "Game.LocationData",
+  });
+  const bytes = binaryCatalog(catalog);
+  const keys = bytes.readUInt32LE(8);
+  bytes.writeUInt32LE(0xffffffff, bytes.readUInt32LE(keys + 8));
+  const location = bytes.readUInt32LE(bytes.readUInt32LE(keys + 4));
+  bytes.writeUInt32LE(0xffffffff, bytes.readUInt32LE(location + 20));
+  const report = decode(bytes);
+  // An unreadable type stays unknown instead of becoming an empty class name.
+  expect(report.keys[1]).toMatchObject({ kind: "object", type_name: null });
+  expect(report.locations[0]!.data).toEqual({ kind: "other", type_name: null });
+});

@@ -94,7 +94,8 @@ and prints a compact overview.
 - No asset bundle is opened, so bundle contents and whether the recorded CRC
   matches a bundle file are not checked.
 - Location data other than asset bundle request options reports its type name
-  only.
+  only. A binary object key or location data whose type record stores no class
+  name reports `type_name: null` (unknown), not an empty name.
 - Input is limited to 256 MiB per catalog and 4 KiB per hash file; the encoded
   report to 64 MiB; one inspection runs at a time per reader. Unsupported
   formats, malformed records and resource limits return typed reasons.

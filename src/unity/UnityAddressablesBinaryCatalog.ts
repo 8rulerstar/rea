@@ -190,7 +190,7 @@ const key = (
       locations,
     };
   }
-  return { kind: "object", value: null, type_name: type ?? "", locations };
+  return { kind: "object", value: null, type_name: type, locations };
 };
 
 const locationData = (
@@ -200,7 +200,7 @@ const locationData = (
   const object = reader.object(id, "location data");
   if (object === null) return null;
   if (object.type !== ASSET_BUNDLE_REQUEST_OPTIONS)
-    return { kind: "other", type_name: object.type ?? "" };
+    return { kind: "other", type_name: object.type };
   const at = object.value;
   reader.need(at, BUNDLE_OPTIONS_BYTES, "bundle options");
   const hashId = reader.bytes.readUInt32LE(at);
