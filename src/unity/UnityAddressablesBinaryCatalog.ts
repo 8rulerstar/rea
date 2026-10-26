@@ -108,7 +108,7 @@ class BinaryReader {
       if (visited.size > this.bytes.length / 8)
         throw new UnityAddressablesFormatFailure(
           "string-chain-capacity",
-          `${label} chain is longer than the catalog can hold`,
+          `${label} chain has more than ${Math.floor(this.bytes.length / 8)} links, more 8-byte nodes than the ${this.bytes.length}-byte catalog holds`,
         );
       const part = this.#segment(this.u32(node, label), label);
       bytes += jsonStringByteLength(part) - 2 + (parts.length > 0 ? 1 : 0);
@@ -282,6 +282,16 @@ export function* readBinaryCatalogSteps(
   const keyLocations = keyRecords.map((at) =>
     locationSet(reader.u32(at + 4, "key"), "location set"),
   );
+  // Follow dependency sets before admission, so dependency-only records are
+  // counted and the location rows are final before any row is built.
+  const locationDependencies: number[][] = [];
+  for (let index = 0; index < order.length; index++)
+    locationDependencies.push(
+      locationSet(
+        reader.u32(order[index]! + 12, "location dependencies"),
+        "dependency set",
+      ),
+    );
   options.beforeRows?.({ keys: keyRecords.length, locations: order.length });
 
   const providers: UnityAddressablesProvider[] = [];
@@ -312,10 +322,7 @@ export function* readBinaryCatalogSteps(
   const locations: UnityAddressablesLocation[] = [];
   for (let index = 0; index < order.length; index++) {
     const at = order[index]!;
-    const dependencies = locationSet(
-      bytes.readUInt32LE(at + 12),
-      "dependency set",
-    );
+    const dependencies = locationDependencies[index]!;
     const row: UnityAddressablesLocation = {
       primary_key: reader.string(bytes.readUInt32LE(at), "/", "primary key"),
       internal_id: reader.string(

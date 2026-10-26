@@ -202,7 +202,14 @@ it("decodes binary Hash128 and unknown object keys and appends dependency-only l
     ],
   };
   // No key selects location 1; only the dependency array names it.
-  const report = decode(binaryCatalog(catalog));
+  const admitted: { keys: number; locations: number }[] = [];
+  const report = decode(binaryCatalog(catalog), {
+    beforeRows: (counts) => {
+      admitted.push(counts);
+    },
+  });
+  // Admission sees the dependency-only location too.
+  expect(admitted).toEqual([{ keys: 3, locations: 2 }]);
   expect(
     report.keys.map(({ kind, value, type_name }) => [kind, value, type_name]),
   ).toEqual([
