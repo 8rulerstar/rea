@@ -271,12 +271,21 @@ export function* readBinaryCatalogSteps(
   // Many keys or locations may share one serialized offset array. Decode each
   // array once and share it, so retained indices stay proportional to file size.
   const sets = new Map<number, number[]>();
+  // Distinct sets that do not overlap hold at most one entry per 4 bytes; more
+  // decoded entries than that means overlapping arrays, refused before copying.
+  const maximumSetEntries = Math.floor(bytes.length / 4);
+  let setEntries = 0;
   const locationSet = (id: number, label: string): number[] => {
     let indices = sets.get(id);
     if (indices === undefined) {
-      indices = reader
-        .array(id, 4, label)
-        .map((at) => indexOf(bytes.readUInt32LE(at)));
+      const items = reader.array(id, 4, label);
+      setEntries += items.length;
+      if (setEntries > maximumSetEntries)
+        throw new UnityAddressablesFormatFailure(
+          "location-set-overlap",
+          `${label} at ${id} brings decoded set entries to ${setEntries}, more than the ${maximumSetEntries} that non-overlapping sets in the ${bytes.length}-byte catalog can hold`,
+        );
+      indices = items.map((at) => indexOf(bytes.readUInt32LE(at)));
       sets.set(id, indices);
     }
     return indices;

@@ -12,6 +12,7 @@ export const UNITY_ADDRESSABLES_FAILURE_REASONS = {
     "invalid-string",
     "string-chain-cycle",
     "string-chain-overlap",
+    "location-set-overlap",
   ],
   capacity: [],
 } as const;
