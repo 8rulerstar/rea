@@ -193,7 +193,7 @@ export const serializedObject = (key: FixtureKey): Buffer => {
   }
 };
 
-const jsonObject = (typeName: string, json: string) => {
+export const jsonObject = (typeName: string, json: string) => {
   const assembly = Buffer.from(RESOURCE_MANAGER, "latin1");
   const name = Buffer.from(typeName, "latin1");
   const text = Buffer.from(json, "utf16le");

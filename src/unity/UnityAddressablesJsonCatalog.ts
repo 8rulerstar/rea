@@ -14,8 +14,10 @@ import {
 
 // Entry record: internalId, provider, dependencyKey, depHash, dataIndex, primaryKey, resourceType.
 const ENTRY_FIELDS = 7;
-const BASE64 =
-  /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+// A plain class repetition keeps the check at constant stack for multi-megabyte tables.
+const BASE64_TEXT = /^[A-Za-z0-9+/]*={0,2}$/u;
+const isBase64 = (text: string) =>
+  text.length % 4 === 0 && BASE64_TEXT.test(text);
 
 /** SerializationUtilities.ObjectType tags. */
 const TAG = {
@@ -54,7 +56,7 @@ const isObjectArray = (value: unknown): value is Json[] =>
 
 const base64 = (catalog: Json, name: string): Buffer => {
   const text = field(catalog, name, isString, "a string");
-  if (!BASE64.test(text))
+  if (!isBase64(text))
     throw new UnityAddressablesFormatFailure(
       "invalid-base64",
       `${name} is not canonical base64`,
@@ -91,7 +93,7 @@ const ascii = (raw: Buffer, label: string): string => {
 
 type SerializedObject =
   | { kind: Exclude<UnityAddressablesKey["kind"], "object">; value: string }
-  | { kind: "object"; type_name: string; json: string };
+  | { kind: "object"; type_name: string; payload: Buffer };
 
 /** Decode one SerializationUtilities object at an offset of a base64 payload. */
 const readObject = (
@@ -153,11 +155,11 @@ const readObject = (
       );
       const jsonAt = classAt + 1 + classLength;
       const jsonLength = int32(data, jsonAt, label);
-      const raw = slice(data, jsonAt + 4, jsonLength, label);
+      // Keep the payload as a view; only bundle request options are decoded.
       return {
         kind: "object",
         type_name: text(typeName),
-        json: raw.toString("utf16le"),
+        payload: slice(data, jsonAt + 4, jsonLength, label),
       };
     }
     default:
@@ -173,9 +175,9 @@ const bundleData = (
 ): UnityAddressablesLocation["data"] => {
   if (object.type_name !== ASSET_BUNDLE_REQUEST_OPTIONS)
     return { kind: "other", type_name: object.type_name };
-  let options: Json;
+  let parsed: unknown;
   try {
-    options = JSON.parse(object.json) as Json;
+    parsed = JSON.parse(object.payload.toString("utf16le"));
   } catch (cause) {
     throw new UnityAddressablesFormatFailure(
       "invalid-json",
@@ -183,6 +185,12 @@ const bundleData = (
       { cause },
     );
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new UnityAddressablesFormatFailure(
+      "missing-field",
+      "bundle request options are not a JSON object",
+    );
+  const options = parsed as Json;
   const crc = options.m_Crc;
   const size = options.m_BundleSize;
   if (
@@ -285,6 +293,8 @@ interface Tables {
   readonly extraData: Buffer;
   readonly entryCount: number;
   readonly buckets: { offset: number; entries: number[] }[];
+  /** Location data decoded once per extra-data offset and shared. */
+  readonly dataByIndex: Map<number, UnityAddressablesLocation["data"]>;
 }
 
 /** Validate every table and bucket before any row text is materialized. */
@@ -346,7 +356,7 @@ const readTables = (catalog: Json): Tables => {
     rows.push({ offset, entries });
     at += 8 + length * 4;
   }
-  return { ...tables, entryCount, buckets: rows };
+  return { ...tables, entryCount, buckets: rows, dataByIndex: new Map() };
 };
 
 const jsonProviders = (
@@ -425,10 +435,20 @@ const jsonLocation = (
     tables.resourceTypes[
       indexIn(value(6), tables.resourceTypes.length, "resource type")!
     ]!.m_ClassName;
-  const data =
-    dataIndex === -1
-      ? null
-      : readObject(tables.extraData, dataIndex, `entry ${index} data`, options);
+  let data = dataIndex === -1 ? null : tables.dataByIndex.get(dataIndex);
+  if (data === undefined) {
+    const object = readObject(
+      tables.extraData,
+      dataIndex,
+      `entry ${index} data`,
+      options,
+    );
+    data =
+      object.kind === "object"
+        ? bundleData(object)
+        : { kind: "other", type_name: object.kind };
+    tables.dataByIndex.set(dataIndex, data);
+  }
   const internal = expandInternalId(
     tables.prefixes,
     tables.internalIds[internalId]!,
@@ -443,12 +463,7 @@ const jsonLocation = (
     dependencies: dependencyKey === null ? [] : keys[dependencyKey]!.locations,
     dependency_key: dependencyKey,
     dependency_hash: value(3),
-    data:
-      data === null
-        ? null
-        : data.kind === "object"
-          ? bundleData(data)
-          : { kind: "other", type_name: data.kind },
+    data,
     offset: null,
   };
 };
