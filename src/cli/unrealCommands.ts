@@ -1,5 +1,6 @@
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { createUnrealPakService } from "../composition/unreal.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
@@ -19,9 +20,9 @@ export const registerUnrealCommands = (
   cli.command(CLI_COMMANDS.inspectUnrealPak, {
     description: "Inventory an Unreal Engine .pak footer and index entries",
     args: z.object({
-      path: z
-        .string()
-        .describe("Local Unreal Engine .pak file (version 1 to 12)"),
+      path: localPathStringSchema.describe(
+        "Local Unreal Engine .pak file (version 1 to 12)",
+      ),
     }),
     options: z.object(analysisEvidenceDeliveryOptions),
     run: ({ args, options }) =>

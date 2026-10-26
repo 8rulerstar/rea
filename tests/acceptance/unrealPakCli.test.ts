@@ -369,3 +369,17 @@ cliTest(
   },
   30000,
 );
+
+cliTest(
+  "rejects an empty pak path before resolving it against the working directory",
+  async ({ cli }) => {
+    const result = await cli.run({
+      arguments: ["inspect-unreal-pak", "", "--json"],
+    });
+    // The argument schema refuses it; filesystem admission never sees a path.
+    expect(result.json).toMatchObject({
+      code: "VALIDATION_ERROR",
+      fieldErrors: [{ code: "too_small", path: "path" }],
+    });
+  },
+);
