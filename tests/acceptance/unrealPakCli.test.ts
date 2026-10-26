@@ -262,7 +262,7 @@ cliTest(
     const before = await readFile(bundle);
     const overwrite = await cli.run({ arguments: args });
     expect(overwrite.exitCode).toBe(1);
-    expect(await readFile(bundle)).toEqual(before);
+    expect((await readFile(bundle)).equals(before)).toBe(true);
     const saved = await readEvidenceBundle(bundle);
     if (!saved.ok) throw saved.error;
     const evidence = saved.value.records[0];
