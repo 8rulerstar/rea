@@ -55,7 +55,10 @@ import {
   analysisViewResultSchema,
   il2cppMetadataSummaryViewResultSchema,
 } from "../../../src/domain/analysisView/analysisView.js";
-import { BINARY_LAYOUT_TEST_PROVIDER } from "../../fixtures/binaryDiagnostics/layout.js";
+import {
+  BINARY_LAYOUT_TEST_PROVIDER,
+  binaryLayoutFixture,
+} from "../../fixtures/binaryDiagnostics/layout.js";
 import { wasmArtifactFixture } from "../../fixtures/wasm/artifact.js";
 import { evmInterfaceFixture } from "../../fixtures/evm/interface.js";
 import type { RelationshipCoverage } from "../../../src/domain/relationshipCoverage.js";
@@ -656,6 +659,39 @@ it("reports a tampered inline Evidence ID at its full MCP source path", async ()
       ],
     },
   });
+});
+
+it("reports empty retained layout selectors without index bounds", async () => {
+  const { client, session } = await connect();
+  const parent = analysisViewLayoutEvidence(binaryLayoutFixture());
+  expect(session.recordEvidence(parent).ok).toBe(true);
+  for (const collection of ["sections", "symbols"] as const) {
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: {
+        source: { kind: "retained-evidence", evidence_id: parent.evidence_id },
+        view: { kind: "item", collection, selector: { index: 0 } },
+      },
+    });
+    const error = parseMcpToolError(response).error;
+    expect(error).toMatchObject({
+      code: "invalid_request",
+      details: {
+        issues: [
+          {
+            path: ["view", "selector", "index"],
+            reason: "invalid_value",
+            message: expect.stringContaining(`No retained ${collection}`),
+          },
+        ],
+      },
+    });
+    expect(error.details).not.toHaveProperty("issues.0.minimum");
+    expect(error.details).not.toHaveProperty("issues.0.maximum");
+  }
+  expect(session.evidenceById(parent.evidence_id)).toEqual(
+    parseEvidence(parent),
+  );
 });
 
 it("locates malformed PCAP results within inline and retained view sources", async () => {
@@ -1425,6 +1461,52 @@ it("extracts an environment state identically from retained, portable and file M
   });
   expect(parseMcpToolError(refused).error.code).toBe("unsupported_target");
   expect(JSON.stringify(refused)).not.toContain("probe folder");
+  await client.ping();
+});
+
+it("reports environment coverage identically from retained, portable and file MCP Evidence", async () => {
+  const { client, session } = await connect();
+  const { ajv, inputSchema, outputSchema } = await advertisedMcpToolSchemas(
+    client,
+    "inspect_analysis_view",
+    schemaValidation.assertions,
+  );
+  const parent = analysisViewCaptureEvidence(environmentStateCaptureFixture());
+  expect(session.recordEvidence(parent).ok).toBe(true);
+  const evidencePath = join(
+    await createTestTempDirectory("rea-coverage-file-mcp-"),
+    "capture.json",
+  );
+  await writeFile(evidencePath, JSON.stringify(parent));
+  const rules = ["after-uid-literal", "opaque-token", "sibling-variance"];
+  const outputs = [];
+  for (const source of [
+    { kind: "inline", evidence: parent },
+    { kind: "retained-evidence", evidence_id: parent.evidence_id },
+    { kind: "evidence-file", path: evidencePath },
+  ]) {
+    const view = { kind: "environment-coverage", template_rules: rules };
+    expect(ajv.validate(inputSchema, { source, view })).toBe(true);
+    const response = await client.callTool({
+      name: "inspect_analysis_view",
+      arguments: { source, view },
+    });
+    expect(response.isError).not.toBe(true);
+    expect(
+      ajv.validate(outputSchema, response.structuredContent),
+      JSON.stringify(ajv.errors),
+    ).toBe(true);
+    const evidence = parseEvidence(response.structuredContent);
+    expect(evidence.confidence).toBe("inferred");
+    expect(evidence.normalized_result).toMatchObject({
+      kind: "environment-coverage",
+      reads: { state: expect.any(Number) },
+      writes: { served: expect.any(Array), withheld: expect.any(Array) },
+    });
+    outputs.push(evidence.normalized_result);
+  }
+  expect(outputs[1]).toEqual(outputs[0]);
+  expect(outputs[2]).toEqual(outputs[0]);
   await client.ping();
 });
 

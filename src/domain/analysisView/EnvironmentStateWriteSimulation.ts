@@ -1,3 +1,4 @@
+import type { JsonValue } from "../jsonValue.js";
 import {
   at,
   changesState,
@@ -6,6 +7,7 @@ import {
   listsAll,
   normalizedPath,
   type JsonObject,
+  type ParsedRequestBody,
   type StateEntity,
   type StateRecordFacts,
   type StateToolFacts,
@@ -13,10 +15,15 @@ import {
   type StateView,
 } from "./environmentStateRules.js";
 import { UnseenEntities } from "./environmentStateWriteAdoption.js";
+import { FailedReadBlame } from "./environmentStateWriteBlame.js";
+import { addressedWrite } from "./environmentStateWriteAddress.js";
+import { withoutMembers } from "./environmentStateResponseMembers.js";
 import { linkedTarget } from "./environmentStateWriteLinks.js";
 import { updatedEntity } from "./environmentStateWriteApply.js";
 import { projectedRead } from "./environmentStateWriteObserve.js";
 import { OmittedFields } from "./environmentStateWriteOmitted.js";
+import { SortedArrays } from "./environmentStateWriteSorted.js";
+import { sameQuery } from "./environmentStateWriteStamps.js";
 import {
   checkDocumentRead,
   checkItemRead,
@@ -51,10 +58,11 @@ import {
   type TouchedTargets,
   writtenFieldChecks,
 } from "./environmentStateWriteAttribution.js";
+import { applyBulk } from "./environmentStateWriteBulk.js";
 import { applyCreate } from "./environmentStateWriteCreate.js";
 import { applyDocument } from "./environmentStateWriteDocument.js";
+import { applyDelete } from "./environmentStateWriteDelete.js";
 import {
-  applyDelete,
   applyUpdate,
   built,
   type EffectContext,
@@ -99,6 +107,8 @@ export class EnvironmentStateWriteSimulation {
   readonly #effects = new WriteEffects();
   /** Fields reads show the application leaves out, which serving then does not require. */
   readonly omitted = new OmittedFields((bytes) => this.#input.io.retain(bytes));
+  /** Array fields reads showed a view lists sorted. */
+  readonly #sorted: SortedArrays;
   readonly #lastCheck = new Map<string, number>();
   /** When the latest modelled write to each target since its last check ended. */
   readonly #touchedSince: PendingTargets = new Map();
@@ -121,6 +131,7 @@ export class EnvironmentStateWriteSimulation {
   readonly #placed = new Set<string>();
   /** Entities writes no plan models made, taken when an item read first shows them. */
   readonly #unseen: UnseenEntities;
+  readonly #blame: FailedReadBlame;
 
   constructor(input: WriteSimulationInput) {
     this.#input = input;
@@ -131,12 +142,28 @@ export class EnvironmentStateWriteSimulation {
       lastCheck: this.#lastCheck,
       idField: (type) => this.#types.get(type)?.id_field,
     });
+    this.#blame = new FailedReadBlame({
+      state: this.#state,
+      io: input.io,
+      records: input.records,
+      touched: this.#touched,
+      pending: this.#touchedSince,
+      effects: this.#effects,
+      inserted: this.#inserted,
+      idField: (type) => this.#types.get(type)?.id_field,
+      volatileOf: input.volatileOf,
+    });
     for (const type of input.types)
       this.#types.set(type.collection_template, type);
     for (const tool of input.tools)
       for (const ordinal of tool.record_ordinals)
         this.#toolOf.set(ordinal, tool);
     this.#checkedLines = checkedLines(input);
+    this.#sorted = new SortedArrays(input.views.values(), input.entities, {
+      state: this.#state,
+      io: input.io,
+      idField: (type) => this.#types.get(type)?.id_field,
+    });
     this.#taint = new WriteTaint(
       [...this.#types.keys()],
       new Map(
@@ -165,12 +192,22 @@ export class EnvironmentStateWriteSimulation {
         viewOf: (ordinal) =>
           this.#input.views.get(this.#toolOf.get(ordinal)?.name ?? ""),
       });
-      const { effect, target } = link;
+      const addressed =
+        link.effect === "none"
+          ? addressedWrite(tool, {
+              ...this.#input,
+              types,
+              idField: (type) => this.#types.get(type)?.id_field,
+              views: this.#input.views.values(),
+            })
+          : undefined;
+      const { effect, target } = addressed ?? link;
       this.#input.io.retain(512);
       this.#drafts.set(tool.name, {
         plan: {
           ...unservedPlan(tool.name, effect, target, "no-state-target"),
           reason: effect === "none" ? "no-state-target" : null,
+          ...(addressed === undefined ? {} : { address: addressed.address }),
         },
         observed: undefined,
         candidates: [],
@@ -180,13 +217,31 @@ export class EnvironmentStateWriteSimulation {
         calls: 0,
         updates: [],
         sequences: new Map(),
+        steady: new Set(),
+        unstamped: new Set(),
+        kept: new Set(),
+        fixedWidth: new Map(),
         linked: link.collection,
       });
     }
     this.#input.records.forEach((record, index) => this.#step(record, index));
-    return [...this.#drafts.values()].map((draft) =>
-      writeVerdict(draft, this.#input),
+    const views = new Map(
+      this.views([...this.#input.views.values()]).map((view) => [
+        view.tool,
+        view,
+      ]),
     );
+    return [...this.#drafts.values()].map((draft) => {
+      // A view that became recorded cannot supply proof for a served write.
+      let kept = 0;
+      for (const ordinal of draft.confirmed) {
+        const tool = this.#toolOf.get(ordinal)?.name;
+        if (tool !== undefined && views.get(tool)?.shape !== "recorded")
+          draft.confirmed[kept++] = ordinal;
+      }
+      draft.confirmed.length = kept;
+      return writeVerdict(draft, this.#input);
+    });
   }
 
   #step(record: StateRecordFacts, index: number): void {
@@ -207,18 +262,30 @@ export class EnvironmentStateWriteSimulation {
     );
   }
 
-  #context(writer: string): EffectContext {
+  #context(
+    writer: string,
+    request?: { readonly ordinal: number; readonly body: ParsedRequestBody },
+  ): EffectContext {
     return {
       isWrite: (record) => this.#isWrite(record),
       state: this.#state,
-      io: this.#input.io,
+      io:
+        request === undefined
+          ? this.#input.io
+          : {
+              ...this.#input.io,
+              requestBody: (ordinal) =>
+                ordinal === request.ordinal
+                  ? request.body
+                  : this.#input.io.requestBody(ordinal),
+            },
       records: this.#input.records,
       timed: this.#input.timed,
       viewOf: (ordinal) => {
         const view = this.#input.views.get(
           this.#toolOf.get(ordinal)?.name ?? "",
         );
-        return view === undefined ? undefined : this.omitted.view(view);
+        return view === undefined ? undefined : this.#viewOf(view);
       },
       idField: (type) => this.#types.get(type)!.id_field,
       observed: (ordinal) =>
@@ -232,6 +299,10 @@ export class EnvironmentStateWriteSimulation {
         this.#input.documents.find((document) => document.tool === tool),
       startedWith: (type) =>
         this.#input.entities.filter((entity) => entity.type === type),
+      pending: (target) =>
+        [...(this.#touched.get(target)?.keys() ?? [])].some(
+          (name) => name !== writer,
+        ),
     };
   }
 
@@ -254,20 +325,42 @@ export class EnvironmentStateWriteSimulation {
     }
     const observeOnly = draft.plan.reason !== null;
     if (!observeOnly) draft.calls += 1;
-    const step: WriteStep = { record, index, tool, observeOnly };
-    const result = APPLY[effect](this.#context(tool.name), draft, step);
-    // A call of a tool whose plan was never built, or one a linked plan does not place, is no more modelled than one of a tool without a plan.
-    if (
-      result.kind === "unknown" &&
-      (!built(draft) || draft.linked !== undefined)
-    )
-      this.#unseen.unplanned(index);
-    this.#settle(result, {
-      index,
-      tool: tool.name,
-      path: record.path,
-      end: record.end,
-    });
+    // Serving pins the exemplar's query, so a call with another may do something else and confirms nothing.
+    const pinned =
+      !built(draft) ||
+      sameQuery(
+        this.#input.io.queryOf(draft.plan.exemplar_ordinal ?? -1),
+        record.query,
+      );
+    const step: WriteStep = { record, index, tool, observeOnly, pinned };
+    const { address } = draft.plan;
+    const bulk = address !== undefined && address.by !== "action";
+    const apply = (body?: ParsedRequestBody): void => {
+      const context = this.#context(
+        tool.name,
+        body === undefined ? undefined : { ordinal: record.ordinal, body },
+      );
+      const results = bulk
+        ? applyBulk(context, draft, step)
+        : [APPLY[effect](context, draft, step)];
+      // A call of a tool whose plan was never built, or one a linked plan does not place, is no more modelled than one of a tool without a plan.
+      if (
+        results.some((result) => result.kind === "unknown") &&
+        (!built(draft) || draft.linked !== undefined)
+      )
+        this.#unseen.unplanned(index);
+      for (const result of results)
+        this.#settle(result, {
+          index,
+          tool: tool.name,
+          path: record.path,
+          end: record.end,
+        });
+    };
+    // Item deletes use their path; calls outside a built plan's query never interpret their body.
+    if (pinned && (effect !== "delete" || bulk))
+      this.#input.io.withRequestBody(record.ordinal, apply);
+    else apply();
   }
 
   /** Attribute an applied effect to its tool; a recorded outcome is the state's new baseline; an unknown one taints. */
@@ -291,6 +384,7 @@ export class EnvironmentStateWriteSimulation {
     }
     if (result.kind === "observed") {
       this.#effects.observed(this.#touched, result.targets);
+      this.#blame.rebased(result.targets[0]!, write.index);
       // A recorded outcome replaces the entity's values, not its collection's membership.
       this.#touched.delete(result.targets[0]!);
       return;
@@ -302,8 +396,10 @@ export class EnvironmentStateWriteSimulation {
         fields: result.fields,
       });
     this.#log.push(write);
-    if (result.inserted !== undefined)
-      this.#inserted.set(result.inserted, write.tool);
+    if (result.inserted === undefined) return;
+    this.#inserted.set(result.inserted, write.tool);
+    if (result.entity !== undefined)
+      this.#blame.inserted(result.entity, write.tool);
   }
 
   /**
@@ -354,13 +450,17 @@ export class EnvironmentStateWriteSimulation {
     return true;
   }
 
-  #check(view: StateView, record: StateRecordFacts): CheckOutcome | undefined {
+  #check(
+    view: StateView,
+    record: StateRecordFacts,
+    comparisonBody?: (body: JsonValue) => JsonValue,
+  ): CheckOutcome | undefined {
     if (view.shape === "recorded") return undefined;
     const line = this.#line(view, record);
     if (view.shape !== "item" && line === undefined) return undefined;
     if (view.shape === "document")
       return this.#input.io.withBody(record.ordinal, (body) =>
-        checkDocumentRead(this.#state, view.tool, record, body),
+        checkDocumentRead(this.#state, view, record, body),
       );
     const item = view.shape === "item";
     const target = item
@@ -383,10 +483,17 @@ export class EnvironmentStateWriteSimulation {
     // The served answer keeps the envelope of the item view's or the line's base recording.
     const base = item ? view.envelope_ordinal : line!.ordinal;
     const ordinals = { base, read: record.ordinal };
+    const minted = view.per_response_members;
     return withBodies(this.#input.io.withBody, ordinals, (served, body) => {
       const check = {
-        body,
-        base: served,
+        body:
+          body === undefined
+            ? body
+            : withoutMembers(
+                comparisonBody === undefined ? body : comparisonBody(body),
+                minted,
+              ),
+        base: served === undefined ? served : withoutMembers(served, minted),
         idField: this.#types.get(view.type)?.id_field ?? "",
         volatile: this.#input.volatileOf(view.type),
         collection,
@@ -408,13 +515,28 @@ export class EnvironmentStateWriteSimulation {
     return servedLine(this.#checkedLines.get(view.tool), record);
   }
 
+  /** The view as the gate currently knows it: without the fields reads showed omitted, with the arrays they showed sorted. */
+  #viewOf(view: StateView): StateView {
+    return this.#sorted.view(this.omitted.view(view));
+  }
+
+  /** The views as reads showed them. */
+  views(views: readonly StateView[]): StateView[] {
+    return this.#sorted.views(this.omitted.views(views));
+  }
+
   #read(record: StateRecordFacts, index: number, tool: StateToolFacts): void {
     const original = this.#input.views.get(tool.name);
     if (original === undefined) return;
-    const view = this.omitted.view(original);
+    let view = this.#sorted.comparisonView(this.omitted.view(original));
     if (projectedRead(view, record, this.#input.io)) return;
     const borrowers = this.#observations.get(record.ordinal);
-    if (!borrowers && this.#resynced(view, record, index)) return;
+    if (
+      this.#viewOf(original).shape !== "recorded" &&
+      !borrowers &&
+      this.#resynced(view, record, index)
+    )
+      return;
     let outcome = this.#check(view, record);
     if (outcome === undefined) return;
     let keys = [...outcome.targets, ...outcome.unheld];
@@ -425,7 +547,28 @@ export class EnvironmentStateWriteSimulation {
           runningAt(this.#touchedSince, key, record.start),
       );
     if (blocked(keys)) return;
+    // A read the gate counts can show the view lists a written array sorted, or rule that out.
+    outcome = this.#sorted.retry(
+      view,
+      { record, outcome },
+      (candidate, comparisonBody) =>
+        this.#check(candidate, record, comparisonBody),
+      blocked,
+    );
+    view = this.#viewOf(original);
+    keys = [...outcome.targets, ...outcome.unheld];
+    if (blocked(keys)) return;
     let exercised = exercisedBy(this.#touched, keys, borrowers);
+    if (view.shape === "recorded") {
+      // Retiring a view withdraws ordering proof, not a remaining mismatch in values.
+      if (!outcome.pass)
+        this.#contradictOthers(
+          exercised,
+          record,
+          interference(this.#history, outcome),
+        );
+      return;
+    }
     if (borrowers !== undefined) {
       this.omitted.keep(view, outcome);
       if (!outcome.pass)
@@ -582,22 +725,22 @@ export class EnvironmentStateWriteSimulation {
     readonly exercised: ReadonlySet<string>;
     readonly view: StateView;
   }): void {
-    if (failed.exercised.size > 0)
-      for (const name of failed.exercised) {
-        const draft = this.#drafts.get(name)!;
-        draft.contradictedBy ??= failed.record.ordinal;
-      }
-    else {
-      const since = Math.min(
-        ...failed.keys.map((key) => this.#lastCheck.get(key) ?? -1),
-      );
+    const ordinal = failed.record.ordinal;
+    const since = Math.min(
+      ...failed.keys.map((key) => this.#lastCheck.get(key) ?? -1),
+    );
+    const blame = this.#blame.of({ ...failed, since });
+    for (const name of blame.confirmed)
+      this.#drafts.get(name)!.confirmed.push(ordinal);
+    for (const name of blame.contradicted)
+      this.#drafts.get(name)!.contradictedBy ??= ordinal;
+    if (failed.exercised.size === 0)
       for (const write of this.#log)
         if (
           write.index > since &&
           prefixRelated(write.path, failed.record.path)
         )
           this.#drafts.get(write.tool)!.sideEffect = true;
-    }
     if (failed.view.shape !== "item")
       for (const key of failed.keys) this.#taint.fail(key);
   }

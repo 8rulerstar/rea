@@ -12,14 +12,25 @@ import { PRODUCT_IDENTITY } from "../identity.js";
 import {
   invokingPackageRunner,
   registrationEntrypointPath,
+  registrationRuntimePath,
   packageRunnerRegistrationCommand,
   type PackageRunner,
 } from "./ClientRegistrationIdentity.js";
 import {
+  materializeRegistrationRunnerCache,
+  type SetupRegistrationPrewarm,
+} from "./SetupRegistrationPrewarm.js";
+import {
   SUPPORTED_NODE_VERSION_PROSE,
+  javaScriptRuntime,
   supportsNodeVersion,
 } from "../domain/runtimeVersion.js";
-import { runDoctor, systemDoctorHost, type DoctorHost } from "./Doctor.js";
+import {
+  runDoctor,
+  systemDoctorHost,
+  type DoctorHost,
+  type DoctorScope,
+} from "./Doctor.js";
 import {
   installLinuxHopper,
   LinuxHopperTemporaryCleanupOwner,
@@ -63,7 +74,6 @@ import type {
   SetupInitialState,
   SetupProviderEnvironment,
 } from "./SetupTypes.js";
-import type { DoctorScope } from "./Doctor.js";
 import { SetupCleanupOwner } from "./SetupCleanupOwner.js";
 import {
   AnalysisCleanupLeaseGroup,
@@ -83,12 +93,20 @@ export const setupRegistrationCommand = (
   if (packageRunner !== undefined)
     return packageRunnerRegistrationCommand(packageRunner, platform);
   if (entrypointPath === undefined || entrypointPath.length === 0) return [];
-  return platform === "win32"
-    ? [process.execPath, entrypointPath, "mcp"]
-    : [
-        registrationEntrypointPath(entrypointPath, environment, platform),
-        "mcp",
-      ];
+  const script = registrationEntrypointPath(
+    entrypointPath,
+    environment,
+    platform,
+  );
+  const runtime = registrationRuntimePath(
+    process.execPath,
+    javaScriptRuntime(process.versions).id,
+    environment,
+    platform,
+  );
+  // The script's env-node shebang depends on the client's PATH, which may
+  // differ from setup's shell. Bind the runtime that is executing setup.
+  return [runtime, script, "mcp"];
 };
 
 /**
@@ -173,6 +191,12 @@ export const systemSetupHost = (
       await linuxHopperHost.close?.();
     },
   };
+  const registration = setupRegistration(platform, homeDirectory, environment);
+  const prewarmRegistrationRunner = (): Promise<SetupRegistrationPrewarm> =>
+    materializeRegistrationRunnerCache(
+      registration.registrationCommand,
+      environment,
+    );
   const cleanup = new SetupCleanupOwner([
     macCleanup,
     {
@@ -194,7 +218,8 @@ export const systemSetupHost = (
       : {}),
     skillDestinations: (clientIds) =>
       skillDestinations(homeDirectory, clientIds, environment, platform),
-    ...setupRegistration(platform, homeDirectory, environment),
+    ...registration,
+    prewarmRegistrationRunner,
     nodeVersion: process.versions.node,
     macosVersion: () => doctorHost.macosVersion(),
     linuxDistribution,

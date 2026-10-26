@@ -2,27 +2,25 @@ import {
   lstat,
   mkdir,
   readFile,
+  realpath,
   readdir,
   rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
-
-import { spawn } from "@lydell/node-pty";
+import { dirname, isAbsolute, join } from "node:path";
+import { parse as parseToml } from "smol-toml";
 
 import { TOOL_CONTRACTS } from "../dist/contracts/toolContracts.js";
 import { PRODUCT_IDENTITY } from "../dist/identity.js";
-import { json, pathExists } from "./lib/verify-package-core.mjs";
+import { pathExists } from "./lib/verify-package-core.mjs";
 import { parse as parseJsonc } from "jsonc-parser";
 import { skillReferenceIssues } from "./lib/docs-facts.mjs";
+import {
+  verifyInteractiveSetup,
+  verifyRedirectedStdoutSetup,
+} from "./lib/verify-setup-terminal.mjs";
 import { setupPlanFailureMessage } from "./verify-package-setup-plan.mjs";
-
-export const terminalModesRestored = (termios) => {
-  if (typeof termios !== "string") return false;
-  const modes = new Set(termios.trim().split(/\s+/u));
-  return modes.has("icanon") && modes.has("echo");
-};
 
 const OPENCODE_ORIGINAL = `{
   // OpenCode preferences must survive setup.
@@ -41,6 +39,17 @@ const CODEX_ORIGINAL = [
   "",
 ].join("\n");
 
+const isDirectRegistration = async (command, cli) =>
+  Array.isArray(command) &&
+  command.length === 3 &&
+  typeof command[0] === "string" &&
+  typeof command[1] === "string" &&
+  isAbsolute(command[0]) &&
+  isAbsolute(command[1]) &&
+  command[2] === "mcp" &&
+  (await realpath(command[0])) === (await realpath(process.execPath)) &&
+  (await realpath(command[1])) === (await realpath(cli));
+
 const verifyMcpAdd = async ({ commands, cli, environment, npxLog }) => {
   await commands.run(cli, ["mcp", "add"], environment);
   const mcpRegistration = await readFile(npxLog, "utf8");
@@ -48,186 +57,6 @@ const verifyMcpAdd = async ({ commands, cli, environment, npxLog }) => {
   if (!mcpRegistration.includes(expected))
     throw new Error("Incur mcp add did not register the pinned npx command");
 };
-
-const snapshotFiles = async (paths) =>
-  Promise.all(
-    paths.map(async (path) => {
-      const exists = await pathExists(path);
-      return {
-        path,
-        exists,
-        content: exists ? await readFile(path, "utf8") : null,
-      };
-    }),
-  );
-
-const assertFilesUnchanged = async (snapshot, label) => {
-  for (const entry of snapshot) {
-    const exists = await pathExists(entry.path);
-    const content = exists ? await readFile(entry.path, "utf8") : null;
-    if (exists !== entry.exists || content !== entry.content)
-      throw new Error(`${label} changed ${entry.path}`);
-  }
-};
-
-const verifyInteractiveSetup = async ({
-  command,
-  environment,
-  root,
-  unchangedPaths,
-}) =>
-  new Promise((resolvePromise, reject) => {
-    let output = "";
-    let cancelled = false;
-    let settled = false;
-    const unchanged = snapshotFiles(unchangedPaths);
-    const wrapper = `
-      const { spawnSync } = require("node:child_process");
-      const child = spawnSync(process.argv[1], ["setup"], { stdio: "inherit", env: process.env, shell: process.platform === "win32" });
-      const terminal = process.platform === "win32"
-        ? spawnSync("cmd.exe", ["/c", "mode", "CON"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] })
-        : spawnSync("stty", ["-a"], { encoding: "utf8", stdio: ["inherit", "pipe", "inherit"] });
-      process.stdout.write("\\n__REA_SETUP_EXIT__" + JSON.stringify({ status: child.status, termios: terminal.stdout, error: child.error?.message }));
-      process.exit(child.status ?? 1);
-    `;
-    const terminal = spawn(process.execPath, ["-e", wrapper, command], {
-      cwd: root,
-      env: { ...environment, NO_COLOR: "1", TERM: "xterm-256color" },
-      name: "xterm-256color",
-      cols: 120,
-      rows: 40,
-    });
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error === undefined) resolvePromise();
-      else reject(error);
-    };
-    const timeout = setTimeout(() => {
-      terminal.kill();
-      finish(
-        new Error(`packaged setup wizard timed out after output: ${output}`),
-      );
-    }, 20_000);
-
-    terminal.onData((data) => {
-      output += data;
-      if (!cancelled && output.includes("Which agents should use REA?")) {
-        cancelled = true;
-        terminal.write("\u0003");
-      }
-    });
-    terminal.onExit(async ({ exitCode }) => {
-      const marker = output.lastIndexOf("__REA_SETUP_EXIT__");
-      const result = marker < 0 ? undefined : output.slice(marker + 18).trim();
-      let childResult;
-      try {
-        childResult = result === undefined ? undefined : JSON.parse(result);
-      } catch {
-        childResult = undefined;
-      }
-      if (
-        !cancelled ||
-        exitCode !== 0 ||
-        childResult?.status !== 0 ||
-        !output.includes("\u001b[?25h") ||
-        (process.platform !== "win32" &&
-          !terminalModesRestored(childResult.termios)) ||
-        !output.includes("No changes were made.")
-      ) {
-        finish(
-          new Error(
-            `packaged rea-agents setup did not cancel with a restored terminal and exit 0: ${output}`,
-          ),
-        );
-        return;
-      }
-      try {
-        await assertFilesUnchanged(await unchanged, "Interactive cancellation");
-        finish();
-      } catch (error) {
-        finish(error);
-      }
-    });
-  });
-
-const verifyRedirectedStdoutSetup = async ({
-  command,
-  environment,
-  root,
-  unchangedPaths,
-}) =>
-  new Promise((resolvePromise, reject) => {
-    let output = "";
-    let settled = false;
-    const unchanged = snapshotFiles(unchangedPaths);
-    const wrapper = `
-      const { spawnSync } = require("node:child_process");
-      const child = spawnSync(process.argv[1], ["setup"], { encoding: "utf8", env: process.env, stdio: ["inherit", "pipe", "inherit"], shell: process.platform === "win32" });
-      process.stdout.write("\\n__REA_REDIRECTED_SETUP__" + JSON.stringify({ status: child.status, stdout: child.stdout, error: child.error?.message, stdinTTY: process.stdin.isTTY, stderrTTY: process.stderr.isTTY, stdoutRedirected: true }));
-      process.exit(child.status ?? 1);
-    `;
-    const terminal = spawn(process.execPath, ["-e", wrapper, command], {
-      cwd: root,
-      env: { ...environment, NO_COLOR: "1", TERM: "xterm-256color" },
-      name: "xterm-256color",
-      cols: 120,
-      rows: 40,
-    });
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error === undefined) resolvePromise();
-      else reject(error);
-    };
-    const timeout = setTimeout(() => {
-      terminal.kill();
-      finish(
-        new Error(
-          `packaged setup started an interactive prompt with redirected stdout: ${output}`,
-        ),
-      );
-    }, 15_000);
-    terminal.onData((data) => {
-      output += data;
-    });
-    terminal.onExit(async ({ exitCode }) => {
-      const marker = output.lastIndexOf("__REA_REDIRECTED_SETUP__");
-      let childResult;
-      try {
-        childResult =
-          marker < 0 ? undefined : JSON.parse(output.slice(marker + 24).trim());
-      } catch {
-        childResult = undefined;
-      }
-      const allOutput = `${output}\n${childResult?.stdout ?? ""}`;
-      if (
-        (exitCode !== 0 && exitCode !== 1) ||
-        childResult?.status !== exitCode ||
-        childResult.stdinTTY !== true ||
-        childResult.stderrTTY !== true ||
-        childResult.stdoutRedirected !== true ||
-        childResult.stdout?.includes("Which agents should use REA?") ||
-        allOutput.includes("Which agents should use REA?") ||
-        /\u001b\[[0-9;?]*[ -/]*[@-~]/u.test(allOutput)
-      ) {
-        finish(
-          new Error(
-            `packaged setup did not remain plain and non-interactive with redirected stdout: ${output}`,
-          ),
-        );
-        return;
-      }
-      try {
-        await assertFilesUnchanged(await unchanged, "Redirected-stdout setup");
-        finish();
-      } catch (error) {
-        finish(error);
-      }
-    });
-  });
 
 const verifySetupPlan = async ({
   commands,
@@ -245,7 +74,7 @@ const verifySetupPlan = async ({
     ["setup", "--all-detected", "--dry-run", "--json"],
     environment,
   );
-  const planned = json(plannedExecution.stdout);
+  const planned = JSON.parse(plannedExecution.stdout);
   if (supportedSetupHost) {
     const plannedActions = Array.isArray(planned?.plannedActions)
       ? planned.plannedActions
@@ -298,7 +127,7 @@ const verifyAbsentOpenCodeSetup = async ({
     ["setup", "--yes", "--client", "opencode", "--skill=false", "--json"],
     { ...environment, XDG_CONFIG_HOME: xdgConfigHome },
   );
-  const result = json(execution.stdout);
+  const result = JSON.parse(execution.stdout);
   const config = JSON.parse(await readFile(configPath, "utf8"));
   if (
     execution.status !== 0 ||
@@ -306,7 +135,7 @@ const verifyAbsentOpenCodeSetup = async ({
     !result.appliedActions.includes("configured_opencode") ||
     config.mcp?.rea?.type !== "local" ||
     config.mcp.rea.enabled !== true ||
-    JSON.stringify(config.mcp.rea.command) !== JSON.stringify([cli, "mcp"])
+    !(await isDirectRegistration(config.mcp.rea.command, cli))
   )
     throw new Error(
       `packaged setup did not configure explicitly selected OpenCode without a config file: ${JSON.stringify(result)}`,
@@ -347,8 +176,8 @@ const verifyAbsentClaudeCodeSetup = async ({
     args,
     childEnvironment,
   );
-  const first = json(firstExecution.stdout);
-  const config = json(await readFile(configPath, "utf8"));
+  const first = JSON.parse(firstExecution.stdout);
+  const config = JSON.parse(await readFile(configPath, "utf8"));
   const registration = first.doctor.identity?.registrations?.find(
     ({ client }) => client === "claude_code",
   );
@@ -356,8 +185,13 @@ const verifyAbsentClaudeCodeSetup = async ({
     firstExecution.status !== 0 ||
     first.status !== "ready" ||
     !first.appliedActions.includes("configured_claude_code") ||
-    config.mcpServers?.rea?.command !== cli ||
-    JSON.stringify(config.mcpServers?.rea?.args) !== JSON.stringify(["mcp"]) ||
+    !(await isDirectRegistration(
+      [
+        config.mcpServers?.rea?.command,
+        ...(config.mcpServers?.rea?.args ?? []),
+      ],
+      cli,
+    )) ||
     (await pathExists(markerPath)) ||
     registration?.state !== "aligned" ||
     registration.config_path !== configPath
@@ -370,7 +204,7 @@ const verifyAbsentClaudeCodeSetup = async ({
     args,
     childEnvironment,
   );
-  const repeat = json(repeatExecution.stdout);
+  const repeat = JSON.parse(repeatExecution.stdout);
   if (
     repeatExecution.status !== 0 ||
     repeat.status !== "ready" ||
@@ -398,13 +232,13 @@ const verifySetupApply = async ({
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
   );
-  const first = json(firstExecution.stdout);
+  const first = JSON.parse(firstExecution.stdout);
   const alignedExecution = await commands.runWithStatus(
     cli,
     ["setup", "--all-detected", "--json"],
     environment,
   );
-  const aligned = json(alignedExecution.stdout);
+  const aligned = JSON.parse(alignedExecution.stdout);
   const secondExecution = await commands.runWithStatus(
     cli,
     [
@@ -420,7 +254,7 @@ const verifySetupApply = async ({
     ],
     environment,
   );
-  const second = json(secondExecution.stdout);
+  const second = JSON.parse(secondExecution.stdout);
   if (supportedSetupHost) {
     if (
       first.status !== status ||
@@ -451,11 +285,16 @@ const verifySetupApply = async ({
 
 /** Verify the live registration and exact pre-setup backup bytes. */
 export const assertClientConfig = async (cli, configPath, original) => {
-  const config = json(await readFile(configPath, "utf8"));
+  const config = JSON.parse(await readFile(configPath, "utf8"));
   if (
     config.existing !== true ||
-    config.mcpServers?.rea?.command !== cli ||
-    JSON.stringify(config.mcpServers?.rea?.args) !== JSON.stringify(["mcp"])
+    !(await isDirectRegistration(
+      [
+        config.mcpServers?.rea?.command,
+        ...(config.mcpServers?.rea?.args ?? []),
+      ],
+      cli,
+    ))
   )
     throw new Error("packaged client readback failed");
   if (!(await readFile(`${configPath}.rea.backup`)).equals(original))
@@ -469,8 +308,7 @@ const assertOpenCodeConfig = async ({
 }) => {
   const contents = await readFile(configPath, "utf8");
   const errors = [];
-  const parsed = parseJsonc(contents, errors, { allowTrailingComma: true });
-  const config = parsed;
+  const config = parseJsonc(contents, errors, { allowTrailingComma: true });
   const mcp = config?.mcp;
   if (
     errors.length !== 0 ||
@@ -481,7 +319,7 @@ const assertOpenCodeConfig = async ({
     (expectedRegistration &&
       (mcp?.rea?.type !== "local" ||
         mcp.rea.enabled !== true ||
-        JSON.stringify(mcp.rea.command) !== JSON.stringify([cli, "mcp"]))) ||
+        !(await isDirectRegistration(mcp.rea.command, cli)))) ||
     (!expectedRegistration && mcp?.rea !== undefined)
   )
     throw new Error("packaged OpenCode JSONC registration readback failed");
@@ -494,11 +332,15 @@ const assertCodexSymlink = async ({
   codexTarget,
 }) => {
   const codex = await readFile(codexTarget, "utf8");
+  const registration = parseToml(codex).mcp_servers?.rea;
   if (
     !(await lstat(codexConfig)).isSymbolicLink() ||
     !(await lstat(cursorConfig)).isSymbolicLink() ||
     !codex.includes("[mcp_servers.rea]") ||
-    !codex.includes(`command = "${cli}"`) ||
+    !(await isDirectRegistration(
+      [registration?.command, ...(registration?.args ?? [])],
+      cli,
+    )) ||
     !codex.includes("startup_timeout_sec = 30") ||
     !codex.startsWith(CODEX_ORIGINAL) ||
     (await readFile(`${codexConfig}.rea.backup`, "utf8")) !== CODEX_ORIGINAL
@@ -541,7 +383,7 @@ const assertAlignedDoctor = async (commands, cli, environment) => {
     ["doctor", "--json"],
     environment,
   );
-  const alignedDoctor = json(alignedDoctorExecution.stdout);
+  const alignedDoctor = JSON.parse(alignedDoctorExecution.stdout);
   if (
     alignedDoctorExecution.status !== (alignedDoctor.healthy ? 0 : 1) ||
     alignedDoctor.identity?.skill?.state !== "aligned" ||
@@ -609,7 +451,8 @@ const verifySetupFailureRecovery = async ({
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
   );
-  const failed = json(failedExecution.stdout);
+  const failed = JSON.parse(failedExecution.stdout);
+  const cursorAfterFailure = JSON.parse(await readFile(cursorConfig, "utf8"));
   if (
     failed.status !== "needs_human" ||
     failedExecution.status !== 1 ||
@@ -617,8 +460,8 @@ const verifySetupFailureRecovery = async ({
     failed.appliedActions.length !== 0 ||
     !failed.remediation?.includes("Claude Desktop") ||
     (await readFile(claudeConfig, "utf8")) !== "malformed" ||
-    json(await readFile(cursorConfig, "utf8")).existing !== true ||
-    json(await readFile(cursorConfig, "utf8")).mcpServers?.rea !== undefined
+    cursorAfterFailure.existing !== true ||
+    cursorAfterFailure.mcpServers?.rea !== undefined
   )
     throw new Error(
       `packaged setup mutated clients after a preflight failure: ${JSON.stringify(failed)}`,
@@ -629,11 +472,16 @@ const verifySetupFailureRecovery = async ({
     ["setup", "--yes", "--all-detected", "--json"],
     environment,
   );
-  const recovered = json(recoveredExecution.stdout);
+  const recovered = JSON.parse(recoveredExecution.stdout);
+  const registration = JSON.parse(await readFile(cursorConfig, "utf8"))
+    .mcpServers?.rea;
   if (
     recovered.status !== status ||
     recoveredExecution.status !== (status === "ready" ? 0 : 1) ||
-    json(await readFile(cursorConfig, "utf8")).mcpServers?.rea?.command !== cli
+    !(await isDirectRegistration(
+      [registration?.command, ...(registration?.args ?? [])],
+      cli,
+    ))
   )
     throw new Error("packaged setup did not recover");
 };
@@ -648,7 +496,7 @@ const verifyDanglingSymlink = async ({ commands, cli, environment, home }) => {
     ["setup", "--yes", "--client", "gemini_cli", "--json"],
     environment,
   );
-  const dangling = json(danglingExecution.stdout);
+  const dangling = JSON.parse(danglingExecution.stdout);
   if (
     dangling.status !== "needs_human" ||
     danglingExecution.status !== 1 ||
@@ -680,8 +528,8 @@ const verifyUninstall = async ({
     ["uninstall", "--json"],
     environment,
   );
-  const uninstall = json(uninstallExecution.stdout);
-  const cursorAfterUninstall = json(await readFile(cursorTarget, "utf8"));
+  const uninstall = JSON.parse(uninstallExecution.stdout);
+  const cursorAfterUninstall = JSON.parse(await readFile(cursorTarget, "utf8"));
   const codexAfterUninstall = await readFile(codexTarget, "utf8");
   const openCodeErrors = [];
   const openCodeAfterUninstall = parseJsonc(
@@ -771,12 +619,14 @@ export async function verifyPackageSetup({
     ? await Promise.all([readFile(claudeConfig), readFile(cursorConfig)])
     : [];
   await verifyInteractiveSetup({
+    commands,
     command: packageRunnerCli,
     environment,
     root,
     unchangedPaths,
   });
   await verifyRedirectedStdoutSetup({
+    commands,
     command: packageRunnerCli,
     environment,
     root,
