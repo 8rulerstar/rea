@@ -1,5 +1,6 @@
 import type { JsonValue } from "../jsonValue.js";
 import {
+  ownMember,
   decodedSegment,
   isParam,
   normalizedPath,
@@ -31,7 +32,17 @@ export type WriteReason =
   | "contradicted"
   | "side-effect"
   | "unconfirmed"
-  | "incomplete-entities";
+  | "incomplete-entities"
+  | "unknown-clock";
+
+/** Whether serving a plan generates a value from the environment's global clock. */
+export const usesWriteClock = (plan: Pick<StateWritePlan, "rules">): boolean =>
+  plan.rules.some(
+    (rule) =>
+      rule.rule === "clock" ||
+      rule.rule === "held-clock" ||
+      rule.rule === "nested-clock",
+  );
 
 /** Rules that generate a value when served; the gate takes the recorded value instead. */
 export type GeneratedRule =
@@ -148,10 +159,10 @@ export const siblingTrimmedClocks = (
     const peer = trimmed.get(`${rule.format.separator}${rule.format.zone}`);
     if (peer === undefined) return rule;
     const format = later.some((fields) =>
-      showsFixedWidth(rule.format, fields[rule.field]),
+      showsFixedWidth(rule.format, ownMember(fields, rule.field)),
     )
       ? rule.format
-      : trimmedLike(rule.format, peer, values?.[rule.field]);
+      : trimmedLike(rule.format, peer, ownMember(values, rule.field));
     return format === rule.format ? rule : { ...rule, format };
   });
 };
@@ -178,7 +189,7 @@ export const keptOrders = (body: JsonObject, stored: JsonObject): string[] =>
   Object.keys(body).filter(
     (member) =>
       sortedStrings(body[member]) !== undefined &&
-      same(stored[member], body[member]),
+      same(ownMember(stored, member), body[member]),
   );
 
 /** One part of a composed string: literal text, or another written field as written, slugged, or as a clock's calendar digits. */

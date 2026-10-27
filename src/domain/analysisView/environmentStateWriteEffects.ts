@@ -1,6 +1,8 @@
+import type { StateRecordChronology } from "./StateRecordChronology.js";
 import { jsonTextCodeUnits } from "../jsonSerialization.js";
 import type { JsonValue } from "../jsonValue.js";
 import {
+  ownMember,
   isObject,
   locateItem,
   at,
@@ -103,7 +105,7 @@ export const clockEvidence = (
   draft: WriteDraft,
   field: string,
 ): JsonValue | undefined =>
-  draft.fixedWidth.get(field) ?? draft.observed?.[field];
+  draft.fixedWidth.get(field) ?? ownMember(draft.observed, field);
 
 /** A write observation plus the fields its selected read view actually covers, if any. */
 type UpdateObservation = Observed & {
@@ -132,7 +134,7 @@ export interface WriteSimulationInput {
   readonly records: readonly StateRecordFacts[];
   /** POST tools whose calls read state rather than change it. */
   readonly readOnly: ReadonlySet<string>;
-  readonly timed: boolean;
+  readonly chronology: StateRecordChronology;
   readonly views: ReadonlyMap<string, StateView>;
   readonly types: readonly StateType[];
   readonly entities: readonly StateEntity[];
@@ -146,7 +148,7 @@ export interface EffectContext {
   readonly state: SimulatedState;
   readonly io: WriteIo;
   readonly records: readonly StateRecordFacts[];
-  readonly timed: boolean;
+  readonly chronology: StateRecordChronology;
   /** Whether a record may change state: a write the capture does not show reading only. */
   readonly isWrite: (record: StateRecordFacts) => boolean;
   readonly viewOf: (ordinal: number) => StateView | undefined;
@@ -275,12 +277,15 @@ export const referencedIn =
 export const startOf = (
   context: EffectContext,
   step: WriteStep,
-): number | undefined => (context.timed ? step.record.start : undefined);
+): number | undefined =>
+  context.chronology.timeline === "recorded-start-time"
+    ? step.record.timing.start?.ms
+    : undefined;
 
 export const searchFrom = (context: EffectContext, step: WriteStep) => ({
   records: context.records,
   from: step.index,
-  ...(context.timed ? { after: step.record.end } : {}),
+  chronology: context.chronology,
   viewOf: context.viewOf,
   withBody: context.io.withBody,
   queryOf: context.io.queryOf,
@@ -599,8 +604,8 @@ export const updateEntity = (
     (rule) =>
       recordedGeneratedValue(
         rule,
-        entity.fields[rule.field],
-        after.object[rule.field],
+        ownMember(entity.fields, rule.field),
+        ownMember(after.object, rule.field),
       ),
     referencedIn(context),
   );
@@ -663,7 +668,7 @@ const fitUpdateClocks = (
       return rule;
     const format = fittedClockFormat(
       rule.format,
-      after[rule.field],
+      ownMember(after, rule.field),
       clockEvidence(draft, rule.field),
     );
     return format === undefined ? rule : { ...rule, format };
@@ -682,7 +687,10 @@ const fitUpdateClocks = (
         const held = planned.get(rule.field);
         return rule.rule === "clock" &&
           held?.rule === "clock" &&
-          matchesClockFormat(held.format, readClock(after[rule.field]))
+          matchesClockFormat(
+            held.format,
+            readClock(ownMember(after, rule.field)),
+          )
           ? { ...rule, format: held.format }
           : rule;
       }),
@@ -710,7 +718,7 @@ const contradictsGeneratedClock = (
       )
     )
       return false;
-    const previous = readClock(before[rule.field]);
+    const previous = readClock(ownMember(before, rule.field));
     if (previous === undefined) return false;
     const next = readClock(after[rule.field]);
     return (

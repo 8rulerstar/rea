@@ -173,6 +173,12 @@ distinction: it closes and deletes provider-owned profiles, but only disconnects
 from an external CDP browser. Real-browser verification checks both outcomes and
 confirms that an attached external browser remains alive.
 
+CDP connections leave Playwright's default-context overrides disabled. The
+selected page receives the declared scenario environment and temporary focus
+emulation, so actions can complete while that page is in the background.
+Its environment owner clears these overrides before disconnecting; other pages
+keep their media settings. Connecting does not create a bootstrap page.
+
 That cleanup requires REA to remain running. Abrupt termination, including
 Windows process-tree termination or POSIX `SIGKILL`, can leave the launch
 profile and Playwright artifacts behind. A profile can retain cookies, history,
@@ -472,8 +478,9 @@ the browser's wall-clock start, and `elapsed_ms`, its time from that start to
 the end of the response, when the browser reports them. The environment views
 time scenario records from these, as HAR entries are timed: the browser's start
 where it reported one, else `observed_at`, which trails it by up to tens of
-milliseconds while REA reads other responses, and a duration of 0 where the
-browser reported none. Captures made before these fields existed lack them and
+milliseconds while REA reads other responses. A duration is retained only from a
+unique terminal event that reports it; missing or ambiguous durations stay
+omitted, while an explicitly reported zero remains zero. Captures made before these fields existed lack them and
 are read in record order. REA versions before them refuse captures that carry
 them. Scenario comparisons ignore all three (`ignore_network_request_timing`).
 Requests sharing a URL remain distinct. Redirects link to the preceding

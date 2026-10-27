@@ -625,7 +625,8 @@ refused for them, as the manifest is not.
 
 Each `GET` tool whose template ends in a parameter is an item tool, and its
 type's `collection_template` is the template without that parameter; any other
-`GET` tool is a list tool of its own template. Empty segments are ignored, so a
+`GET` tool is a list tool of its own template. Interior empty segments remain
+meaningful: `/api/books` and `/api//books` name distinct collections. A single
 trailing slash names the same collection. An item tool proves its type's
 `id_field` when every initial response carries the requested path value in the
 same field of one entity object (`id_basis: "path-parameter"`). The object is
@@ -696,8 +697,9 @@ more than one query) and `rendered-oversize` (a document value whose JSON
 renders to more than 256 KiB). A document holds the value of its one `path`, so for such
 a template it says nothing about the template's other paths. A body is usable
 when its content type is
-JSON-like, it is UTF-8 text of at most 256 KiB, every number survives native
-conversion exactly, and no member is named `__proto__`.
+JSON-like, it is UTF-8 text of at most 256 KiB, and every number survives native
+conversion exactly. JSON member names, including `__proto__`, remain ordinary
+own data members through extraction and serving.
 
 A list view also learns, from its checked lines that do not list the whole
 collection, what each query parameter does, and names the result in `query`.
@@ -831,10 +833,11 @@ checked only on the members they sent; a mismatch no write explains marks the re
 `side-effect`. A plan is `served` when a read confirmed it and none
 contradicted it; otherwise its `reason` is the first of its build reason
 (`no-call`, `body-unusable`, `no-observation`, `unexplained-change`),
-`contradicted` (with `contradicted_by`), `side-effect`, `unconfirmed` and `incomplete-entities` (an update or delete that answers with the entity, when no initial entity holds every field its recorded answer shows, counting for an update the fields its rules write, so it could answer only for entities the environment created).
+`contradicted` (with `contradicted_by`), `side-effect`, `unconfirmed` and `incomplete-entities` (an update or delete that answers with the entity, when no initial entity holds every field its recorded answer shows, counting for an update the fields its rules write, so it could answer only for entities the environment created). An otherwise served plan whose learned rules generate clock values is withheld with `unknown-clock` when no global clock start is established; its learned rules and confirming reads remain retained.
 `checked_record_ordinals` lists the confirming reads, `insert` places created
 entities (sorted by a field the collection's recorded order shows, else last),
-and `write_clock` is the end of the last timed record, to the next second.
+and `write_clock` is the end of the last timed record, to the next second, when
+all request completions are known; otherwise it is null.
 
 Values in the state are recorded data, so the view refuses the same parents as
 the manifest, including those inspected with `sensitive_values`, and a
