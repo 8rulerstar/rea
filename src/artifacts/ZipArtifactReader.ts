@@ -40,14 +40,9 @@ import {
   artifactExpansionBudgetBytes,
   MINIMUM_ARTIFACT_EXPANDED_BYTES,
 } from "../domain/artifactExpansionBudget.js";
-import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
-import {
-  NonRegularFileReadError,
-  RegularFileAdmissionFailure,
-  openRegularFile,
-  sameRegularFileState,
-  type StableRegularFileDescriptor,
-} from "../filesystem/RegularFile.js";
+import type { StableRegularFileDescriptor } from "../filesystem/RegularFile.js";
+import { ArtifactFileSource } from "./ArtifactFileSource.js";
+import { readFileHandleRange } from "../filesystem/readFileHandleRange.js";
 
 const ZIP_UTF8_DECODER = new TextDecoder("utf-8", {
   fatal: true,
@@ -56,17 +51,16 @@ const ZIP_UTF8_DECODER = new TextDecoder("utf-8", {
 
 class NodeFileReader extends Reader<string> {
   #handle: FileHandle | undefined;
-  #owner: OwnedFileHandle | undefined;
+  readonly #source: ArtifactFileSource;
   #initPromise: Promise<void> | undefined;
-  readonly #ownsHandle: boolean;
 
   constructor(
     private readonly path: string,
     private readonly maximumReadBytes?: number,
-    private readonly admitted?: StableRegularFileDescriptor,
+    admitted?: StableRegularFileDescriptor,
   ) {
     super(path);
-    this.#ownsHandle = admitted === undefined;
+    this.#source = new ArtifactFileSource(path, "ZIP", admitted);
   }
 
   override init(): Promise<void> {
@@ -75,55 +69,20 @@ class NodeFileReader extends Reader<string> {
   }
 
   async #initialize(): Promise<void> {
-    let source: StableRegularFileDescriptor;
-    try {
-      source =
-        this.admitted ??
-        (await openRegularFile(this.path, { symlinks: "reject" }));
-      this.#handle = source.handle;
-      if (this.#ownsHandle) this.#owner = new OwnedFileHandle(source.handle);
-    } catch (cause: unknown) {
-      if (cause instanceof RegularFileAdmissionFailure) {
-        this.#owner = cause.owner;
-        const primary =
-          cause.cause instanceof NonRegularFileReadError
-            ? new ArtifactReaderFailure(
-                "format",
-                `ZIP source is not a regular file: ${this.path}`,
-                { cause: cause.cause },
-              )
-            : cause.cause;
-        throw ArtifactReaderFailure.withCleanup(
-          primary,
-          ArtifactReaderFailure.cleanupObservation(
-            cause.cleanupCause,
-            this.path,
-          ),
-        );
-      }
-      if (cause instanceof NonRegularFileReadError)
-        throw new ArtifactReaderFailure(
-          "format",
-          `ZIP source is not a regular file: ${this.path}`,
-          { cause },
-        );
-      throw cause;
-    }
-    if (this.admitted !== undefined) {
-      const metadata = await source.handle.stat();
-      if (!sameRegularFileState(source.initial, metadata))
-        throw new ArtifactReaderFailure(
-          "integrity",
-          `ZIP source identity changed before reading: ${this.path}`,
-        );
-    }
+    const source = await this.#source.read();
+    this.#handle = source.handle;
     this.size = source.initial.size;
+  }
+
+  async verify(): Promise<void> {
+    await this.#source.read();
   }
 
   override async readUint8Array(
     index: number,
     length: number,
   ): Promise<Uint8Array> {
+    await this.verify();
     const handle = this.#handle;
     if (handle === undefined) throw new Error("ZIP reader is not initialized");
     const readBytes = Math.min(length, this.size - index);
@@ -142,31 +101,19 @@ class NodeFileReader extends Reader<string> {
         "limit",
         `ZIP metadata read requires ${readBytes} bytes, exceeding the ${this.maximumReadBytes}-byte read budget`,
       );
-    const bytes = Buffer.alloc(readBytes);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const { bytesRead } = await handle.read(
-        bytes,
-        offset,
-        bytes.length - offset,
-        index + offset,
+    const bytes = await readFileHandleRange(handle, index, readBytes);
+    if (bytes.length !== readBytes)
+      throw new ArtifactReaderFailure(
+        "integrity",
+        `ZIP source ended before its admitted extent: ${this.path}`,
       );
-      if (bytesRead === 0)
-        throw new ArtifactReaderFailure(
-          "integrity",
-          `ZIP source ended before its admitted extent: ${this.path}`,
-        );
-      offset += bytesRead;
-    }
+    await this.verify();
     return bytes;
   }
 
   async closeHandle(): Promise<void> {
-    if (!this.#ownsHandle) return;
     await this.#initPromise?.catch(() => undefined);
-    if (this.#owner === undefined) return;
-    await this.#owner.close();
-    this.#owner = undefined;
+    await this.#source.close();
     this.#handle = undefined;
   }
 }
@@ -216,6 +163,7 @@ export class ZipArtifactReader implements ArtifactReader {
     this.#enumerations.add(enumeration);
     try {
       for await (const entry of enumeration) {
+        await this.#source.verify();
         this.#assertOpen(signal);
         // ZIP member identity is its directory occurrence, not its filename.
         // Logical path uniqueness belongs to the artifact inventory boundary.
@@ -253,6 +201,7 @@ export class ZipArtifactReader implements ArtifactReader {
           });
         yield metadata;
       }
+      await this.#source.verify();
     } finally {
       this.#enumerations.delete(enumeration);
     }
@@ -280,7 +229,11 @@ export class ZipArtifactReader implements ArtifactReader {
           "Encrypted ZIP entry is unsupported",
         ),
       );
-    const { output, completion } = extractStream(source, signal);
+    const { output, completion } = extractStream(
+      source,
+      () => this.#source.verify(),
+      signal,
+    );
     this.#streams.set(output, completion);
     // Producer completion can precede consumption of a small buffered member.
     // Retain the output until both it and its producer have finished.
@@ -435,6 +388,7 @@ const decodeStrictZipUtf8 = (bytes: Uint8Array, message: string): string => {
 
 const extractStream = (
   entry: FileEntry,
+  verifySource: () => Promise<void>,
   signal?: AbortSignal,
 ): { readonly output: Readable; readonly completion: Promise<void> } => {
   const output = new PassThrough();
@@ -465,20 +419,24 @@ const extractStream = (
       if (!output.write(Buffer.from(chunk)))
         await once(output, "drain", { signal: controller.signal });
     },
-    close: () => {
+    close: async () => {
+      await verifySource();
+      assertArtifactReadActive(signal);
       output.end();
     },
     abort: (reason) => {
       output.destroy(toError(typedZipFailure(reason)));
     },
   });
-  const completion = entry
-    .getData(writable, {
-      signal: controller.signal,
-      checkSignature: true,
-      checkOverlappingEntry: true,
-      onprogress: () => assertArtifactReadActive(signal),
-    })
+  const completion = verifySource()
+    .then(() =>
+      entry.getData(writable, {
+        signal: controller.signal,
+        checkSignature: true,
+        checkOverlappingEntry: true,
+        onprogress: () => assertArtifactReadActive(signal),
+      }),
+    )
     .then(
       () => undefined,
       (cause: unknown) => {

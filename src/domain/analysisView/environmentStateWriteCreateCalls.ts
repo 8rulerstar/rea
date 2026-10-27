@@ -2,19 +2,28 @@ import type { JsonValue } from "../jsonValue.js";
 import { ownMember, same, type JsonObject } from "./environmentStateRules.js";
 import { storedKinds } from "./environmentStateWriteApply.js";
 import { fittedClockFormat } from "./environmentStateWriteClockFormats.js";
+import { composedValue } from "./environmentStateWriteComposed.js";
 import {
   alikeRules,
+  isBlankValue,
   type FieldRule,
   type WriteBody,
 } from "./environmentStateWriteRules.js";
+import { slugOf, type Ampersand } from "./environmentStateWriteValues.js";
 
 type Default = { readonly member: string; readonly value: JsonValue };
+type Blank = NonNullable<WriteBody["blank"]>[number];
 
 /** What earlier calls showed that a merge must respect: members stored unsorted as sent, and the value showing each clock's width. */
 export interface EarlierEvidence {
   readonly kept: ReadonlySet<string>;
   readonly clockOf: (field: string) => JsonValue | undefined;
+  /** How the plan's accepted calls and the type's held entities spelled `&` in each field's slug; absent where none showed one. */
+  readonly ampersands?: ReadonlyMap<string, AmpersandSpelling>;
 }
+
+/** How a field's slug showed `&`: dropped, as the word, or in a way neither spelling gives. */
+export type AmpersandSpelling = "dropped" | Ampersand | "unknown";
 
 /** The plan's rule for a field and a later call's agree: equal, or clocks one spelling covers given what earlier calls showed. */
 const agreeing = (
@@ -24,10 +33,18 @@ const agreeing = (
     readonly field: string;
     readonly later: JsonValue | undefined;
     readonly earlier: EarlierEvidence;
+    readonly exemplar: JsonObject;
+    readonly laterEntity: JsonObject;
   },
 ): FieldRule | undefined => {
   const alike = alikeRules(held, later, values.earlier.kept);
   if (alike !== undefined) return alike;
+  const spelled = ampersandSpelled(
+    held,
+    { rule: later, entity: values.laterEntity },
+    values.earlier.ampersands?.get(values.field),
+  );
+  if (spelled !== undefined) return spelled;
   if (held.rule !== "clock" || later.rule !== "clock") return undefined;
   const format = fittedClockFormat(
     held.format,
@@ -35,6 +52,134 @@ const agreeing = (
     values.earlier.clockOf(values.field),
   );
   return format === undefined ? undefined : { ...held, format };
+};
+
+/** A rule with its slugs spelled the default way. */
+const unspelled = (rule: FieldRule): FieldRule => {
+  if (rule.rule === "slug") {
+    const { ampersand: _ampersand, ...plain } = rule;
+    return plain;
+  }
+  if (rule.rule !== "composed") return rule;
+  return {
+    ...rule,
+    parts: rule.parts.map((part) =>
+      "as" in part && part.as === "slug"
+        ? { from: part.from, as: "slug" as const }
+        : part,
+    ),
+  };
+};
+
+/** Whether a call's entity holds `&` in a field the rule slugs, which shows how it spells one. */
+const showsAmpersand = (rule: FieldRule, entity: JsonObject): boolean =>
+  (rule.rule === "slug"
+    ? [rule.from]
+    : rule.rule === "composed"
+      ? rule.parts.flatMap((part) =>
+          "as" in part && part.as === "slug" ? [part.from] : [],
+        )
+      : []
+  ).some((field) => {
+    const value = ownMember(entity, field);
+    return typeof value === "string" && value.includes("&");
+  });
+
+/**
+ * Two calls' rules that differ only in how a slug spells `&`: the one that spells it as the word, when the call
+ * spelling it otherwise slugged no `&`, and no call the plan accepted nor entity the type held dropped one (`shown`).
+ */
+export const ampersandSpelled = (
+  held: FieldRule,
+  later: { readonly rule: FieldRule; readonly entity: JsonObject },
+  shown: AmpersandSpelling | undefined,
+): FieldRule | undefined => {
+  const plainHeld = unspelled(held);
+  if (!same(plainHeld, unspelled(later.rule))) return undefined;
+  const heldSpells = !same(held, plainHeld);
+  if (heldSpells === !same(later.rule, unspelled(later.rule))) return undefined;
+  if (heldSpells)
+    return showsAmpersand(later.rule, later.entity) ? undefined : held;
+  return shown === "dropped" || shown === "unknown" ? undefined : later.rule;
+};
+
+/** How a rule's slug spells `&`, for a rule that slugs a field. */
+const slugSpelling = (rule: FieldRule): AmpersandSpelling | undefined => {
+  if (rule.rule === "slug") return rule.ampersand ?? "dropped";
+  if (rule.rule !== "composed") return undefined;
+  for (const part of rule.parts)
+    if ("as" in part && part.as === "slug") return part.ampersand ?? "dropped";
+  return undefined;
+};
+
+/** Note how a call that slugged `&` spelled it in each field its own rules slug. */
+export const noteAmpersands = (
+  ampersands: Map<string, AmpersandSpelling>,
+  rules: readonly FieldRule[],
+  entity: JsonObject,
+): void => {
+  for (const rule of rules) {
+    const spelling = slugSpelling(rule);
+    if (spelling !== undefined && showsAmpersand(rule, entity))
+      ampersands.set(rule.field, spelling);
+  }
+};
+
+/** Exact spelling observations in held entities; absence and contradictory spellings remain distinct. */
+export const heldAmpersandSpellings = (
+  rule: FieldRule,
+  held: readonly JsonObject[],
+): ReadonlySet<AmpersandSpelling> => {
+  const observed = new Set<AmpersandSpelling>();
+  if (slugSpelling(rule) === undefined) return observed;
+  const plain = unspelled(rule);
+  for (const entity of held) {
+    if (!showsAmpersand(rule, entity)) continue;
+    const stored = ownMember(entity, rule.field);
+    if (stored === undefined) continue;
+    const source =
+      rule.rule === "slug" ? ownMember(entity, rule.from) : undefined;
+    const spelled = (spelling: Ampersand | undefined): string | undefined =>
+      rule.rule === "slug"
+        ? typeof source === "string"
+          ? slugOf(source, spelling)
+          : undefined
+        : plain.rule === "composed"
+          ? composedValue(
+              plain.parts.map((part) =>
+                "as" in part && part.as === "slug" && spelling !== undefined
+                  ? { ...part, ampersand: spelling }
+                  : part,
+              ),
+              entity,
+            )
+          : undefined;
+    observed.add(
+      spelled(undefined) === stored
+        ? "dropped"
+        : spelled("and") === stored
+          ? "and"
+          : "unknown",
+    );
+  }
+  return observed;
+};
+
+/** Retain the constraints later rule refinement needs from the same owned observations. */
+export const noteHeldAmpersands = (
+  ampersands: Map<string, AmpersandSpelling>,
+  rules: readonly FieldRule[],
+  held: readonly JsonObject[],
+): void => {
+  for (const rule of rules) {
+    const observed = heldAmpersandSpellings(rule, held);
+    const known = ampersands.get(rule.field);
+    if (observed.has("dropped")) ampersands.set(rule.field, "dropped");
+    else if (observed.has("unknown") && known !== "dropped")
+      ampersands.set(rule.field, "unknown");
+    else if (observed.has("and") && known === undefined)
+      ampersands.set(rule.field, "and");
+  }
 };
 
 /** Defaults joined, undefined when two calls showed one member left out at different values. */
@@ -80,6 +225,8 @@ const addedReference = (
           field,
           later: later.entity[field],
           earlier: calls.earlier,
+          exemplar: calls.exemplar,
+          laterEntity: later.entity,
         });
   return rule === undefined ? undefined : { rule };
 };
@@ -113,6 +260,8 @@ const mergedField = (
       field,
       later: later.entity[field],
       earlier: calls.earlier,
+      exemplar,
+      laterEntity: later.entity,
     });
     return rule === undefined ? undefined : { rule };
   }
@@ -203,6 +352,22 @@ export const mergedCreatePlan = (
   };
 };
 
+/** Every empty value recorded calls sent a member, the earliest first. */
+const joinedBlanks = (
+  held: readonly Blank[],
+  added: readonly Blank[],
+): Blank[] => {
+  const blank = [...held];
+  for (const entry of added)
+    if (
+      !blank.some(
+        ({ member, sent }) => member === entry.member && same(sent, entry.sent),
+      )
+    )
+      blank.push(entry);
+  return blank;
+};
+
 /** Two calls' body contracts joined, undefined when a member one accepts with any value the other fixes, or both fix it at different values. */
 const mergedBody = (
   body: WriteBody,
@@ -228,6 +393,7 @@ const mergedBody = (
   const added = contract.accepted.filter(
     (member) => !body.accepted.includes(member),
   );
+  const blank = joinedBlanks(body.blank ?? [], contract.blank ?? []);
   return {
     ...body,
     accepted: [...body.accepted, ...added],
@@ -235,10 +401,12 @@ const mergedBody = (
       ...body.fixed,
       ...contract.fixed.filter((entry) => !fixed.has(entry.member)),
     ],
-    required: body.required.filter((member) =>
-      Object.hasOwn(later.body, member),
+    required: body.required.filter(
+      (member) =>
+        Object.hasOwn(later.body, member) && !isBlankValue(later.body[member]),
     ),
     identity: body.identity ?? contract.identity,
     kinds: [...body.kinds, ...storedKinds(added, exemplar, later.entity)],
+    ...(blank.length === 0 ? {} : { blank }),
   };
 };
