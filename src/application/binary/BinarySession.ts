@@ -93,6 +93,18 @@ interface CleanupFailureTracker {
   readonly onFailure: (failure: AnalysisError) => void;
 }
 
+/** Compose live cleanup facts without treating an unowned rejection as completion. */
+const sessionCleanupFailure = (
+  primary: AnalysisError,
+  cleanup: AnalysisError,
+  operation: string,
+): AnalysisError => {
+  const failure = analysisErrorWithCleanupFailure(primary, cleanup, operation);
+  return cleanup.cleanupIncomplete
+    ? failure.bindCleanupDependencies([primary, cleanup])
+    : failure;
+};
+
 const trackCleanupFailures = (
   signal: AbortSignal | undefined,
   operation: string,
@@ -120,20 +132,16 @@ const trackCleanupFailures = (
           });
         cleanupFailure = failure;
       } else {
-        cleanupFailure = analysisErrorWithCleanupFailure(
-          cleanupFailure,
-          failure,
-          operation,
-        );
+        // Both operands are cleanup observations here. An earlier rejection
+        // without a live lifecycle must not disappear when a later owner resolves.
+        cleanupFailure = cleanupFailure.cleanupIncomplete
+          ? sessionCleanupFailure(cleanupFailure, failure, operation)
+          : analysisErrorWithCleanupFailure(cleanupFailure, failure, operation);
       }
       error =
         cancellation === undefined
           ? cleanupFailure
-          : analysisErrorWithCleanupFailure(
-              cancellation,
-              cleanupFailure,
-              operation,
-            );
+          : sessionCleanupFailure(cancellation, cleanupFailure, operation);
     },
   };
 };
@@ -270,7 +278,7 @@ export class BinarySession
         return err(
           closed.ok
             ? started.error
-            : analysisErrorWithCleanupFailure(
+            : sessionCleanupFailure(
                 started.error,
                 closed.error,
                 "open_bundle_resources",
@@ -286,7 +294,7 @@ export class BinarySession
         return err(
           closed.ok
             ? cancelled
-            : analysisErrorWithCleanupFailure(
+            : sessionCleanupFailure(
                 cancelled,
                 closed.error,
                 "open_bundle_resources",
@@ -333,7 +341,7 @@ export class BinarySession
           cleanupFailures.error ??
             (candidateClosed.ok
               ? cancelled
-              : analysisErrorWithCleanupFailure(
+              : sessionCleanupFailure(
                   cancelled,
                   candidateClosed.error,
                   "open_bundle_resources",
@@ -905,7 +913,8 @@ export class BinarySession
           next,
           "close_binary",
         );
-        resourceFailure.bindCleanupDependencies([previous, next]);
+        if (previous.cleanupIncomplete && next.cleanupIncomplete)
+          resourceFailure.bindCleanupDependencies([previous, next]);
       }
     if (!closed.ok && resourceFailure !== undefined) {
       const combined = analysisErrorWithCleanupFailure(
@@ -913,7 +922,8 @@ export class BinarySession
         resourceFailure,
         "close_binary",
       );
-      combined.bindCleanupDependencies([closed.error, resourceFailure]);
+      if (closed.error.cleanupIncomplete && resourceFailure.cleanupIncomplete)
+        combined.bindCleanupDependencies([closed.error, resourceFailure]);
       return err(combined);
     }
     if (!closed.ok) return closed;
@@ -939,14 +949,20 @@ export class BinarySession
       );
       if (!closed.ok) {
         retained.push(session);
+        const previous = failure;
         failure =
-          failure === undefined
+          previous === undefined
             ? closed.error
             : analysisErrorWithCleanupFailure(
-                failure,
+                previous,
                 closed.error,
                 "close_binary",
               );
+        if (
+          previous?.cleanupIncomplete === true &&
+          closed.error.cleanupIncomplete
+        )
+          failure.bindCleanupDependencies([previous, closed.error]);
       }
     }
     this.#pendingBundleResourceCleanup = retained;
@@ -1006,11 +1022,7 @@ export class BinarySession
       onCleanupFailure === undefined ? {} : { onCleanupFailure },
     );
     if (!closed.ok)
-      return analysisErrorWithCleanupFailure(
-        primary,
-        closed.error,
-        "open_binary",
-      );
+      return sessionCleanupFailure(primary, closed.error, "open_binary");
     return this.#restoreAfterFailedOpen(previous, primary);
   }
 
@@ -1021,7 +1033,7 @@ export class BinarySession
     const restored = await this.#restore(previous);
     return restored.ok
       ? primary
-      : analysisErrorWithCleanupFailure(primary, restored.error, "open_binary");
+      : sessionCleanupFailure(primary, restored.error, "open_binary");
   }
 
   /** Describe the active binary session. */
@@ -1254,6 +1266,15 @@ export class BinarySession
     )
       this.#active.nativeSourceAdmitted = true;
     this.#observeRuntimeAvailability(name, execution);
+    // Source facts belong to the observation, even when this query cannot be
+    // replayed (for example a Ghidra procedure read without a document selector).
+    if (execution.ok && execution.value.sourceEvidence !== undefined) {
+      const sourcesRecorded = recordEvidenceSources(
+        (source) => this.recordEvidence(source),
+        execution.value.sourceEvidence,
+      );
+      if (!sourcesRecorded.ok) return sourcesRecorded;
+    }
     if (
       execution.ok &&
       cacheable &&
@@ -1276,11 +1297,6 @@ export class BinarySession
         },
         "observed",
       );
-      const sourcesRecorded = recordEvidenceSources(
-        (source) => this.recordEvidence(source),
-        execution.value.sourceEvidence ?? [],
-      );
-      if (!sourcesRecorded.ok) return sourcesRecorded;
       const recorded = this.recordEvidence(evidence);
       if (!recorded.ok) return recorded;
       const retained = { ...execution.value, evidenceId: evidence.evidence_id };
@@ -1458,13 +1474,7 @@ export class BinarySession
     const closed = await this.#retireClient(run);
     return closed.ok
       ? ok(null)
-      : err(
-          analysisErrorWithCleanupFailure(
-            started.error,
-            closed.error,
-            "open_binary",
-          ),
-        );
+      : err(sessionCleanupFailure(started.error, closed.error, "open_binary"));
   }
 
   async #waitForTransition(

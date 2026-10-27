@@ -1,4 +1,9 @@
 import {
+  javaScriptRouteInventorySourceSchema,
+  javaScriptRouteInventorySchema,
+} from "../javascript/javascriptRouteInventory.js";
+import { nativeFunctionMatchingContextSchema } from "../native/functionMatching.js";
+import {
   nativeObservationViewRequestSchema,
   nativeContextViewRequestSchema,
   nativeObservationItemsSchemas,
@@ -58,10 +63,16 @@ import {
   javaScriptRoutesViewRequestSchema,
   javaScriptRoutesViewItemsSchema,
   javaScriptRoutesViewSummarySchema,
-  javaScriptRoutesSourceReferenceSchema,
   projectJavaScriptRoutesView,
 } from "./javascriptRoutesView.js";
-import { javaScriptRouteInventorySchema } from "../javascript/javascriptRouteInventory.js";
+import {
+  webBundleViewRequestSchema,
+  webBundleViewItemsSchema,
+  webBundleSummarySchema,
+  projectWebBundleView,
+} from "./webBundleView.js";
+import { webBundleAnalysisSchema } from "../webBundleAnalysis.js";
+import { recordedBrowserOriginSchema } from "../browserObservation.js";
 import {
   sourceToBundleViewRequestSchema,
   sourceToBundleViewItemsSchema,
@@ -114,7 +125,6 @@ import {
   projectNativeFunctionMatchingView,
   nativeFunctionMatchingViewRequestSchema,
   nativeFunctionMatchingViewItemsSchema,
-  nativeFunctionMatchingViewContextSchema,
 } from "./nativeFunctionMatchingView.js";
 import {
   protobufViewRequestSchema,
@@ -185,7 +195,7 @@ import { bundleResourceRootSchema } from "../apple/bundleResourceRoot.js";
 import {
   functionDossierSchema,
   functionFacetAvailabilitySchema,
-} from "../hopperValues.js";
+} from "../native/functionDossier.js";
 import {
   artifactGraphManifestSchema,
   artifactInventoryCoverageSchema,
@@ -239,7 +249,7 @@ import {
 import {
   machoSummarySchema,
   machoViewContextSchema,
-  machoViewItemSchema,
+  machoViewRows,
   machoViewRequestSchema,
   projectMachoView,
 } from "./machoView.js";
@@ -402,6 +412,7 @@ export const analysisViewRequestSchema = z.discriminatedUnion("kind", [
   pythonPycViewRequestSchema,
   nativeExportsViewRequestSchema,
   javaScriptRoutesViewRequestSchema,
+  webBundleViewRequestSchema,
   nativeFunctionMatchingViewRequestSchema,
   sourceToBundleViewRequestSchema,
   summaryViewSchema,
@@ -885,8 +896,34 @@ export const javaScriptRoutesViewResultSchema = z.strictObject({
   inventory_capacity: javaScriptRouteInventorySchema.shape.capacity,
   capture_url: z.string().nullable(),
   items: javaScriptRoutesViewItemsSchema,
-  sources: z.array(javaScriptRoutesSourceReferenceSchema),
+  sources: z.array(javaScriptRouteInventorySourceSchema),
   summary: javaScriptRoutesViewSummarySchema.nullable(),
+  byte_limited: z.boolean(),
+});
+
+/** Compact web bundle findings retain endpoint observations and inference candidates. */
+export const webBundleSummaryViewResultSchema = z.strictObject({
+  ...summaryViewResultBase,
+  artifact: artifactSchema.nullable(),
+  parent_operation: z.literal("analyze_web_bundle"),
+  target_url: z.string(),
+  target_origin: recordedBrowserOriginSchema.nullable().optional(),
+  source_unknowns: webBundleAnalysisSchema.shape.unknowns,
+  summary: webBundleSummarySchema,
+});
+
+export const webBundlePageViewResultSchema = z.strictObject({
+  ...viewResultBase,
+  artifact: artifactSchema.nullable(),
+  kind: z.literal("web-bundle"),
+  parent_operation: z.literal("analyze_web_bundle"),
+  target_url: z.string(),
+  target_origin: recordedBrowserOriginSchema.nullable().optional(),
+  source_unknowns: webBundleAnalysisSchema.shape.unknowns,
+  view: webBundleViewRequestSchema,
+  completeness: webBundleAnalysisSchema.shape.completeness,
+  items: webBundleViewItemsSchema,
+  summary: webBundleSummarySchema.nullable(),
   byte_limited: z.boolean(),
 });
 
@@ -971,7 +1008,7 @@ export const nativeFunctionMatchingSummaryViewResultSchema = z.strictObject({
   ...summaryViewResultBase,
   artifact: z.null(),
   parent_operation: z.literal("match_native_functions"),
-  summary: nativeFunctionMatchingViewContextSchema,
+  summary: nativeFunctionMatchingContextSchema,
 });
 
 /** Rows observed for one facet, or null when the provider declared that facet unavailable. */
@@ -1083,15 +1120,46 @@ export const sourceToBundlePageViewResultSchema = z.strictObject({
   items: sourceToBundleViewItemsSchema,
 });
 
+/** Bind the existing nested facet selection to its producer-owned rows. */
+const machoPage = <Facet extends keyof typeof machoViewRows>(facet: Facet) =>
+  z.strictObject({
+    ...viewResultBase,
+    ...machoViewContextSchema.shape,
+    kind: z.literal("macho"),
+    parent_operation: z.literal("inspect_macho"),
+    view: machoViewRequestSchema.extend({ facet: z.literal(facet) }),
+    item: machoViewRows[facet],
+  });
+
+// The input tag preserves kind dispatch; the output projection advertises the
+// correlated pages without adding a discriminator to their public wire shape.
+const machoPageViewResultSchema = z
+  .object({ kind: z.literal("macho") })
+  .passthrough()
+  .pipe(
+    z.union([
+      machoPage("entrypoints"),
+      machoPage("architectures"),
+      machoPage("build_metadata"),
+      machoPage("load_commands"),
+      machoPage("dependencies"),
+      machoPage("imports"),
+      machoPage("exports"),
+      machoPage("segments"),
+      machoPage("provenance"),
+    ]),
+  );
+
 /** Projected facts for one selected view of retained analysis Evidence. */
 export const analysisViewResultSchema = z.discriminatedUnion("kind", [
   nativeObservationPageViewResultSchema,
   nativeContextViewResultSchema,
   javaScriptRoutesViewResultSchema,
+  webBundlePageViewResultSchema,
   sourceToBundlePageViewResultSchema,
   z.strictObject({
     ...viewResultBase,
-    ...nativeFunctionMatchingViewContextSchema.shape,
+    ...nativeFunctionMatchingContextSchema.shape,
     kind: z.literal("function-matches"),
     artifact: z.null(),
     view: nativeFunctionMatchingViewRequestSchema,
@@ -1176,6 +1244,7 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     nativeFunctionMatchingSummaryViewResultSchema,
     nativeFunctionSummaryViewResultSchema,
     sourceToBundleSummaryViewResultSchema,
+    webBundleSummaryViewResultSchema,
   ]),
   z.strictObject({
     ...viewResultBase,
@@ -1304,14 +1373,7 @@ export const analysisViewResultSchema = z.discriminatedUnion("kind", [
     source_coverage: desktopCoverageSchema,
     parent_operation: z.literal("inspect_desktop_application"),
   }),
-  z.strictObject({
-    kind: z.literal("macho"),
-    view: machoViewRequestSchema,
-    item: machoViewItemSchema,
-    ...viewResultBase,
-    ...machoViewContextSchema.shape,
-    parent_operation: z.literal("inspect_macho"),
-  }),
+  machoPageViewResultSchema,
   z.strictObject({
     kind: z.literal("interface-builder"),
     view: interfaceBuilderViewRequestSchema,
@@ -1516,6 +1578,7 @@ const retainedViewProjectors = new Map<string, typeof projectWasmArtifactView>([
   ["compare_source_to_bundle", projectSourceToBundleView],
   ["inspect_artifact", projectArtifactInventoryView],
   ["inventory_artifact", projectArtifactInventoryView],
+  ["analyze_web_bundle", projectWebBundleView],
 ]);
 
 /** Budgets retained across source admission and the selected grouping projection. */
@@ -1617,6 +1680,10 @@ export const projectAnalysisView = (
     );
   if (view.kind === "javascript-routes") {
     const projected = projectJavaScriptRoutesView(parent, view);
+    return projected.ok ? ok(sealAnalysisView(projected.value)) : projected;
+  }
+  if (view.kind === "web-bundle") {
+    const projected = projectWebBundleView(parent, view);
     return projected.ok ? ok(sealAnalysisView(projected.value)) : projected;
   }
   if (isGroupingView(view)) {
