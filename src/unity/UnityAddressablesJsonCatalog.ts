@@ -298,7 +298,10 @@ interface Tables {
 }
 
 /** Validate every table and bucket before any row text is materialized. */
-const readTables = (catalog: Json): Tables => {
+const readTables = (
+  catalog: Json,
+  options: UnityAddressablesReadOptions,
+): Tables => {
   const strings = (name: string) =>
     field(catalog, name, isStringArray, "a string array");
   const buckets = base64(catalog, "m_BucketDataString");
@@ -334,6 +337,9 @@ const readTables = (catalog: Json): Tables => {
       "truncated-record",
       `entry data has ${entryData.length} bytes for ${entryCount} entries`,
     );
+  // Charge row counts before building any bucket; each bucket's entry count
+  // is also checked against the remaining bucket bytes before its array.
+  options.beforeRows?.({ keys: bucketCount, locations: entryCount });
   const rows: Tables["buckets"] = [];
   let at = 4;
   for (let index = 0; index < bucketCount; index++) {
@@ -474,11 +480,7 @@ export function* readJsonCatalogSteps(
   options: UnityAddressablesReadOptions,
 ): UnityAddressablesSteps {
   const catalog = parseCatalog(bytes);
-  const tables = readTables(catalog);
-  options.beforeRows?.({
-    keys: tables.buckets.length,
-    locations: tables.entryCount,
-  });
+  const tables = readTables(catalog, options);
   const providers = jsonProviders(catalog, options);
   const keys: UnityAddressablesKey[] = [];
   for (let index = 0; index < tables.buckets.length; index++) {

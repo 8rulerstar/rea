@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { readUnityAddressablesCatalogSteps } from "../../../src/unity/UnityAddressablesCatalog.js";
 import { UnityAddressablesFormatFailure } from "../../../src/unity/UnityAddressablesFormat.js";
 import type { UnityAddressablesReadOptions } from "../../../src/unity/UnityAddressablesShared.js";
@@ -560,4 +560,72 @@ it("reports null bundle request options as malformed, not a reader error", () =>
     },
   });
   expect(failure(bytes).reason).toBe("missing-field");
+});
+
+it("never decodes discarded assembly names and refuses overlapping strings before caching them", () => {
+  const catalog: FixtureCatalog = {
+    keys: Array.from({ length: 64 }, (_, index) => ({
+      key: { kind: "int32" as const, value: index },
+      locations: [],
+    })),
+    locations: [],
+  };
+  const bytes = binaryCatalog(catalog);
+  const keysOffset = bytes.readUInt32LE(8);
+  // Point every key type's assembly at a different offset inside one long
+  // UTF-16 run whose length prefix covers most of it, so offsets overlap.
+  const run = Buffer.alloc(4 + 64 * 8 + 4096);
+  const base = bytes.length;
+  const grown = Buffer.concat([bytes, run]);
+  for (let index = 0; index < 64; index++) {
+    const at = base + index * 8;
+    grown.writeUInt32LE(4096 + (64 - index) * 8, at);
+    const object = grown.readUInt32LE(keysOffset + index * 8);
+    const type = grown.readUInt32LE(object);
+    grown.writeUInt32LE(((at + 4) | 0x80000000) >>> 0, type);
+  }
+  // Key objects drop the assembly, so the crafted names are never read.
+  expect(decode(grown).keys.map(({ value }) => value)).toHaveLength(64);
+  // The same overlapping offsets as class names are cached, and refused once
+  // their decoded bytes exceed what the catalog holds without overlap.
+  for (let index = 0; index < 64; index++) {
+    const object = grown.readUInt32LE(keysOffset + index * 8);
+    const type = grown.readUInt32LE(object);
+    grown.writeUInt32LE(((base + index * 8 + 4) | 0x80000000) >>> 0, type + 4);
+  }
+  expect(failure(grown).reason).toBe("string-overlap");
+});
+
+it("refuses an oversized binary key table from its length before reading records", () => {
+  const bytes = binaryCatalog();
+  const keysOffset = bytes.readUInt32LE(8);
+  const counts: number[] = [];
+  const read = vi.spyOn(Buffer.prototype, "readUInt32LE");
+  const before = read.mock.calls.length;
+  expect(() =>
+    decode(bytes, {
+      beforeRows: ({ keys }) => {
+        counts.push(keys);
+        throw new Error("over budget");
+      },
+    }),
+  ).toThrow("over budget");
+  // Only the header and the key table length were read; no key record was.
+  const offsets = read.mock.calls.slice(before).map(([at]) => Number(at ?? 0));
+  read.mockRestore();
+  expect(counts).toEqual([bytes.readUInt32LE(keysOffset - 4) / 8]);
+  expect(offsets.every((at) => at < 32 || at === keysOffset - 4)).toBe(true);
+});
+
+it("charges JSON row counts before building any bucket", () => {
+  const events: string[] = [];
+  expect(() =>
+    decode(jsonCatalog(), {
+      beforeRows: ({ keys }) => {
+        events.push(`rows:${keys}`);
+        throw new Error("over budget");
+      },
+    }),
+  ).toThrow("over budget");
+  expect(events).toHaveLength(1);
 });

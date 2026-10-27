@@ -26,6 +26,8 @@ const BUNDLE_OPTIONS_BYTES = 20;
 /** Decoded once per offset; keys, paths and type names repeat across rows. */
 class BinaryReader {
   readonly #segments = new Map<number, string>();
+  /** Serialized bytes behind cached segments; non-overlapping strings fit in the file. */
+  #segmentBytes = 0;
   constructor(
     readonly bytes: Buffer,
     private readonly options: UnityAddressablesReadOptions,
@@ -44,9 +46,9 @@ class BinaryReader {
       );
   }
 
-  /** Length-prefixed u32 array; returns element offsets, never copies. */
-  array(id: number, width: number, label: string): number[] {
-    if (id === NONE) return [];
+  /** Element count of a length-prefixed array, validated without allocating. */
+  count(id: number, width: number, label: string): number {
+    if (id === NONE) return 0;
     const size = this.u32(id - 4, `${label} length`);
     if (size % width !== 0)
       throw new UnityAddressablesFormatFailure(
@@ -54,9 +56,7 @@ class BinaryReader {
         `${label} at ${id} has ${size} bytes, not a multiple of ${width}`,
       );
     this.need(id, size, label);
-    const items: number[] = [];
-    for (let at = id; at < id + size; at += width) items.push(at);
-    return items;
+    return size / width;
   }
 
   #segment(id: number, label: string): string {
@@ -65,6 +65,14 @@ class BinaryReader {
     if (cached !== undefined) return cached;
     const length = this.u32(offset - 4, `${label} length`);
     this.need(offset, length, label);
+    // Charge the cache before decoding: overlapping offsets could otherwise
+    // retain far more text than the catalog holds.
+    this.#segmentBytes += length;
+    if (this.#segmentBytes > this.bytes.length)
+      throw new UnityAddressablesFormatFailure(
+        "string-overlap",
+        `${label} at ${offset} brings decoded string bytes to ${this.#segmentBytes}, more than the ${this.bytes.length}-byte catalog holds without overlapping strings`,
+      );
     const raw = this.bytes.subarray(offset, offset + length);
     let text: string;
     if ((id & UNICODE) !== 0) {
@@ -120,6 +128,12 @@ class BinaryReader {
     return parts.reverse().join(separator);
   }
 
+  /** TypeSerializer class name only; callers that drop the assembly never decode it. */
+  typeName(id: number, label: string): string | null {
+    if (id === NONE) return null;
+    return this.string(this.u32(id + 4, label), ".", `${label} class`);
+  }
+
   /** TypeSerializer record: assembly and class names joined with '.'. */
   type(
     id: number,
@@ -140,7 +154,7 @@ class BinaryReader {
     if (id === NONE) return null;
     const typeId = this.u32(id, label);
     return {
-      type: this.type(typeId, `${label} type`).name,
+      type: this.typeName(typeId, `${label} type`),
       value: this.u32(id + 4, label),
     };
   }
@@ -252,9 +266,10 @@ export function* readBinaryCatalogSteps(
   const header = [8, 12, 16, 20, 24, 28].map((at) => bytes.readUInt32LE(at));
   const [keysOffset, idOffset, instance, scene, initObjects, buildHash] =
     header as [number, number, number, number, number, number];
-  const keyRecords = reader.array(keysOffset, 8, "key table");
-  // Refuse an oversized key table before decoding any location set.
-  options.beforeRows?.({ keys: keyRecords.length, locations: 0 });
+  // Refuse an oversized key table from its length prefix, before any per-key
+  // allocation; key records are then read in place at keysOffset + 8 * index.
+  const keyCount = reader.count(keysOffset, 8, "key table");
+  options.beforeRows?.({ keys: keyCount, locations: 0 });
   // Locations are indexed by first reference; dependency-only records are appended.
   const indexByOffset = new Map<number, number>();
   const order: number[] = [];
@@ -278,20 +293,23 @@ export function* readBinaryCatalogSteps(
   const locationSet = (id: number, label: string): number[] => {
     let indices = sets.get(id);
     if (indices === undefined) {
-      const items = reader.array(id, 4, label);
-      setEntries += items.length;
+      const length = reader.count(id, 4, label);
+      setEntries += length;
       if (setEntries > maximumSetEntries)
         throw new UnityAddressablesFormatFailure(
           "location-set-overlap",
           `${label} at ${id} brings decoded set entries to ${setEntries}, more than the ${maximumSetEntries} that non-overlapping sets in the ${bytes.length}-byte catalog can hold`,
         );
-      indices = items.map((at) => indexOf(bytes.readUInt32LE(at)));
+      indices = [];
+      for (let item = 0; item < length; item++)
+        indices.push(indexOf(bytes.readUInt32LE(id + item * 4)));
       sets.set(id, indices);
     }
     return indices;
   };
   const keyLocations: number[][] = [];
-  for (const [index, at] of keyRecords.entries()) {
+  for (let index = 0; index < keyCount; index++) {
+    const at = keysOffset + index * 8;
     keyLocations.push(locationSet(reader.u32(at + 4, "key"), "location set"));
     if ((index + 1) % ROWS_PER_YIELD === 0) yield;
   }
@@ -307,7 +325,7 @@ export function* readBinaryCatalogSteps(
     );
     if ((index + 1) % ROWS_PER_YIELD === 0) yield;
   }
-  options.beforeRows?.({ keys: keyRecords.length, locations: order.length });
+  options.beforeRows?.({ keys: keyCount, locations: order.length });
 
   const providers: UnityAddressablesProvider[] = [];
   for (const [id, role] of [
@@ -320,7 +338,9 @@ export function* readBinaryCatalogSteps(
       providers.push(row);
     }
   }
-  for (const at of reader.array(initObjects, 4, "resource providers")) {
+  const providerCount = reader.count(initObjects, 4, "resource providers");
+  for (let index = 0; index < providerCount; index++) {
+    const at = initObjects + index * 4;
     const row = provider(reader, bytes.readUInt32LE(at), "resource");
     if (row !== null) {
       options.onRow?.(row);
@@ -328,7 +348,8 @@ export function* readBinaryCatalogSteps(
     }
   }
   const keys: UnityAddressablesKey[] = [];
-  for (const [index, at] of keyRecords.entries()) {
+  for (let index = 0; index < keyCount; index++) {
+    const at = keysOffset + index * 8;
     const row = key(reader, bytes.readUInt32LE(at), keyLocations[index]!);
     options.onRow?.(row);
     keys.push(row);
@@ -350,8 +371,10 @@ export function* readBinaryCatalogSteps(
         ".",
         "provider id",
       ),
-      resource_type: reader.type(bytes.readUInt32LE(at + 24), "resource type")
-        .name,
+      resource_type: reader.typeName(
+        bytes.readUInt32LE(at + 24),
+        "resource type",
+      ),
       dependencies,
       dependency_key: null,
       dependency_hash: bytes.readInt32LE(at + 16),
