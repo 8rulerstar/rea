@@ -756,3 +756,25 @@ describe("Unreal pak issue budget", () => {
     expect(issue?.message.length).toBeLessThan(400);
   });
 });
+
+describe("Unreal pak path allowance", () => {
+  it("does not charge pruned listing paths against the returned path limit", async () => {
+    const plain = createPakFixture({ layout: "v11" }).bytes;
+    const pruned = createPakFixture({
+      layout: "v11",
+      prunedListing: true,
+    }).bytes;
+    // The smallest limit that admits the returned paths alone.
+    let pathChars = 1;
+    while (
+      (await failure(plain, { ...LIMITS, pathChars }).catch(() => null)) !==
+      null
+    )
+      pathChars++;
+    const report = await read(pruned, { ...LIMITS, pathChars });
+    expect(
+      report.index.state === "decoded" &&
+        report.index.path_hash_index?.pruned_files,
+    ).toBe(report.entries.length);
+  });
+});

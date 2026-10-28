@@ -10,6 +10,7 @@ import {
 import { UnrealPakProvider } from "../../../src/unreal/UnrealPakProvider.js";
 import { createPakFixture } from "../../fixtures/unreal/pak.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { fixedAllowanceRemediation } from "../../../src/domain/fixedAllowanceRemediation.js";
 
 const writePak = async (name: string, bytes: Buffer) => {
   const root = await createTestTempDirectory("rea-unreal-provider-");
@@ -235,8 +236,9 @@ it("reports the path budget, not a file size, when path text exceeds it", async 
       expect(projectAnalysisError(result.error)).toMatchObject({
         retryable: false,
         remediation: {
-          action: expect.stringContaining(
-            "The Unreal pak complete-report allowance of 2048 bytes (this release has no runtime override) is a fixed report allowance. This refusal does not leave a completed report or Evidence record to retrieve",
+          action: fixedAllowanceRemediation(
+            "The Unreal pak complete-report allowance of 2048 bytes (this release has no runtime override)",
+            "report",
           ),
         },
       });

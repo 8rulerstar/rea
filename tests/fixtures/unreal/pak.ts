@@ -43,6 +43,8 @@ export interface PakFixtureOptions {
   readonly directoryIndex?: boolean;
   /** Bytes appended after the path hash index or the directory index content. */
   readonly pathHashTrailer?: Buffer;
+  /** Repeat the full directory listing as the pruned one instead of leaving it empty. */
+  readonly prunedListing?: boolean;
   readonly directoryTrailer?: Buffer;
   /** Version 10+: the entry count written in the index header. */
   readonly declaredEntries?: number;
@@ -352,7 +354,7 @@ export const createPakFixture = (options: PakFixtureOptions) => {
         i32(hashReferences[at]!),
       ]),
       // An empty pruned directory index, as repak writes it.
-      u32(0),
+      options.prunedListing === true ? fdi : u32(0),
       options.pathHashTrailer ?? Buffer.alloc(0),
     ]);
     const withPhi = options.pathHashIndex ?? true;

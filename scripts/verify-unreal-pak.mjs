@@ -8,6 +8,7 @@ import { absoluteCallerPath } from "../dist/filesystem/callerPath.js";
 import { toolContract } from "../dist/contracts/toolContracts.js";
 import { analysisViewResultSchema } from "../dist/domain/analysisView/analysisView.js";
 import { ArtifactResourceScope } from "../dist/artifacts/ArtifactResourceScope.js";
+import { artifactMcpCall } from "./lib/artifact-e2e.mjs";
 import { mcpTextValue } from "./lib/mcp-verifier-results.mjs";
 import { withVerifierCleanup } from "./lib/verifier-cleanup.mjs";
 import { hashVerifierFile } from "./lib/verifier-file-resources.mjs";
@@ -39,7 +40,8 @@ const transport = new StdioClientTransport({
 });
 transport.stderr?.resume();
 const call = async (name, input) => {
-  const response = await client.callTool(
+  const response = await artifactMcpCall(
+    client,
     { name, arguments: input },
     { timeout: 120_000 },
   );
@@ -77,7 +79,8 @@ await withVerifierCleanup(async () => {
     const report = cli.normalized_result;
     assert.equal(report.artifact.path, path);
     assert.equal(report.artifact.sha256, identity.sha256);
-    const complete = await client.callTool(
+    const complete = await artifactMcpCall(
+      client,
       { name: operation, arguments: { path, detail: "complete" } },
       { timeout: 300_000 },
     );

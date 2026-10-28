@@ -1,5 +1,7 @@
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
+import { ok } from "../domain/result.js";
+import { withEvidenceCallerInputPath } from "../domain/evidence.js";
 import { localPathStringSchema } from "../domain/localPath.js";
 import { createUnrealPakService } from "../composition/unreal.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
@@ -30,11 +32,16 @@ export const registerUnrealCommands = (
         logCliCommand(logger, CLI_COMMANDS.inspectUnrealPak, async () => {
           const service = createUnrealPakService();
           return deliverCliAnalysisEvidence({
-            run: () =>
-              service.inspect(
+            run: async () => {
+              const result = await service.inspect(
                 { path: absoluteCallerPath(args.path), detail: "complete" },
                 { signal },
-              ),
+              );
+              // Evidence keeps the selection as typed; the service reads its absolute form.
+              return result.ok
+                ? ok(withEvidenceCallerInputPath(result.value, args.path))
+                : result;
+            },
             service,
             providerId: "unreal-pak",
             operation: "inspect_unreal_pak",

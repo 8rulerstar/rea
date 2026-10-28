@@ -845,7 +845,11 @@ export const readUnrealPak = async (
       await pace();
     }
     // The pruned directory index follows the hashes inside the same region.
-    const pruned = await readDirectoryListing(phi, footer, limits, budget);
+    // Its paths are only checked, never returned, so they get their own
+    // allowance and are released before the full listing charges its paths.
+    const pruned = await readDirectoryListing(phi, footer, limits, {
+      used: 0,
+    });
     finished(phi);
     for (const { path, reference } of pruned.listed) {
       resolve(reference, path, null);
