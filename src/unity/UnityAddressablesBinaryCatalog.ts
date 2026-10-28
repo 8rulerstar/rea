@@ -14,6 +14,9 @@ import {
   type UnityAddressablesSteps,
 } from "./UnityAddressablesShared.js";
 
+/** Scratch held per chain part before the join: one array slot. */
+const PART_SLOT_BYTES = 8;
+
 // BinaryStorageBuffer id flags (Addressables 2.x/4.x Runtime/ResourceManager/Util).
 const NONE = 0xffffffff;
 const UNICODE = 0x80000000;
@@ -103,25 +106,33 @@ class BinaryReader {
       return text;
     }
     const parts: string[] = [];
-    const visited = new Set<number>();
+    // Brent's cycle check keeps one marker instead of a set of every link.
+    let marker = NONE;
+    let power = 1;
+    let lap = 0;
     let bytes = 2;
     for (let next = id; next !== NONE;) {
       const node = next & OFFSET_MASK;
-      if (visited.has(node))
+      if (node === marker)
         throw new UnityAddressablesFormatFailure(
           "string-chain-cycle",
           `${label} chain revisits ${node}`,
         );
-      visited.add(node);
-      if (visited.size > this.bytes.length / 8)
+      if (++lap === power) {
+        marker = node;
+        power *= 2;
+        lap = 0;
+      }
+      if (parts.length >= this.bytes.length / 8)
         throw new UnityAddressablesFormatFailure(
           "string-chain-overlap",
           `${label} chain has more than ${Math.floor(this.bytes.length / 8)} links, so its 8-byte nodes overlap in the ${this.bytes.length}-byte catalog`,
         );
       const part = this.#segment(this.u32(node, label), label);
       bytes += jsonStringByteLength(part) - 2 + (parts.length > 0 ? 1 : 0);
-      // Check before joining: chains can share long segments.
-      this.options.beforeText?.(bytes);
+      // Check before joining: chains can share long segments, and each
+      // retained part also holds a slot, so empty parts still cost space.
+      this.options.beforeText?.(bytes + (parts.length + 1) * PART_SLOT_BYTES);
       parts.push(part);
       next = this.u32(node + 4, label);
     }

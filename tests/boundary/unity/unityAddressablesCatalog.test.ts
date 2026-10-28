@@ -397,6 +397,35 @@ it("refuses a dynamic string chain that loops back on itself", () => {
   });
 });
 
+it("charges the scratch of a long chain of empty parts before keeping them", () => {
+  const bytes = binaryCatalog();
+  const keys = bytes.readUInt32LE(8);
+  const set = bytes.readUInt32LE(keys + 4);
+  const location = bytes.readUInt32LE(set);
+  // An empty segment, then 1,000 distinct nodes that all name it.
+  const links = 1000;
+  const empty = bytes.length + 4;
+  const tail = Buffer.alloc(4 + links * 8);
+  for (let at = 0; at < links; at++) {
+    const node = empty + at * 8;
+    tail.writeUInt32LE(empty, 4 + at * 8);
+    tail.writeUInt32LE(
+      at === links - 1 ? 0xffffffff : ((node + 8) | 0x40000000) >>> 0,
+      8 + at * 8,
+    );
+  }
+  const patched = Buffer.concat([bytes, tail]);
+  patched.writeUInt32LE((empty | 0x40000000) >>> 0, location + 4);
+  let largest = 0;
+  decode(patched, {
+    beforeText: (charged) => {
+      largest = Math.max(largest, charged);
+    },
+  });
+  // Joined text is about one byte per link; the parts held before the join are not.
+  expect(largest).toBeGreaterThanOrEqual(links * 8);
+});
+
 it.each([
   ["an odd UTF-16 length", 0x80000000, Buffer.from([0x41, 0, 0x42])],
   ["an ASCII-flagged non-ASCII byte", 0, Buffer.from([0x41, 0xc3, 0xa9])],
