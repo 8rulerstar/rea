@@ -14,12 +14,17 @@ interpreter: the npm launcher's `#!/usr/bin/env node` still searches `PATH` for
 Node. Running that command successfully in a terminal does not establish that
 the client can launch it.
 
-For direct JavaScript installations, setup registers the selected runtime
+For JavaScript installations, setup registers the selected runtime
 executable and REA script by absolute path. On POSIX, it prefers executable
 `node` or `bun` and REA aliases on setup's `PATH` only when they resolve to the
 same selected files. This preserves manager-owned aliases across version updates;
-otherwise setup uses the selected paths directly. Package-runner registrations keep
-their selected runner. Setup does not copy your ambient environment into client
+otherwise setup uses the selected paths directly. This also applies when setup
+runs through a package runner: retain the selected cache entry and runtime while
+the registration uses them. Clearing either makes startup fail without resolving
+another package from the client's project. Restore the same installation before
+repairing it; an unidentified registration remains untouched. See
+[installation and recovery](installation.md#package-runners-and-global-installation).
+Setup does not copy your ambient environment into client
 settings. To refresh an older registration, preview
 `rea setup --client <client-id> --skill=false --dry-run`, then run the same command
 without `--dry-run` and approve the displayed changes. Setup preserves unrelated
@@ -611,9 +616,10 @@ the fallback file untouched. Existing REA environment overrides are preserved
 when refreshing its command. A malformed or unreadable fallback file fails setup instead of
 being silently suppressed; repair or remove it and rerun. Uninstall removes an
 REA-owned `rea` entry from both the native table and the fallback, backing up
-each changed file, so an emptied native table cannot load a leftover fallback
-registration; other fallback servers, settings and a foreign `rea` entry are
-kept. ZCode disables a
+each changed file. If removing the last native server would activate a retained
+fallback server, uninstall refuses before changing either file; review the
+fallback configuration before retrying. Other fallback servers, settings and a
+foreign `rea` entry are kept. ZCode disables a
 server with `enable: false` on its entry; doctor reports such a registration
 as stale, and rerunning setup removes the flag to repair it. Native configuration
 uses strict JSON; setup refuses comments, trailing commas and a BOM rather than

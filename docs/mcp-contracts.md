@@ -26,8 +26,21 @@ can be passed directly to `compare_functions`, and `inspect_artifact` Evidence
 to `compare_artifacts`. Use `get_evidence_bundle` when the task needs broader
 retained session history or an explicit bundle for transfer.
 
+`compare_artifacts` does not need that Evidence sent back. Name each side once
+with a source that `inspect_analysis_view` also accepts:
+`{"kind": "retained-evidence", "evidence_id": "<id>"}` for a record retained in
+this session, or `{"kind": "evidence-file", "path": "/absolute/evidence.json"}`
+for a saved record or bundle. Add `evidence_id` to select one record from a
+bundle that holds more than one. Complete inline Evidence is still accepted as
+the third form. The comparison cites the records that the sources resolve to,
+so all three forms give the same comparison Evidence. A retained reference that
+the session cannot resolve is refused with `evidence_integrity_mismatch` and
+`details.reason: "missing"`.
+
 `compare_artifacts` can also resolve an artifact summary to its exact retained
-parent in the session. Supported historical summaries keep their original
+parent in the session, or from the authenticated bundle containing a file-selected
+summary. File-local records take precedence over the session lookup. Unrelated
+records are not retained by the file resolver. Supported historical summaries keep their original
 Evidence identity and omissions; a missing or mismatched parent is rejected.
 
 `analyze_function` does not deliver its complete record by default. Without
@@ -56,13 +69,14 @@ the same Evidence authentication failures: an admitted source that fails
 authentication is `evidence_integrity_mismatch`, while an authenticated source with an unsupported
 workflow role or invalid selector is `invalid_request`.
 
-Ghidra inventories and function replies use `raw_result: null` when their facts
-are already preserved in `normalized_result`, limitations, locations and
-relationship coverage. Distinct overview details, measured load-image
-observations, file-offset selection roles and database types supplemented with
-derived metadata keep their upstream representation. Read function results from
-`normalized_result`; older retained Evidence keeps its original representation
-and identity.
+Ghidra inventories, measured load-image observations and function replies use
+`raw_result: null` when their useful facts are already preserved in
+`normalized_result`, limitations, locations and relationship coverage. Distinct
+overview details, file-offset selection roles and database types supplemented
+with derived metadata keep their upstream representation. Native load-image
+attestation continues to use the bridge reply locally before Evidence
+projection. Read function results from `normalized_result`; older retained
+Evidence keeps its original representation and identity.
 
 Artifact source-map filename relationships require a unique, identified regular
 file at the sibling path. A known directory cannot be the mapped file; the map
@@ -301,6 +315,15 @@ unknown metadata. Missing omission counts remain null. Summary output carries
 every matching record; actual transport admission still applies. Omitted
 `detail` preserves complete canonical bundle delivery; filters require summary.
 
+Residual-unknown mutations reject missing Evidence or unknown references and
+unproven verified resolutions with nonretryable `invalid_request` diagnostics.
+`details.constraint` carries the validator's `kind`, owning `unknown_id`, and
+missing `evidence_id` or `related_unknown_id` where applicable. Correct the
+reported input or supply the required retained Evidence; unchanged retries do
+not repair these constraints. Rejected mutations leave retained state unchanged.
+Revision conflicts remain retryable `revision_conflict`; broken revision histories
+remain `evidence_integrity_mismatch`.
+
 `list_unknowns` returns every matching current head by default. For a smaller
 inline response, supply `offset` and `limit`, then follow `next_offset` until it
 is null. `total` counts all matching heads; each page preserves complete records
@@ -320,8 +343,11 @@ When `record_unknown` or `update_unknown` commits but its complete reply exceeds
 the response budget, `details.reported_limits.committed_unknown` identifies the
 exact unknown ID, committed revision and mutation Evidence IDs. Its retained
 Evidence reference remains available on the same connection. Export the bundle
-or page `list_unknowns` to recover the result; do not repeat the committed
-mutation. A delivery failure does not undo that revision.
+to recover the result; do not repeat the committed mutation. A single unknown
+may be too large for a `list_unknowns` page. A delivery failure does not undo
+that revision. If a list response overflows, retry on the same connection with
+the same filters and offset and a smaller limit; export if one head still cannot
+fit.
 
 For a portable exported bundle, the CLI shares this projection:
 `rea inspect-evidence-bundle '{"path":"/tmp/evidence.json","detail":"summary","filters":{"operation":"analyze_function"}}' --format json`.
