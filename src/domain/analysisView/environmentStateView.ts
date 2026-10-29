@@ -220,6 +220,7 @@ const viewSchema = z.discriminatedUnion("shape", [
     shape: z.literal("recorded"),
     reason: z.enum([
       "query-body",
+      "method-replay",
       "no-init-recording",
       "body-unusable",
       "no-identity",
@@ -245,6 +246,7 @@ const fieldRuleSchema = z.discriminatedUnion("rule", [
     ...ruled,
     rule: z.literal("sequence"),
     scope: z.enum(["collection", "type"]),
+    start: z.number().int().exactOptional(),
   }),
   z.strictObject({ ...ruled, rule: z.literal("unique") }),
   z.strictObject({
@@ -262,6 +264,16 @@ const fieldRuleSchema = z.discriminatedUnion("rule", [
     rule: z.literal("nested-clock"),
     members: z.array(z.string()).min(1),
     format: clockFormatSchema,
+  }),
+  z.strictObject({
+    ...ruled,
+    rule: z.literal("made-object"),
+    clocks: z.array(z.string()).min(1),
+    format: clockFormatSchema,
+    own: z.array(z.string()),
+    counts: z.array(
+      z.strictObject({ member: z.string(), start: z.number().int() }),
+    ),
   }),
   z.strictObject({
     ...ruled,

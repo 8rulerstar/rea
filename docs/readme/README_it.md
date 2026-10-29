@@ -20,7 +20,7 @@
 
 **[Sito web](https://rea.tools/it/) · [Guide](https://rea.tools/it/guides/) · [Showcase](https://rea.tools/it/showcase/)**
 
-[Avvio rapido](#avvio-rapido) · [Come funziona REA](#come-funziona-rea) · [Cosa puoi analizzare](#cosa-puoi-analizzare) · [Showcase](#showcase) · [Creare ambienti RL](#build-rl-environments) · [FAQ](#faq) · [Strumenti GNU objdump e Rizin](../reverse-engineering-tools.md) · [Documentazione](#documentazione)
+[Avvio rapido](#avvio-rapido) · [Come funziona REA](#come-funziona-rea) · [Cosa puoi analizzare](#cosa-puoi-analizzare) · [Showcase](#showcase) · [Creare ambienti RL](#build-rl-environments) · [FAQ](#faq) · [Documentazione](#documentazione)
 
 <code>npx rea-agents setup</code>
 
@@ -60,7 +60,7 @@ Hai visto una funzionalità in un'app che vorresti nel tuo prodotto? Chiedi al t
 
 REA collega il tuo agente a strumenti per ispezionare binari nativi, app JavaScript ed Electron, assembly .NET e siti web. Puoi usare gli stessi strumenti anche dal terminale. L'analisi viene eseguita localmente e i risultati includono le prove e i limiti dietro ogni conclusione.
 
-La configurazione registra REA con il tuo agente e installa le istruzioni di workflow corrispondenti. L'analisi nativa può usare un'installazione esistente di Hopper, Ghidra o IDA; la configurazione può installare opzionalmente Hopper previa approvazione. L'analisi statica JavaScript non richiede alcun motore di analisi nativo.
+La configurazione registra REA con il tuo agente e installa le istruzioni di workflow corrispondenti. L'analisi nativa può usare un'installazione esistente di Hopper, Ghidra, IDA o Kuna; la configurazione può installare opzionalmente Hopper previa approvazione. L'analisi statica JavaScript non richiede alcun motore di analisi nativo.
 
 > **[Visita il sito web di REA](https://rea.tools/it/)** per istruzioni di configurazione, guide illustrate e veri casi studio.
 
@@ -150,7 +150,7 @@ REA richiede Node.js 22.x (>=22.23.4), 24.x (>=24.22.1) o 26+ (>=26.12.1), oltre
 
 | Obiettivo                    | Cosa restituisce REA                                                                                    | Requisiti e guida                                                                                                                        |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Binari nativi                | Pseudocodice, assembly, stringhe, simboli, chiamate e riferimenti                                       | Hopper, Ghidra o IDA; [analisi nativa](../native-investigation.md)                                                                       |
+| Binari nativi                | Pseudocodice, assembly, stringhe, simboli, chiamate e riferimenti                                       | Hopper, Ghidra, IDA o Kuna; [analisi nativa](../native-investigation.md)                                                                 |
 | Layout ELF offline           | Sezioni, segmenti, simboli/relocazioni originali e candidati mitigazioni statiche                       | pwntools fornito dal chiamante su Linux x64; [diagnostica binaria](../binary-diagnostics.md)                                             |
 | PE certificates              | Authenticode WIN_CERTIFICATE entries and PKCS#7 signer/X.509 identity fields                            | Built-in static PE inspection; [PE certificates](../pe-certificates.md)                                                                  |
 | PE imports                   | Import and delay-load DLL names, ordinals, IAT RVAs and pefile import hash                              | Built-in static PE inspection; [PE imports](../pe-imports.md)                                                                            |
@@ -188,6 +188,8 @@ REA richiede Node.js 22.x (>=22.23.4), 24.x (>=24.22.1) o 26+ (>=26.12.1), oltre
 | Firme APK                    | Firmatari v1/v2/v3/v3.1, impronte dei certificati, rotazione delle chiavi e coerenza interna dei digest | Ispezione statica integrata; `inspect_apk_signature`                                                                                     |
 
 L'ispezione statica di JavaScript e .NET legge i file forniti senza eseguire l'applicazione. La cattura a runtime esegue o interagisce con il bersaglio selezionato usando i tuoi permessi utente; ogni guida runtime descrive i suoi effetti.
+
+Per ispezionare offline i binari nativi, REA supporta anche GNU objdump e Rizin, che devi fornire autonomamente. La [guida agli strumenti di reverse engineering](../reverse-engineering-tools.md) descrive la configurazione dei provider, i comandi CLI e i limiti di Evidence. REA non installa né aggiorna questi due provider.
 
 <a id="choosing-a-deep-analysis-provider"></a>
 
@@ -275,9 +277,9 @@ Qualsiasi agente che supporti server MCP locali. La configurazione configura gli
 </details>
 
 <details>
-<summary><strong>Ho bisogno di Hopper, Ghidra o IDA?</strong></summary>
+<summary><strong>Ho bisogno di Hopper, Ghidra, IDA o Kuna?</strong></summary>
 
-L'analisi nativa profonda ne usa uno. L'ispezione statica di JavaScript e .NET funziona senza un motore di analisi nativo. La configurazione può installare Hopper previa approvazione; Ghidra e IDA usano le tue installazioni esistenti. Vedi [configurazione provider](../installation.md#hopper).
+L'analisi nativa profonda ne usa uno. L'ispezione statica di JavaScript e .NET funziona senza un motore di analisi nativo. La configurazione può installare Hopper previa approvazione; Ghidra, IDA e Kuna usano le tue installazioni esistenti. Vedi [configurazione provider](../installation.md#hopper).
 
 </details>
 
@@ -345,7 +347,7 @@ Segnala vulnerabilità tramite [SECURITY.md](../../SECURITY.md).
 
 ## Cronologia delle stelle
 
-🎉 **300.000 stelle su GitHub — grazie!**
+🎉 **400.000 stelle su GitHub — grazie!**
 
 Grazie a tutti coloro che usano REA, segnalano bug, propongono funzionalità, testano le build e contribuiscono con correzioni.
 
