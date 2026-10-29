@@ -214,8 +214,8 @@ it("decodes binary Hash128 and unknown object keys and appends dependency-only l
   // then the final counts once more.
   expect(admitted).toEqual([
     { keys: 3, locations: 0 },
-    { keys: 3, locations: 1 },
-    { keys: 3, locations: 2 },
+    { keys: 3, locations: 1, partial: true },
+    { keys: 3, locations: 2, partial: true },
     { keys: 3, locations: 2 },
   ]);
   expect(

@@ -132,10 +132,16 @@ it("refuses a report over budget during decoding with admitted counts retained",
   if (result.ok) return;
   expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
   expect(result.error.partialObservation).toMatchObject({
-    // Locations are admitted as they are found, so the refusal records the
-    // counts reached when the budget ran out, not the whole catalog.
-    normalized_result: { declared_row_counts: { keys: 7, locations: 4 } },
+    // Locations are admitted as they are found, so the refusal knows only a
+    // lower bound and does not present it as the declared count.
+    normalized_result: {
+      discovered_row_counts: { keys: 7, locations_at_least: 4 },
+    },
   });
+  expect(
+    (result.error.partialObservation as { normalized_result: object })
+      .normalized_result,
+  ).not.toHaveProperty("declared_row_counts");
 });
 
 /** More than one yield interval of keys. */

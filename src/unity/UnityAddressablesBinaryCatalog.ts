@@ -290,7 +290,11 @@ export function* readBinaryCatalogSteps(
       reader.need(offset, LOCATION_BYTES, "location");
       // Admit each new location before retaining it, so catalog-controlled
       // offsets cannot grow these tables past the report allowance.
-      options.beforeRows?.({ keys: keyCount, locations: order.length + 1 });
+      options.beforeRows?.({
+        keys: keyCount,
+        locations: order.length + 1,
+        partial: true,
+      });
       index = order.length;
       indexByOffset.set(offset, index);
       order.push(offset);

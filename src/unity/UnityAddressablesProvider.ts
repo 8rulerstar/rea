@@ -40,6 +40,7 @@ import {
 import { createUnityAddressablesAdmission } from "./UnityAddressablesAdmission.js";
 import { readUnityAddressablesCatalogSteps } from "./UnityAddressablesCatalog.js";
 import { UnityAddressablesFormatFailure } from "./UnityAddressablesFormat.js";
+import type { UnityAddressablesRowCounts } from "./UnityAddressablesShared.js";
 
 /** Bundled format reader identity; the catalog format version is a separate observed fact. */
 export const UNITY_ADDRESSABLES_PROVIDER_IDENTITY = {
@@ -58,7 +59,7 @@ type Artifact = UnityAddressables["artifact"];
 type Field = "path" | "hash_path";
 interface Observed {
   artifact?: Artifact;
-  counts?: { keys: number; locations: number };
+  counts?: UnityAddressablesRowCounts;
   hash?: Artifact;
 }
 
@@ -263,7 +264,7 @@ const sourceArtifact = (
 /** Source identity survives a failed inventory without claiming decoded coverage. */
 const catalogSourceEvidence = (
   artifact: Artifact,
-  counts: { keys: number; locations: number } | undefined,
+  counts: UnityAddressablesRowCounts | undefined,
   hash: { path: string; artifact?: Artifact } | undefined,
 ) =>
   createEvidence(
@@ -279,7 +280,22 @@ const catalogSourceEvidence = (
       result: {
         artifact,
         inventory_status: "not-returned-as-complete",
-        ...(counts === undefined ? {} : { declared_row_counts: { ...counts } }),
+        // A refusal during location discovery knows only a lower bound.
+        ...(counts === undefined
+          ? {}
+          : counts.partial
+            ? {
+                discovered_row_counts: {
+                  keys: counts.keys,
+                  locations_at_least: counts.locations,
+                },
+              }
+            : {
+                declared_row_counts: {
+                  keys: counts.keys,
+                  locations: counts.locations,
+                },
+              }),
         ...(hash === undefined
           ? {}
           : {
