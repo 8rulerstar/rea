@@ -288,6 +288,9 @@ export function* readBinaryCatalogSteps(
     let index = indexByOffset.get(offset);
     if (index === undefined) {
       reader.need(offset, LOCATION_BYTES, "location");
+      // Admit each new location before retaining it, so catalog-controlled
+      // offsets cannot grow these tables past the report allowance.
+      options.beforeRows?.({ keys: keyCount, locations: order.length + 1 });
       index = order.length;
       indexByOffset.set(offset, index);
       order.push(offset);

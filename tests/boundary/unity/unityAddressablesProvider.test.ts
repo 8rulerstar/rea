@@ -125,14 +125,16 @@ it.each([
   },
 );
 
-it("refuses a report over budget during decoding with declared counts retained", async () => {
+it("refuses a report over budget during decoding with admitted counts retained", async () => {
   const path = await write("catalog.bin", binaryCatalog());
   const result = await inspect({ path }, 900);
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
   expect(result.error.partialObservation).toMatchObject({
-    normalized_result: { declared_row_counts: { keys: 7, locations: 5 } },
+    // Locations are admitted as they are found, so the refusal records the
+    // counts reached when the budget ran out, not the whole catalog.
+    normalized_result: { declared_row_counts: { keys: 7, locations: 4 } },
   });
 });
 

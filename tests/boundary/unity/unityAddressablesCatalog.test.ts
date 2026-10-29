@@ -210,9 +210,12 @@ it("decodes binary Hash128 and unknown object keys and appends dependency-only l
       admitted.push(counts);
     },
   });
-  // Admission sees the dependency-only location too.
+  // Each location is admitted when first seen, the dependency-only one too,
+  // then the final counts once more.
   expect(admitted).toEqual([
     { keys: 3, locations: 0 },
+    { keys: 3, locations: 1 },
+    { keys: 3, locations: 2 },
     { keys: 3, locations: 2 },
   ]);
   expect(
@@ -449,8 +452,13 @@ it("checks a dynamic string before joining it and charges rows before retention"
     beforeText: () => events.push("text"),
     onRow: () => events.push("row"),
   });
-  // The key table is admitted first, then the final location count.
-  expect(events.slice(0, 2)).toEqual(["rows 7/0", "rows 7/5"]);
+  // The key table is admitted first, then each location as it is first seen.
+  const rows = events.filter((event) => event.startsWith("rows"));
+  expect(rows).toEqual([
+    "rows 7/0",
+    ...[1, 2, 3, 4, 5].map((count) => `rows 7/${count}`),
+    "rows 7/5",
+  ]);
   expect(events.indexOf("text")).toBeLessThan(events.indexOf("row"));
   expect(events.filter((event) => event === "row")).toHaveLength(7 + 5 + 4);
 });
@@ -623,6 +631,40 @@ it("never decodes discarded assembly names and refuses overlapping strings befor
     grown.writeUInt32LE(((base + index * 8 + 4) | 0x80000000) >>> 0, type + 4);
   }
   expect(failure(grown).reason).toBe("string-overlap");
+});
+
+it("admits each distinct binary location before retaining it", () => {
+  // One key's location set names 2000 distinct in-bounds offsets.
+  const bytes = binaryCatalog({
+    keys: [
+      {
+        key: { kind: "string", value: "k" },
+        locations: Array<number>(2000).fill(0),
+      },
+    ],
+    locations: [
+      {
+        primaryKey: 0,
+        internalId: "a",
+        provider: ASSET_PROVIDER,
+        type: "UnityEngine.Object",
+      },
+    ],
+  });
+  const keysOffset = bytes.readUInt32LE(8);
+  const set = bytes.readUInt32LE(keysOffset + 4);
+  for (let index = 0; index < 2000; index++)
+    bytes.writeUInt32LE(32 + index, set + index * 4);
+  const counts: number[] = [];
+  expect(() =>
+    decode(bytes, {
+      beforeRows: ({ locations }) => {
+        counts.push(locations);
+        if (locations > 10) throw new Error("over budget");
+      },
+    }),
+  ).toThrow("over budget");
+  expect(Math.max(...counts)).toBe(11);
 });
 
 it("refuses an oversized binary key table from its length before reading records", () => {
