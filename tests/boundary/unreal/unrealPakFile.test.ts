@@ -758,6 +758,16 @@ describe("Unreal pak issue budget", () => {
 });
 
 describe("Unreal pak path allowance", () => {
+  it("does not charge paths it cannot build against the returned path limit", async () => {
+    const bytes = createPakFixture({
+      layout: "v11",
+      unslashedDirectories: true,
+    }).bytes;
+    // Only the mount point fits; the unjoined directory and file names do not.
+    const pak = await read(bytes, { ...LIMITS, pathChars: 16 });
+    expect(pak.entries.map((entry) => entry.path)).toEqual([null, null, null]);
+  });
+
   it("does not charge pruned listing paths against the returned path limit", async () => {
     const plain = createPakFixture({ layout: "v11" }).bytes;
     const pruned = createPakFixture({

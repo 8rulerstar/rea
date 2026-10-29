@@ -602,7 +602,9 @@ const readDirectoryListing = async (
         footer.version >= 12
           ? cursor.utf8Name("file name")
           : cursor.string("file name");
-      spendPath(budget, limits, directory.length + name.length, cursor.label);
+      // Only built paths are returned, so only they count against the budget.
+      if (joinable)
+        spendPath(budget, limits, directory.length + name.length, cursor.label);
       const path = joinable ? joinPath(directory, name) : null;
       if (path !== null) {
         if (seen.has(path))
