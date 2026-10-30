@@ -10,11 +10,12 @@ import {
 import { err, ok, type Result } from "../result.js";
 import { isImmutableJsonSnapshot } from "../immutableJson.js";
 import { parseAnalysisViewResult } from "./analysisViewParent.js";
-import type {
-  AnalysisViewParent,
-  AnalysisViewRequest,
-  UnsignedAnalysisView,
-} from "./analysisView.js";
+import type { AnalysisViewParent } from "./analysisViewParent.js";
+import {
+  ownedView,
+  type AdmittedView,
+  type SummaryAnalysisView,
+} from "./analysisViewShape.js";
 import {
   completeWithinViewCoverage,
   pageViewCoverage,
@@ -123,9 +124,12 @@ const parsePakReport = (
 /** Reuse retained pak Evidence without reopening or decoding the file. */
 export const projectUnrealPakView = (
   parent: AnalysisViewParent,
-  view: AnalysisViewRequest,
-): Result<UnsignedAnalysisView, AnalysisError> => {
-  if (view.kind !== "summary" && view.kind !== "unreal-pak")
+  admitted: AdmittedView,
+) => {
+  const view = ownedView<
+    SummaryAnalysisView | z.output<typeof unrealPakViewRequestSchema>
+  >(admitted, "summary", "unreal-pak");
+  if (view === undefined)
     return err(
       analysisViewInputError([
         {
@@ -175,7 +179,7 @@ export const projectUnrealPakView = (
   };
   if (view.kind === "summary")
     return ok({
-      kind: "summary",
+      kind: "summary" as const,
       view,
       ...shared,
       summary: { ...identity, counts },
@@ -215,7 +219,7 @@ export const projectUnrealPakView = (
     total++;
   }
   return ok({
-    kind: "unreal-pak",
+    kind: "unreal-pak" as const,
     view,
     ...shared,
     items: items as z.infer<typeof unrealPakViewItemsSchema>,
