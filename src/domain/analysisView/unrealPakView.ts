@@ -21,6 +21,10 @@ import {
   pageViewCoverage,
 } from "./analysisViewCoverage.js";
 
+/** Unknown added when the pak index is encrypted and its pages are unread. */
+export const UNREAD_ENCRYPTED_INDEX_UNKNOWN =
+  "The pak index is encrypted and was not read; empty entry pages mean unread, not absent.";
+
 const count = z.number().int().nonnegative();
 const countsSchema = z.strictObject({
   entries: count,
@@ -174,9 +178,7 @@ export const projectUnrealPakView = (
     unknowns: [
       "Entries come from the pak index only; file data, compressed contents and encrypted indexes were not read or decrypted.",
       ...(identity.index.state === "encrypted"
-        ? [
-            "The pak index is encrypted and was not read; empty entry pages mean unread, not absent.",
-          ]
+        ? [UNREAD_ENCRYPTED_INDEX_UNKNOWN]
         : []),
       ...(parent.subject == null
         ? [

@@ -1,7 +1,10 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { projectUnrealPakView } from "../../../src/domain/analysisView/unrealPakView.js";
+import {
+  projectUnrealPakView,
+  UNREAD_ENCRYPTED_INDEX_UNKNOWN,
+} from "../../../src/domain/analysisView/unrealPakView.js";
 import { UnrealPakProvider } from "../../../src/unreal/UnrealPakProvider.js";
 import { createPakFixture } from "../../fixtures/unreal/pak.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -35,14 +38,12 @@ it("tells an unread encrypted index apart from a decoded empty one", async () =>
     items: [],
     index_state: "encrypted",
     index_encrypted: true,
-    unknowns: expect.arrayContaining([
-      expect.stringContaining("encrypted and was not read"),
-    ]),
+    unknowns: expect.arrayContaining([UNREAD_ENCRYPTED_INDEX_UNKNOWN]),
   });
   expect(empty).toMatchObject({
     items: [],
     index_state: "decoded",
     index_encrypted: false,
   });
-  expect(JSON.stringify(empty.unknowns)).not.toContain("not read; empty");
+  expect(empty.unknowns).not.toContain(UNREAD_ENCRYPTED_INDEX_UNKNOWN);
 });
