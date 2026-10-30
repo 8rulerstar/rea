@@ -71,6 +71,9 @@ export const unrealPakViewItemsSchema = z.union([
 
 export const unrealPakViewContextSchema = z.strictObject({
   footer_layout: unrealPakSchema.shape.footer.shape.layout,
+  /** Pages from an encrypted index are not-read, not none-found. */
+  index_state: z.enum(["decoded", "encrypted"]),
+  index_encrypted: unrealPakSchema.shape.footer.shape.index_encrypted,
   counts: countsSchema,
 });
 
@@ -170,6 +173,11 @@ export const projectUnrealPakView = (
     limitations: [...parent.limitations],
     unknowns: [
       "Entries come from the pak index only; file data, compressed contents and encrypted indexes were not read or decrypted.",
+      ...(identity.index.state === "encrypted"
+        ? [
+            "The pak index is encrypted and was not read; empty entry pages mean unread, not absent.",
+          ]
+        : []),
       ...(parent.subject == null
         ? [
             "The parent has no recorded subject; its normalized artifact identity cannot be cross-checked against a subject digest.",
@@ -224,6 +232,8 @@ export const projectUnrealPakView = (
     ...shared,
     items: items as z.infer<typeof unrealPakViewItemsSchema>,
     footer_layout: identity.footer.layout,
+    index_state: identity.index.state,
+    index_encrypted: identity.footer.index_encrypted,
     counts,
     coverage: pageViewCoverage(view.offset, items.length, total),
   });
