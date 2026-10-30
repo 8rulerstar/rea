@@ -13,11 +13,12 @@ import {
 import { err, ok, type Result } from "../result.js";
 import { parseAnalysisViewResult } from "./analysisViewParent.js";
 import { pageIndexedRows } from "./indexedRowPage.js";
-import type {
-  AnalysisViewParent,
-  AnalysisViewRequest,
-  UnsignedAnalysisView,
-} from "./analysisView.js";
+import type { AnalysisViewParent } from "./analysisViewParent.js";
+import {
+  ownedView,
+  type AdmittedView,
+  type SummaryAnalysisView,
+} from "./analysisViewShape.js";
 import {
   completeWithinViewCoverage,
   pageViewCoverage,
@@ -197,9 +198,12 @@ const keyedLocations = (
 /** Reuse retained facts; source indices stay distinct from filtered page offsets. */
 export const projectUnityAddressablesView = (
   parent: AnalysisViewParent,
-  view: AnalysisViewRequest,
-): Result<UnsignedAnalysisView, AnalysisError> => {
-  if (view.kind !== "summary" && view.kind !== "unity-addressables")
+  admitted: AdmittedView,
+) => {
+  const view = ownedView<
+    SummaryAnalysisView | z.output<typeof unityAddressablesViewRequestSchema>
+  >(admitted, "summary", "unity-addressables");
+  if (view === undefined)
     return err(
       analysisViewInputError([
         {
@@ -264,7 +268,7 @@ export const projectUnityAddressablesView = (
   };
   if (view.kind === "summary")
     return ok({
-      kind: "summary",
+      kind: "summary" as const,
       view,
       ...shared,
       summary: { ...identity, counts },
@@ -273,7 +277,7 @@ export const projectUnityAddressablesView = (
   const rows: readonly Row[] = { keys, locations, providers }[view.collection];
   const { items, total } = pageIndexedRows(rows, view, selection(view, report));
   return ok({
-    kind: "unity-addressables",
+    kind: "unity-addressables" as const,
     view,
     ...shared,
     items,

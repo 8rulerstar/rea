@@ -211,12 +211,16 @@ authenticates the saved bundle; the full source is retained on disk.
 
 The canonical parser admits PE/CLI bytes and their metadata/CIL without loading
 an assembly. It reports observed implementation markers and unavailable facts;
-it does not unpack .NET single-file hosts or infer a NativeAOT identity from an
-ordinary native PE. It does not decode IL2CPP; use
+it does not itself unpack .NET single-file hosts or infer a NativeAOT identity
+from an ordinary native PE. It does not decode IL2CPP; use
 [IL2CPP metadata](il2cpp-metadata.md) for the image, type and method names in a
 Unity `global-metadata.dat`. Inputs without admitted CLI metadata do not
 become managed assemblies through naming or routing guesses.
 Inspect separately obtained components explicitly and preserve their identities.
+
+For ordinary .NET single-file hosts, use the existing artifact tools to
+[inventory and extract bundle members](dotnet-bundles.md), then inspect the
+extracted assembly explicitly with the managed tools.
 
 A valid implementation marker establishes a candidate native boundary, not
 recovered native semantics or runtime behavior.
@@ -476,8 +480,18 @@ raw digest stands in. Missing or unreadable TypeDef and TypeRef operands are
 reported as coverage issues. Invalid NestedClass rows retain their failure
 reasons and withhold TypeDef signature identities; type names and nesting are
 parsed once by their shared owner. Each current inspection records
-`signature_resolution: "type-names-v1"`, even when none of its operands can be
-resolved. Historical Evidence defaults this attestation to `null`. When either
+`signature_resolution: "type-names-v2"`, even when none of its operands can be
+resolved. Version 2 also appends readable names to signature operands, for
+example `class:7772 (AnalysisJob)`. Coded indexes remain build-local references;
+names are display text and do not change raw or resolved signature digests.
+Nested names use `Outer/Inner`. Generic instantiations keep their decoded
+arguments, for example ``class:9 (System.Collections.Generic.List`1)<string>``;
+custom modifiers are named too. Valid but unresolved TypeSpecs, invalid scopes,
+unreadable type names, cycles and nesting beyond the cap keep their raw operand
+spelling. Invalid or missing metadata coordinates retain the existing malformed
+signature result and source issue; rendering does not bypass validation.
+Version 1 Evidence remains readable and compares using the same digest policy.
+Historical Evidence defaults this attestation to `null`. When either
 observation predates resolution, both sides compare raw digests, which pair only where type rows agree,
 and the comparison reports that limitation. The signature is exact whether or
 not REA decoded it, so undecoded signatures pair by that tuple too, but they

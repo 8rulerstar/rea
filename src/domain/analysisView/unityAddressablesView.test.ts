@@ -2,8 +2,10 @@ import { expect, it } from "vitest";
 import { createUnityAddressablesFixture } from "../unity/unityAddressables.fixture.js";
 import { unityAddressablesSchema } from "../unity/unityAddressables.js";
 import { freezeJsonSnapshot } from "../immutableJson.js";
-import { projectUnityAddressablesView } from "./unityAddressablesView.js";
-import { unityAddressablesViewRequestSchema } from "./unityAddressablesView.js";
+import {
+  projectUnityAddressablesView,
+  unityAddressablesViewRequestSchema,
+} from "./unityAddressablesView.js";
 
 const report = createUnityAddressablesFixture();
 const parent = (normalizedResult: unknown = report, sealedResult = false) => ({
@@ -133,18 +135,20 @@ it("filters keys by value and kind and pages with offset and limit", () => {
 
 it("pages providers and reuses a sealed snapshot", () => {
   const frozen = freezeJsonSnapshot(unityAddressablesSchema.parse(report));
-  const first = projectUnityAddressablesView(parent(frozen, true), {
+  const providersPage = {
     kind: "unity-addressables",
     collection: "providers",
     offset: 0,
     limit: 8,
-  });
-  const second = projectUnityAddressablesView(parent(frozen, true), {
-    kind: "unity-addressables",
-    collection: "providers",
-    offset: 0,
-    limit: 8,
-  });
+  } as const;
+  const first = projectUnityAddressablesView(
+    parent(frozen, true),
+    providersPage,
+  );
+  const second = projectUnityAddressablesView(
+    parent(frozen, true),
+    providersPage,
+  );
   if (!first.ok || !second.ok) throw new Error("projection failed");
   expect(second.value).toEqual(first.value);
 });
