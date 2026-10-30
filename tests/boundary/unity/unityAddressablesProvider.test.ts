@@ -81,7 +81,7 @@ it("reports non-printable hash text as null instead of guessing", async () => {
   expect(result.value.hash_file?.text).toBeNull();
 });
 
-it("keeps catalog identity on a missing hash file", async () => {
+it("keeps the decoded catalog as catalog Evidence on a missing hash file", async () => {
   const path = await write("catalog.json", jsonCatalog());
   const result = await inspect({
     path,
@@ -90,20 +90,50 @@ it("keeps catalog identity on a missing hash file", async () => {
   expect(result.ok).toBe(false);
   if (result.ok) return;
   expect(result.error).toBeInstanceOf(AnalysisInputError);
-  expect(result.error.partialObservation).toMatchObject({
+  const partial = result.error.partialObservation as {
+    operation: string;
+    confidence: string;
+    limitations: string[];
+    normalized_result: Record<string, unknown>;
+  };
+  expect(partial).toMatchObject({
+    operation: "inspect_unity_addressables",
+    // JSON dependencies are derived through keys, as in a complete result.
+    confidence: "derived",
     normalized_result: {
       artifact: { path },
-      inventory_status: "not-returned-as-complete",
-      declared_row_counts: { keys: 7, locations: 5 },
-      selected_hash_file: { identity_status: "unavailable" },
-      decoded_catalog: {
-        artifact: { path },
-        keys: expect.any(Array),
-        locations: expect.any(Array),
-        providers: expect.any(Array),
-      },
+      format: "json",
+      hash_file: null,
+      keys: expect.any(Array),
+      locations: expect.any(Array),
     },
   });
+  expect(partial.limitations.join(" ")).not.toContain(
+    "their rows were not all decoded",
+  );
+  expect(partial.limitations.join(" ")).toContain("missing.hash");
+});
+
+it("keeps only bounded source facts when the decoded catalog exceeds the report budget", async () => {
+  const path = await write(
+    "catalog.json",
+    jsonCatalog({ ...sampleCatalog(), locatorId: "L".repeat(20_000) }),
+  );
+  const result = await inspect(
+    { path, hash_path: join(path, "..", "missing.hash") },
+    8000,
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  // Decoding finished and the hash read failed; the unadmitted catalog is not kept.
+  expect(result.error).toBeInstanceOf(AnalysisInputError);
+  const partial = result.error.partialObservation as {
+    operation: string;
+    normalized_result: Record<string, unknown>;
+  };
+  expect(partial.operation).toBe("observe_unity_addressables_source");
+  expect(partial.normalized_result).not.toHaveProperty("keys");
+  expect(JSON.stringify(partial)).not.toContain("L".repeat(20_000));
 });
 
 it.each([

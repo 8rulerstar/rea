@@ -11,7 +11,8 @@ import {
   AnalysisInputError,
   AnalysisOutputError,
 } from "../../domain/analysisErrorCore.js";
-import { createEvidence, type Evidence } from "../../domain/evidence.js";
+import type { Evidence } from "../../domain/evidence.js";
+import { unityAddressablesCatalogEvidence } from "../../domain/unity/unityAddressablesEvidence.js";
 import {
   inspectUnityAddressablesInputSchema,
   unityAddressablesSchema,
@@ -100,36 +101,10 @@ export class UnityAddressablesService {
     value: UnityAddressables,
     providerInput: UnityAddressablesProviderInput,
   ): Evidence {
-    return createEvidence(
-      {
-        path: value.artifact.path,
-        sha256: value.artifact.sha256,
-        format: "file",
-      },
+    return unityAddressablesCatalogEvidence(
+      value,
       this.provider.identity,
-      {
-        operation: OPERATION,
-        parameters: Object.fromEntries(
-          Object.entries(providerInput).filter(
-            ([, item]) => item !== undefined,
-          ),
-        ) as Record<string, string>,
-        result: value,
-        // JSON dependencies are resolved through keys; everything else is read as stored.
-        confidence: value.format === "json" ? "derived" : "observed",
-        limitations: value.limitations,
-        locations: [
-          { kind: "artifact-path", path: value.artifact.path },
-          ...(value.hash_file === null
-            ? []
-            : [
-                {
-                  kind: "artifact-path" as const,
-                  path: value.hash_file.artifact.path,
-                },
-              ]),
-        ],
-      },
+      providerInput,
     );
   }
 }

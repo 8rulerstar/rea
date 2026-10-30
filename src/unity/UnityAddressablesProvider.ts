@@ -1,4 +1,3 @@
-import type { JsonValue } from "../domain/jsonValue.js";
 import { setImmediate } from "node:timers/promises";
 import {
   completedStableArtifact,
@@ -28,6 +27,7 @@ import {
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
 import { createEvidence } from "../domain/evidence.js";
+import { unityAddressablesCatalogEvidence } from "../domain/unity/unityAddressablesEvidence.js";
 import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
@@ -62,8 +62,8 @@ interface Observed {
   artifact?: Artifact;
   counts?: UnityAddressablesRowCounts;
   hash?: Artifact;
-  /** Fully decoded catalog rows, kept when the optional hash read fails later. */
-  decoded?: JsonValue;
+  /** Admitted, fully decoded catalog; only a hash read failure returns it. */
+  decoded?: UnityAddressables;
 }
 
 interface FailureSite {
@@ -269,7 +269,6 @@ const catalogSourceEvidence = (
   artifact: Artifact,
   counts: UnityAddressablesRowCounts | undefined,
   hash: { path: string; artifact?: Artifact } | undefined,
-  decoded?: JsonValue,
 ) =>
   createEvidence(
     { path: artifact.path, sha256: artifact.sha256, format: "file" },
@@ -315,7 +314,6 @@ const catalogSourceEvidence = (
                     }),
               },
             }),
-        ...(decoded === undefined ? {} : { decoded_catalog: decoded }),
       },
       confidence: "observed",
       limitations: [
@@ -457,11 +455,18 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           step = steps.next();
         }
         const decoded = step.value;
-        observed.decoded = {
+        // Keep the rows for a later hash failure only once they fit the report budget.
+        const catalogOnly = unityAddressablesSchema.safeParse({
           ...decoded,
           artifact,
+          hash_file: null,
           limitations: catalogLimitations(decoded.format, false),
-        } as JsonValue;
+        });
+        if (
+          catalogOnly.success &&
+          jsonValueByteLength(catalogOnly.data, limit) <= limit
+        )
+          observed.decoded = catalogOnly.data;
         const hashFile = await this.#readHashFile(
           input,
           artifact,
@@ -495,7 +500,6 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           observed.artifact,
           observed.counts,
           selectedHash(),
-          observed.decoded,
         );
       return err(failure);
     } finally {
@@ -533,15 +537,22 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
         "hash_path",
         HASH_BYTES,
       );
-      error.partialObservation = catalogSourceEvidence(
-        artifact,
-        observed.counts,
-        {
-          path: input.hash_path,
-          ...(observed.hash === undefined ? {} : { artifact: observed.hash }),
-        },
-        observed.decoded,
-      );
+      error.partialObservation =
+        observed.decoded === undefined
+          ? catalogSourceEvidence(artifact, observed.counts, {
+              path: input.hash_path,
+              ...(observed.hash === undefined
+                ? {}
+                : { artifact: observed.hash }),
+            })
+          : unityAddressablesCatalogEvidence(
+              observed.decoded,
+              UNITY_ADDRESSABLES_PROVIDER_IDENTITY,
+              { path: input.path },
+              [
+                `The selected hash file ${input.hash_path} was not returned; this Evidence covers the decoded catalog only.`,
+              ],
+            );
       return { error };
     }
   }
