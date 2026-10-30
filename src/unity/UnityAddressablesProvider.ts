@@ -1,3 +1,4 @@
+import type { JsonValue } from "../domain/jsonValue.js";
 import { setImmediate } from "node:timers/promises";
 import {
   completedStableArtifact,
@@ -61,6 +62,8 @@ interface Observed {
   artifact?: Artifact;
   counts?: UnityAddressablesRowCounts;
   hash?: Artifact;
+  /** Fully decoded catalog rows, kept when the optional hash read fails later. */
+  decoded?: JsonValue;
 }
 
 interface FailureSite {
@@ -266,6 +269,7 @@ const catalogSourceEvidence = (
   artifact: Artifact,
   counts: UnityAddressablesRowCounts | undefined,
   hash: { path: string; artifact?: Artifact } | undefined,
+  decoded?: JsonValue,
 ) =>
   createEvidence(
     { path: artifact.path, sha256: artifact.sha256, format: "file" },
@@ -311,6 +315,7 @@ const catalogSourceEvidence = (
                     }),
               },
             }),
+        ...(decoded === undefined ? {} : { decoded_catalog: decoded }),
       },
       confidence: "observed",
       limitations: [
@@ -452,6 +457,11 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           step = steps.next();
         }
         const decoded = step.value;
+        observed.decoded = {
+          ...decoded,
+          artifact,
+          limitations: catalogLimitations(decoded.format, false),
+        } as JsonValue;
         const hashFile = await this.#readHashFile(
           input,
           artifact,
@@ -485,6 +495,7 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           observed.artifact,
           observed.counts,
           selectedHash(),
+          observed.decoded,
         );
       return err(failure);
     } finally {
@@ -529,6 +540,7 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           path: input.hash_path,
           ...(observed.hash === undefined ? {} : { artifact: observed.hash }),
         },
+        observed.decoded,
       );
       return { error };
     }

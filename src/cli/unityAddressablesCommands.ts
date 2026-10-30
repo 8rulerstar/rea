@@ -1,5 +1,6 @@
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import { z } from "incur";
+import { localPathStringSchema } from "../domain/localPath.js";
 import { createUnityAddressablesService } from "../composition/unityAddressables.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { logCliCommand } from "../cliLogging.js";
@@ -20,12 +21,11 @@ export const registerUnityAddressablesCommands = (
     description:
       "Inventory a Unity Addressables catalog (catalog.json or catalog.bin): keys, locations, providers, dependencies and bundle hash/CRC",
     args: z.object({
-      path: z.string().describe("Local catalog.json or catalog.bin"),
+      path: localPathStringSchema.describe("Local catalog.json or catalog.bin"),
     }),
     options: z.object({
       ...analysisEvidenceDeliveryOptions,
-      hash: z
-        .string()
+      hash: localPathStringSchema
         .optional()
         .describe("catalog.hash file to record next to the catalog; read only"),
     }),
@@ -49,6 +49,7 @@ export const registerUnityAddressablesCommands = (
                   { signal },
                 ),
               service,
+              callerInputPath: args.path,
               providerId: "unity-addressables",
               operation: "inspect_unity_addressables",
               signal,

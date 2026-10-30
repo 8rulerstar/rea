@@ -1,3 +1,4 @@
+import { awaitAcknowledgement } from "../../fixtures/lifecycleAcknowledgement.js";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -95,6 +96,12 @@ it("keeps catalog identity on a missing hash file", async () => {
       inventory_status: "not-returned-as-complete",
       declared_row_counts: { keys: 7, locations: 5 },
       selected_hash_file: { identity_status: "unavailable" },
+      decoded_catalog: {
+        artifact: { path },
+        keys: expect.any(Array),
+        locations: expect.any(Array),
+        providers: expect.any(Array),
+      },
     },
   });
 });
@@ -159,16 +166,26 @@ it("admits one inspection at a time and none after close", async () => {
   const path = await write("catalog.bin", binaryCatalog(largeCatalog()));
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
-  const provider = new UnityAddressablesProvider(undefined, () => gate);
+  let acknowledge!: () => void;
+  const yielded = new Promise<void>((resolve) => (acknowledge = resolve));
+  const provider = new UnityAddressablesProvider(undefined, () => {
+    acknowledge();
+    return gate;
+  });
   const first = provider.inspect({ path });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  const second = await provider.inspect({ path });
-  expect(second.ok).toBe(false);
-  if (!second.ok)
-    expect(second.error).toBeInstanceOf(AnalysisResourceConstraintError);
-  release();
-  expect((await first).ok).toBe(true);
-  await provider.close();
+  try {
+    await awaitAcknowledgement(yielded, first, "first decoding yield");
+    const second = await provider.inspect({ path });
+    expect(second.ok).toBe(false);
+    if (!second.ok)
+      expect(second.error).toBeInstanceOf(AnalysisResourceConstraintError);
+    release();
+    expect((await first).ok).toBe(true);
+  } finally {
+    release();
+    await first.catch(() => undefined);
+    await provider.close();
+  }
   const closed = await provider.inspect({ path });
   expect(closed.ok).toBe(false);
   if (!closed.ok)
