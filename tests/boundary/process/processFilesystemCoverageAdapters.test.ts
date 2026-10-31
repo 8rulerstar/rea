@@ -17,7 +17,7 @@ import { parseEvidence } from "../../../src/domain/evidence.js";
 import { compareProcessCaptures } from "../../../src/domain/process/processComparison.js";
 import { parseProcessCapture } from "../../../src/domain/process/processCaptureParsing.js";
 import { processScenarioSchema } from "../../../src/domain/process/processScenario.js";
-import { FINALIZED_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCaptureExample.js";
+import { FINALIZED_PROCESS_CAPTURE_EXAMPLE } from "../../../src/domain/process/processCapture.fixture.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -628,4 +628,34 @@ it
     }
   },
   20_000,
+);
+
+itWithCaptureCapability(
+  "retains raw symlink target mutations through the real capture CLI",
+  { timeout: 20_000 },
+  async () => {
+    const root = await createTestTempDirectory("rea-symlink-byte-cli-");
+    await symlink(Buffer.from([0x61, 0xff]), join(root, "link"));
+    const evidence = await captureViaCli({
+      executable: process.execPath,
+      arguments: [
+        "-e",
+        "const fs=require('node:fs');fs.unlinkSync('link');fs.symlinkSync(Buffer.from([0x61,0xfe]),'link')",
+      ],
+      working_directory: root,
+      filesystem_observation_paths: [root],
+      timeout_ms: 5000,
+    });
+    const capture = parseProcessCapture(evidence.normalized_result);
+    expect(
+      capture.files_before.find(({ path }) => path === "root_0:link"),
+    ).toMatchObject({ symlink_target: null, symlink_target_hex: "61ff" });
+    expect(
+      capture.files_after.find(({ path }) => path === "root_0:link"),
+    ).toMatchObject({ symlink_target: null, symlink_target_hex: "61fe" });
+    expect(
+      capture.filesystem_effects.find(({ path }) => path === "root_0:link")
+        ?.status,
+    ).toBe("modified");
+  },
 );

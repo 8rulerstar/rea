@@ -34,28 +34,6 @@ export interface ProcessCliErrorOutput extends AnalysisErrorProjection {
   readonly error: "Process command failed";
 }
 
-/** Identify the process workflow's typed diagnostic result for CLI exit status. */
-export const isProcessCliFailure = (
-  value: unknown,
-): value is ProcessCliErrorOutput =>
-  typeof value === "object" &&
-  value !== null &&
-  "error" in value &&
-  value.error === "Process command failed" &&
-  "category" in value &&
-  typeof value.category === "string" &&
-  "message" in value &&
-  typeof value.message === "string" &&
-  "code" in value &&
-  typeof value.code === "string" &&
-  "retryable" in value &&
-  typeof value.retryable === "boolean" &&
-  "remediation" in value &&
-  typeof value.remediation === "object" &&
-  value.remediation !== null &&
-  "action" in value.remediation &&
-  typeof value.remediation.action === "string";
-
 /** Capture one JSON scenario through the shared process harness and Evidence contract. */
 export const captureProcessScenarioFile = async (
   path: string,
@@ -224,7 +202,9 @@ const readJson = async (
     operation,
     loaded.error.reason === "invalid-json"
       ? `Process input file is not valid UTF-8 JSON: ${path} (${detail}). Repair the file, then try again.`
-      : `Process input file could not be read: ${path} (${detail}). Check the reported filesystem constraint and retry.`,
+      : loaded.error.reason === "symlink-traversal"
+        ? `Process input file could not be read: ${path} (${detail}). Repair the symbolic-link chain or select another file.`
+        : `Process input file could not be read: ${path} (${detail}). Check the reported filesystem constraint and retry.`,
     ["input_file"],
     "invalid_value",
   );

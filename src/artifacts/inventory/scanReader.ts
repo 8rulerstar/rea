@@ -12,6 +12,7 @@ import {
   normalizeArtifactPath,
 } from "../ArtifactPaths.js";
 import {
+  ArtifactEntryContentUnavailable,
   ArtifactReaderFailure,
   type ArtifactEntry,
   type ArtifactReader,
@@ -31,10 +32,7 @@ import {
   resolveOccurrenceParents,
   type MutableOccurrence,
 } from "./ArtifactGraphConstruction.js";
-import {
-  STRICT_INTEGRITY_POLICY,
-  type ArtifactIntegrityPolicy,
-} from "./types.js";
+import type { ArtifactIntegrityPolicyName } from "../../domain/artifactIntegrityPolicy.js";
 import { abortIfNeeded, hashReadable } from "../ArtifactHash.js";
 
 export interface PendingIntegrityContradiction {
@@ -43,9 +41,6 @@ export interface PendingIntegrityContradiction {
   readonly entryKind: "file" | "slice";
   readonly unpacked: boolean;
 }
-
-const UNAVAILABLE_UNPACKED_LIMITATION =
-  "ASAR unpacked companion bytes were unavailable; no content hash or child artifact was produced.";
 
 const emptyScan = (): {
   readonly nodes: Map<string, ArtifactNode>;
@@ -56,7 +51,7 @@ const emptyScan = (): {
 interface ScanContext {
   readonly reader: ArtifactReader;
   readonly signal: AbortSignal | undefined;
-  readonly integrity: ArtifactIntegrityPolicy;
+  readonly integrity: ArtifactIntegrityPolicyName;
   readonly asarHeaderAdmission: AsarHeaderAdmission | undefined;
   readonly nodes: Map<string, ArtifactNode>;
   readonly occurrences: MutableOccurrence[];
@@ -72,7 +67,7 @@ export const scanReader = async (
   reader: ArtifactReader | undefined,
   ownedReaders: ArtifactReader[],
   signal?: AbortSignal,
-  integrity: ArtifactIntegrityPolicy = STRICT_INTEGRITY_POLICY,
+  integrity: ArtifactIntegrityPolicyName = "fail",
   asarHeaderAdmission?: AsarHeaderAdmission,
 ): Promise<{
   readonly nodes: Map<string, ArtifactNode>;
@@ -182,10 +177,13 @@ const visitArtifactEntries = async (
           : `${frame.prefix}/${entry.path}`,
       );
       const expandableAsar = isExpandableAsar(entry, logicalPath);
-      // PyInstaller TOC rows are source-distinct even when their logical
+      // PyInstaller rows and Bun modules are source-distinct even when their logical
       // destinations collide. Inventory retains those observations; the
       // extraction path registry remains the authority for materialization.
-      if (frame.reader.format !== "pyinstaller")
+      if (
+        frame.reader.format !== "pyinstaller" &&
+        frame.reader.format !== "bun-standalone"
+      )
         context.registry.add(
           logicalPath,
           expandableAsar ? "directory" : entry.kind,
@@ -197,7 +195,7 @@ const visitArtifactEntries = async (
         entry,
         logicalPath,
         entry.kind === "metadata" ? frame.containerId : null,
-        duplicateOrdinal,
+        { duplicateOrdinal, sourceFormat: frame.reader.format },
       );
       let digested:
         | {
@@ -215,15 +213,21 @@ const visitArtifactEntries = async (
           occurrence,
         );
       } catch (cause: unknown) {
-        let limitation = UNAVAILABLE_UNPACKED_LIMITATION;
-        if (cause instanceof DirectoryArtifactEntryAccessDenied) {
-          abortIfNeeded(context.signal);
-          limitation = cause.message;
-          context.traversal.onCoverage({
-            status: "unknown",
-            limitations: [limitation],
-          });
-        } else if (!isUnavailableUnpackedEntry(cause, entry)) throw cause;
+        if (
+          !(cause instanceof DirectoryArtifactEntryAccessDenied) &&
+          !(cause instanceof ArtifactEntryContentUnavailable)
+        )
+          throw cause;
+        abortIfNeeded(context.signal);
+        const limitation =
+          cause instanceof ArtifactEntryContentUnavailable
+            ? cause.limitation
+            : cause.message;
+        const traversal =
+          cause instanceof ArtifactEntryContentUnavailable
+            ? cause.traversal
+            : { status: "unknown" as const, limitations: [limitation] };
+        if (traversal !== undefined) context.traversal.onCoverage(traversal);
         occurrence.hash_status = "unavailable";
         occurrence.limitations.push(limitation);
       }
@@ -231,8 +235,15 @@ const visitArtifactEntries = async (
       else {
         context.nodes.set(digested.node.artifact_id, digested.node);
         occurrence.artifact_id = digested.node.artifact_id;
-        occurrence.artifact_kind = digested.classification.kind;
-        occurrence.artifact_format = digested.classification.format;
+        const seaMainScript =
+          entry.formatMetadata?.kind === "node-sea-entry" &&
+          entry.formatMetadata.role === "main-script";
+        occurrence.artifact_kind = seaMainScript
+          ? "javascript"
+          : digested.classification.kind;
+        occurrence.artifact_format = seaMainScript
+          ? "javascript-bundle"
+          : digested.classification.format;
         occurrence.hash_status = digested.mismatched
           ? "mismatched"
           : "verified";
@@ -320,7 +331,7 @@ const digestArtifactEntry = async (
     );
   const mismatched = claim !== null && claim.digest !== observed;
   if (mismatched && claim !== null && observed !== undefined) {
-    if (context.integrity.mode === "fail")
+    if (context.integrity === "fail")
       throw new ArtifactReaderFailure(
         "integrity",
         `Artifact integrity metadata disagrees with content: ${logicalPath}`,
@@ -358,11 +369,3 @@ const isExpandableAsar = (entry: ArtifactEntry, logicalPath: string): boolean =>
   entry.kind === "file" &&
   logicalPath.toLowerCase().endsWith(".asar") &&
   isAbsolute(entry.adapterKey);
-
-const isUnavailableUnpackedEntry = (
-  cause: unknown,
-  entry: ArtifactEntry,
-): boolean =>
-  entry.unpacked &&
-  cause instanceof ArtifactReaderFailure &&
-  cause.reason === "unavailable";

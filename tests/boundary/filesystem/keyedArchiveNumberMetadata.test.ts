@@ -13,7 +13,7 @@ import {
   expectKeyedArchiveNumberMetadata,
   keyedArchiveNumberMetadataFixture,
 } from "../../fixtures/keyedArchiveNumberMetadata.js";
-import { cliTest } from "../../support/cli/cliFixture.js";
+import { cliTest, runFileCli } from "../../support/cli/cliFixture.js";
 
 it("preserves 16-byte binary integers and adjacent 64-bit integer metadata", async () => {
   const fixture = await keyedArchiveWideIntegerFixture();
@@ -110,7 +110,7 @@ it("keeps exact integers when two object-table entries share one record", async 
   expect(result.limitations).not.toContainEqual(
     expect.stringMatching(/metadata could not be completely observed/u),
   );
-  expect(await readFile(fixture.path)).toEqual(fixture.bytes);
+  expect(Buffer.compare(await readFile(fixture.path), fixture.bytes)).toBe(0);
 });
 
 cliTest(
@@ -146,7 +146,7 @@ cliTest.for(archiveNumberMetadataCases)(
   "built CLI preserves numeric meaning for $name",
   async (item, { cli }) => {
     const fixture = await keyedArchiveNumberMetadataFixture(item);
-    const output = await cli.run({
+    const output = await runFileCli(cli, {
       arguments: ["inspect-keyed-archive", fixture.path, "--json"],
       environment: { REA_LOG_LEVEL: "silent", REA_ANALYSIS_PROVIDER: "auto" },
     });

@@ -46,7 +46,10 @@ Use comparisons with complete, compatible page sets when claiming equivalence
 or absence:
 
 - `compare_artifacts` compares inventory pages by occurrence path, content,
-  metadata, and graph relations.
+  metadata, and graph relations. Name each side as
+  `{kind: "retained-evidence", evidence_id}` (an `inspect_artifact` result,
+  its nested inventory or its summary) or
+  `{kind: "evidence-file", path, evidence_id?}` instead of resending Evidence.
 - `compare_functions` compares explicit function Evidence, not fuzzy
   whole-binary matches. It rejects an `analyze_function` summary reply; pass
   the summary's `parent_evidence_id` as a `retained-evidence` reference or
@@ -106,6 +109,13 @@ each plan states why in its `reason`. It replays the capture instead with
 `--replay-only` or when the state is unavailable (not derivable, or a catalog
 over the discovery budget), and its stopped document's `state` says which
 applied.
+Use `view: {kind: "environment-coverage"}` with the same rules to see what an
+environment built from a capture would serve: read tools answered from the
+state or replayed with their reason, and each write tool served or withheld
+with a hint about what to record next; it does not apply the serve-time
+catalog and state size checks. `rea environment-build <capture.har> <dir>`
+inspects, projects and exports in one step and prints the same coverage, or
+`null` when the bundle serves replay.
 
 For a PE/ELF export question, `inspect_native_exports` accepts `detail: "summary"`
 and retains the complete table. Query `inspect_analysis_view` with

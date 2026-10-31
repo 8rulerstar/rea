@@ -1,3 +1,4 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { localPathStringSchema } from "../domain/localPath.js";
 import { compareWasmInterfaces } from "../application/wasm/WasmInterfaceComparisonService.js";
 import { parseCliJsonInput } from "../cliJsonInput.js";
@@ -10,7 +11,7 @@ import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { withCommandCancellation } from "./commandCancellation.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
-import { finishAnalysisCommand } from "./finishAnalysisCommand.js";
+import { finishCliEvidenceCommand } from "./cliEvidenceCallerPath.js";
 import {
   inspectWasmArtifactInputSchema,
   wasmArtifactPathsSchema,
@@ -38,6 +39,7 @@ export const registerWasmCommands = (
           const input = await parseCliJsonInput(
             args.input,
             "compare_wasm_interfaces",
+            signal,
           );
           if (!input.ok) return input.error;
           const result = await compareWasmInterfaces(input.value, { signal });
@@ -63,7 +65,8 @@ export const registerWasmCommands = (
     run: ({ args, options }) =>
       withCommandCancellation((signal) =>
         logCliCommand(logger, wasmArtifactModule.cliCommand, () =>
-          finishAnalysisCommand(
+          finishCliEvidenceCommand(
+            args.path,
             () =>
               service.inspect(
                 {
@@ -84,7 +87,7 @@ export const registerWasmCommands = (
             "wabt-artifact",
             "inspect_wasm_artifact",
             signal,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
       ),
   });

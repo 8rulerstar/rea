@@ -71,6 +71,19 @@ selected byte SHA-256 and size, section payload ranges, full header/detail outpu
 and its UTF-8 SHA-256. Producer format drift and invalid or truncated modules
 are failures, with validation diagnostics and partial Evidence retaining
 selected byte identity and tool provenance.
+If inspection stops after selected files were read, partial Evidence also keeps
+the completed candidate file identities and glue parse observations. A stable
+read remains observed when descriptor finalization later fails; cleanup still
+requires retry. Partial Evidence for a glue read whose finalization fails
+before decoding retains its digest with `not-performed` parse status. Invalid
+UTF-8 retains the digest with failed parse status. Neither case invents
+references, and a failed file read contributes no invented facts.
+These independent observations do not establish that the selected WASM module is
+valid: partial results state whether WABT validation is unknown, rejected the
+module, or succeeded before a later inspection failure.
+CLI errors include this partial Evidence inline. MCP errors can return its
+`retained-evidence` reference in `details.partial_observation`; use
+`get_evidence_bundle` with `detail: "complete"` to retrieve the matching record.
 
 Core validation remains authoritative when an optional custom section cannot
 be interpreted. WABT warning output is preserved in `custom_section_warnings`;
@@ -80,8 +93,10 @@ whose section attribution is unknown prevent a complete debug-name claim, even
 when module names were decoded. They do not establish that the name section is
 malformed. Exact warnings retain their producing tool and text. Older portable
 reports retain their original strict command profile; missing metadata coverage
-is `unknown` and missing warning history is `null`. The raw custom section
-remains in the decoded WAT. An uninterpretable name section leaves complete
+is `unknown` and missing warning history is `null`. Decoded WAT retains readable
+custom sections; WABT omits a section whose name is invalid UTF-8. In that case
+REA verifies the selected bytes, retains the section range and exact producer
+diagnostic, and leaves its identity and debug-name coverage unknown. An uninterpretable name section leaves complete
 debug-name coverage unknown. Module names decoded before a later metadata
 failure remain available for exact objdump framing, including names containing
 newlines or NUL; those partial observations do not establish complete optional
@@ -101,6 +116,12 @@ commands, file checks, cleanup and delivery. A provider timeout reports the
 actual selected deadline and these recovery controls; increasing only the client
 deadline does not change the provider budget. No server restart is required to
 change this per-call setting. Resolve incomplete cleanup before another attempt.
+
+To change the default across new MCP operations, set `wasm.command_timeout_ms`
+through `update_analysis_settings`. An explicit `command_timeout_ms` still wins;
+correct that argument if it caused the timeout. Runtime defaults do not insert
+omitted arguments into Evidence parameters. See the
+[settings design](design/limits-and-recovery.md#precedence-and-lifetime).
 
 For example, `rea inspect-wasm-artifact /artifacts/module.wasm
 --command-timeout-ms 60000 --format json` uses a 60-second per-command deadline;

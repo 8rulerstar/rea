@@ -11,7 +11,7 @@ import { androidPartialObservationSchema } from "../../../src/domain/android/and
 import { parseEvidence } from "../../../src/domain/evidence.js";
 import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { createServer } from "../../../src/server/createServer.js";
-import { ToolResultDelivery } from "../../../src/server/toolResult.js";
+import { createToolResultDelivery } from "../../../src/server/toolResult.js";
 import { startMcpTransport } from "../../../src/main/transport.js";
 import type { RuntimeDependencies } from "../../../src/main/types.js";
 import type { AndroidAnalysisPort } from "../../../src/application/android/AndroidAnalysisPort.js";
@@ -83,7 +83,7 @@ it("keeps a replacement server usable after the SDK discards its discovery probe
     logger: silentLogger,
     serverLogger: silentLogger,
     environment: runtime.env,
-    delivery: new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE),
+    delivery: createToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE),
     loadOptionalProviders: async () => ({}),
   });
   if (!transport.ok) throw new Error("Transport failed");
@@ -154,6 +154,10 @@ it("publishes and executes all APK contracts with inline Evidence and no active 
     });
     const input = {
       path: apk,
+      // Inline Evidence opts out of any contract's summary delivery default.
+      ...(Object.hasOwn(contract.inputSchema.shape, "detail")
+        ? { detail: "complete" }
+        : {}),
       ...(contract.name === "search_android_classes"
         ? { query: "Target" }
         : {}),

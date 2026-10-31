@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
+import { INLINE_EVIDENCE_MCP_ENVIRONMENT } from "../../../scripts/lib/mcp-verification-environment.mjs";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -47,7 +49,11 @@ const mcpTransport = new StdioClientTransport({
   command: process.execPath,
   args: [resolve("scripts/rea.mjs"), "mcp"],
   cwd: process.cwd(),
-  env: { PATH: process.env.PATH ?? "", REA_LOG_LEVEL: "silent" },
+  env: {
+    PATH: process.env.PATH ?? "",
+    REA_LOG_LEVEL: "silent",
+    ...INLINE_EVIDENCE_MCP_ENVIRONMENT,
+  },
   stderr: "pipe",
 });
 mcpTransport.stderr?.on("data", () => undefined);
@@ -74,15 +80,6 @@ afterAll(async () => {
 });
 const WEBPACK_FACTORY_BODY = `
   const key = "dynamic";
-  const __webpack_require__ = {
-    d(target, definitions) {
-      for (const name of Object.keys(definitions))
-        Object.defineProperty(target, name, {
-          enumerable: true,
-          get: definitions[name],
-        });
-    },
-  };
   exports[key] = 1;
   exports["dot.key"] = 2;
   exports[""] = 3;
@@ -1106,14 +1103,28 @@ describe("Webpack factory CommonJS export keys", () => {
     }]);`;
     await writeFile(join(root, "bundle.js"), bundle);
 
-    // Execute the same factory body as CommonJS, outside the analyzer, to
-    // verify Node's alias behavior and the exact runtime object keys.
+    // Execute the exact bundle and invoke its registered factory with a loader.
+    // This also rejects invalid factory syntax before trusting the export oracle.
+    const actual = runInNewContext(`
+      globalThis.webpackChunkStaticExports = [];
+      ${bundle}
+      const module = { exports: {} };
+      const loader = {
+        d(target, definitions) {
+          for (const name of Object.keys(definitions))
+            Object.defineProperty(target, name, {
+              enumerable: true,
+              get: definitions[name],
+            });
+        },
+      };
+      const [, factories] = globalThis.webpackChunkStaticExports[0];
+      factories[1](module, module.exports, loader);
+      module.exports;
+    `) as Record<string, unknown>;
     const oracleRoot = await createTestTempDirectory(
       "rea-webpack-export-oracle-",
     );
-    const oraclePath = join(oracleRoot, "oracle.cjs");
-    await writeFile(oraclePath, WEBPACK_FACTORY_BODY);
-    const actual = requireFixture(oraclePath) as Record<string, unknown>;
     expect(Reflect.ownKeys(actual).sort()).toEqual([
       "",
       "dot.key",
