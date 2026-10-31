@@ -26,7 +26,7 @@ import {
   AnalysisResourceConstraintError,
   AnalysisUnsupportedTargetError,
 } from "../domain/analysisErrorCore.js";
-import { createEvidence } from "../domain/evidence.js";
+import { createEvidence, type Evidence } from "../domain/evidence.js";
 import { unityAddressablesCatalogEvidence } from "../domain/unity/unityAddressablesEvidence.js";
 import { fixedAllowanceOptions } from "../domain/fixedAllowanceRemediation.js";
 import { jsonValueByteLength } from "../domain/jsonValueByteLength.js";
@@ -57,13 +57,20 @@ const HASH_BYTES = 4096;
 const OUTPUT_BYTES = 64 * 1024 * 1024;
 
 type Artifact = UnityAddressables["artifact"];
+type HashFile = NonNullable<UnityAddressables["hash_file"]>;
 type Field = "path" | "hash_path";
+/** Decoded catalog report without a hash file, with its exact encoded size. */
+interface FittedCatalog {
+  readonly report: UnityAddressables;
+  readonly bytes: number;
+}
 interface Observed {
   artifact?: Artifact;
   counts?: UnityAddressablesRowCounts;
-  hash?: Artifact;
-  /** Admitted, fully decoded catalog; only a hash read failure returns it. */
-  decoded?: UnityAddressables;
+  /** Completed catalog.hash read, kept when its cleanup or a later step fails. */
+  hashFile?: HashFile;
+  /** Decoded catalog within the report budget; every later failure returns it. */
+  catalog?: FittedCatalog;
 }
 
 interface FailureSite {
@@ -255,6 +262,22 @@ const reportLimit = (path: string, maximumBytes: number) =>
     { retryable: false, remediationAction: completeReportRecovery },
   );
 
+const hashReportRecovery =
+  "The Unity Addressables complete-report allowance is a fixed report allowance. The decoded catalog stays with this refusal as catalog Evidence without the selected hash file, and complete CLI JSON does not raise the allowance. Repeating the unchanged request fails the same way.";
+
+const hashReportLimit = (
+  path: string,
+  hashPath: string,
+  maximumBytes: number,
+) =>
+  new AnalysisResourceConstraintError(
+    OPERATION,
+    "memory",
+    `The Addressables catalog report for ${path} exceeds the retained report budget with the selected hash file ${hashPath}; the decoded catalog is retained without it.`,
+    { maximum_report_bytes: maximumBytes },
+    { retryable: false, remediationAction: hashReportRecovery },
+  );
+
 const sourceArtifact = (
   path: string,
   snapshot: StableArtifactSnapshot,
@@ -351,6 +374,87 @@ const catalogLimitations = (
       ]),
 ];
 
+const hashFileFrom = (
+  path: string,
+  snapshot: StableArtifactSnapshot,
+): HashFile => ({
+  artifact: sourceArtifact(path, snapshot),
+  text: hashText(snapshot.bytes),
+});
+
+/** Measure and check the decoded catalog once; a later failure keeps it only when it fits. */
+const fitCatalog = (
+  path: string,
+  candidate: UnityAddressables,
+  limit: number,
+): Result<FittedCatalog, AnalysisError> => {
+  const bytes = jsonValueByteLength(candidate, limit);
+  if (bytes > limit) return err(reportLimit(path, limit));
+  const parsed = unityAddressablesSchema.safeParse(candidate);
+  if (!parsed.success)
+    return err(
+      new AnalysisOutputError(
+        OPERATION,
+        "Unity Addressables catalog reader produced inconsistent key or location indices.",
+        { cause: parsed.error },
+      ),
+    );
+  return ok({ report: parsed.data, bytes });
+};
+
+/** The catalog report with its hash file, or undefined when together they exceed the budget. */
+const withHashFile = (
+  catalog: FittedCatalog,
+  hashFile: HashFile,
+  limit: number,
+): UnityAddressables | undefined => {
+  const limitations = catalogLimitations(catalog.report.format, true);
+  // Only these two members differ from the measured catalog report.
+  const growth =
+    jsonValueByteLength({ hash_file: hashFile, limitations }) -
+    jsonValueByteLength({
+      hash_file: null,
+      limitations: catalog.report.limitations,
+    });
+  return catalog.bytes + growth > limit
+    ? undefined
+    : { ...catalog.report, hash_file: hashFile, limitations };
+};
+
+/** What a failed inspection keeps: the fitted catalog with every completed hash fact, else source identity. */
+const partialEvidence = (
+  input: UnityAddressablesProviderInput,
+  observed: Observed,
+  limit: number,
+): Evidence | undefined => {
+  const { artifact, catalog, hashFile } = observed;
+  const hashPath = input.hash_path;
+  if (artifact === undefined) return undefined;
+  if (catalog === undefined)
+    return catalogSourceEvidence(
+      artifact,
+      observed.counts,
+      hashPath === undefined
+        ? undefined
+        : {
+            path: hashPath,
+            ...(hashFile === undefined ? {} : { artifact: hashFile.artifact }),
+          },
+    );
+  const provider = UNITY_ADDRESSABLES_PROVIDER_IDENTITY;
+  if (hashPath === undefined)
+    return unityAddressablesCatalogEvidence(catalog.report, provider, input);
+  const complete =
+    hashFile === undefined ? undefined : withHashFile(catalog, hashFile, limit);
+  if (complete !== undefined)
+    return unityAddressablesCatalogEvidence(complete, provider, input);
+  return unityAddressablesCatalogEvidence(catalog.report, provider, input, [
+    hashFile === undefined
+      ? `The selected hash file ${hashPath} was not returned; this Evidence covers the decoded catalog only.`
+      : `The selected hash file ${hashPath} (sha256 ${hashFile.artifact.sha256}, ${hashFile.artifact.bytes} bytes) was read, but the report with it exceeds the report budget; this Evidence covers the decoded catalog only.`,
+  ]);
+};
+
 /** Stable in-process decoding without subprocesses, temporary files, network access or bundle reads. */
 export class UnityAddressablesProvider implements UnityAddressablesPort {
   readonly identity = UNITY_ADDRESSABLES_PROVIDER_IDENTITY;
@@ -418,21 +522,14 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
     if (refused !== undefined) return err(refused);
     this.#inspecting = true;
     const observed: Observed = {};
-    const selectedHash = () =>
-      input.hash_path === undefined
-        ? undefined
-        : {
-            path: input.hash_path,
-            ...(observed.hash === undefined ? {} : { artifact: observed.hash }),
-          };
     try {
       return await this.#resources.run(async () => {
         const snapshot = await this.#readArtifact(
           input.path,
           INPUT_BYTES,
           options?.signal,
-          (artifact) => {
-            observed.artifact = artifact;
+          (completed) => {
+            observed.artifact = sourceArtifact(input.path, completed);
           },
         );
         const artifact = sourceArtifact(input.path, snapshot);
@@ -455,114 +552,84 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
           step = steps.next();
         }
         const decoded = step.value;
-        // Keep the rows for a later hash failure only once they fit the report budget.
-        const catalogOnly = unityAddressablesSchema.safeParse({
-          ...decoded,
-          artifact,
-          hash_file: null,
-          limitations: catalogLimitations(decoded.format, false),
-        });
-        if (
-          catalogOnly.success &&
-          jsonValueByteLength(catalogOnly.data, limit) <= limit
-        )
-          observed.decoded = catalogOnly.data;
+        const fitted = fitCatalog(
+          input.path,
+          {
+            ...decoded,
+            artifact,
+            hash_file: null,
+            limitations: catalogLimitations(decoded.format, false),
+          },
+          limit,
+        );
+        if (fitted.ok) observed.catalog = fitted.value;
         const hashFile = await this.#readHashFile(
           input,
-          artifact,
           observed,
           options?.signal,
         );
         if (hashFile !== null && "error" in hashFile)
           return err(hashFile.error);
-        const report = {
-          ...decoded,
-          artifact,
-          hash_file: hashFile,
-          limitations: catalogLimitations(decoded.format, hashFile !== null),
-        };
-        if (jsonValueByteLength(report, limit) > limit)
-          throw reportLimit(input.path, limit);
-        const parsed = unityAddressablesSchema.safeParse(report);
-        if (!parsed.success)
-          throw new AnalysisOutputError(
-            OPERATION,
-            "Unity Addressables catalog reader produced inconsistent key or location indices.",
-            { cause: parsed.error },
-          );
+        if (!fitted.ok) throw fitted.error;
+        let report = fitted.value.report;
+        if (hashFile !== null) {
+          const complete = withHashFile(fitted.value, hashFile, limit);
+          if (complete === undefined)
+            throw hashReportLimit(input.path, hashFile.artifact.path, limit);
+          report = complete;
+        }
         assertArtifactReadActive(options?.signal);
-        return ok(parsed.data);
+        return ok(report);
       });
     } catch (cause: unknown) {
       const failure = failureFor(cause, input.path, options?.signal);
-      if (observed.artifact !== undefined)
-        failure.partialObservation = catalogSourceEvidence(
-          observed.artifact,
-          observed.counts,
-          selectedHash(),
-        );
+      const partial = partialEvidence(input, observed, this.outputBytes);
+      if (partial !== undefined) failure.partialObservation = partial;
       return err(failure);
     } finally {
       this.#inspecting = false;
     }
   }
 
-  /** Optional catalog.hash: a failure keeps the catalog identity it already observed. */
+  /** Optional catalog.hash: a failure keeps every fact the inspection already completed. */
   async #readHashFile(
     input: UnityAddressablesProviderInput,
-    artifact: Artifact,
     observed: Observed,
     signal: AbortSignal | undefined,
-  ): Promise<UnityAddressables["hash_file"] | { error: AnalysisError }> {
-    if (input.hash_path === undefined) return null;
+  ): Promise<HashFile | null | { error: AnalysisError }> {
+    const hashPath = input.hash_path;
+    if (hashPath === undefined) return null;
     try {
-      const hash = await this.#readArtifact(
-        input.hash_path,
+      const snapshot = await this.#readArtifact(
+        hashPath,
         HASH_BYTES,
         signal,
-        (value) => {
-          observed.hash = value;
+        (completed) => {
+          observed.hashFile = hashFileFrom(hashPath, completed);
         },
       );
       assertArtifactReadActive(signal);
-      return {
-        artifact: sourceArtifact(input.hash_path, hash),
-        text: hashText(hash.bytes),
-      };
+      return hashFileFrom(hashPath, snapshot);
     } catch (cause: unknown) {
       const error = failureFor(
         cause,
-        input.hash_path,
+        hashPath,
         signal,
         "hash_path",
         HASH_BYTES,
       );
-      error.partialObservation =
-        observed.decoded === undefined
-          ? catalogSourceEvidence(artifact, observed.counts, {
-              path: input.hash_path,
-              ...(observed.hash === undefined
-                ? {}
-                : { artifact: observed.hash }),
-            })
-          : unityAddressablesCatalogEvidence(
-              observed.decoded,
-              UNITY_ADDRESSABLES_PROVIDER_IDENTITY,
-              { path: input.path },
-              [
-                `The selected hash file ${input.hash_path} was not returned; this Evidence covers the decoded catalog only.`,
-              ],
-            );
+      const partial = partialEvidence(input, observed, this.outputBytes);
+      if (partial !== undefined) error.partialObservation = partial;
       return { error };
     }
   }
 
-  /** Report the identity of every completed read, including one whose cleanup then failed. */
+  /** Report every completed read, including one whose cleanup then failed. */
   async #readArtifact(
     path: string,
     maximum: number,
     signal: AbortSignal | undefined,
-    observe: (artifact: Artifact) => void,
+    observe: (snapshot: StableArtifactSnapshot) => void,
   ): Promise<StableArtifactSnapshot> {
     const snapshot = await readStableArtifact(
       path,
@@ -572,10 +639,10 @@ export class UnityAddressablesProvider implements UnityAddressablesPort {
       this.#resources,
     ).catch((cause: unknown) => {
       const completed = completedStableArtifact(cause);
-      if (completed !== undefined) observe(sourceArtifact(path, completed));
+      if (completed !== undefined) observe(completed);
       throw cause;
     });
-    observe(sourceArtifact(path, snapshot));
+    observe(snapshot);
     return snapshot;
   }
 }

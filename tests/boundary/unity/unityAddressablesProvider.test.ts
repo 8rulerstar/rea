@@ -10,6 +10,7 @@ import {
   AnalysisResourceConstraintError,
   AnalysisUnsupportedTargetError,
 } from "../../../src/domain/analysisErrorCore.js";
+import { parseEvidence } from "../../../src/domain/evidence.js";
 import { UnityAddressablesProvider } from "../../../src/unity/UnityAddressablesProvider.js";
 import {
   binaryCatalog,
@@ -112,6 +113,36 @@ it("keeps the decoded catalog as catalog Evidence on a missing hash file", async
     "their rows were not all decoded",
   );
   expect(partial.limitations.join(" ")).toContain("missing.hash");
+});
+
+it("keeps the decoded catalog when only the selected hash file exceeds the report budget", async () => {
+  const path = await write("catalog.json", jsonCatalog());
+  const catalogOnly = await inspect({ path });
+  if (!catalogOnly.ok) throw catalogOnly.error;
+  const hashPath = join(path, "..", "catalog.hash");
+  const hash = "f".repeat(2000);
+  await writeFile(hashPath, hash);
+  // The catalog report fits; its hash text and limitation do not.
+  const limit = Buffer.byteLength(JSON.stringify(catalogOnly.value)) + 100;
+  const result = await inspect({ path, hash_path: hashPath }, limit);
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error).toBeInstanceOf(AnalysisResourceConstraintError);
+  expect(result.error.message).toContain("retained without it");
+  const partial = parseEvidence(result.error.partialObservation);
+  expect(partial).toMatchObject({
+    operation: "inspect_unity_addressables",
+    parameters: { path, hash_path: hashPath },
+    normalized_result: {
+      hash_file: null,
+      keys: catalogOnly.value.keys,
+      locations: catalogOnly.value.locations,
+    },
+  });
+  const sha256 = createHash("sha256").update(hash).digest("hex");
+  expect(partial.limitations.join(" ")).toContain(
+    `${hashPath} (sha256 ${sha256}, 2000 bytes) was read`,
+  );
 });
 
 it("keeps only bounded source facts when the decoded catalog exceeds the report budget", async () => {
